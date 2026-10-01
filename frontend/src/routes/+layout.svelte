@@ -4,14 +4,21 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
+  import { installFlareBrowserCapture } from '$lib/flare-client';
   import { session, loadSession } from '$lib/session.svelte';
   import { theme, initTheme, toggleTheme } from '$lib/theme.svelte';
 
   let { children } = $props();
 
   onMount(() => {
+    const stopFlareCapture = installFlareBrowserCapture({
+      dsn: import.meta.env.PUBLIC_FLARE_DSN,
+      environment: import.meta.env.PUBLIC_FLARE_ENVIRONMENT || 'production',
+      release: import.meta.env.PUBLIC_FLARE_RELEASE
+    });
     initTheme();
     loadSession();
+    return stopFlareCapture;
   });
 
   async function logout() {

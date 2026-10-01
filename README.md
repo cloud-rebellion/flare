@@ -22,6 +22,15 @@ pluggable `Store` interface.
   throughout and enforced by a source-parsing CI guard.
 - **MCP**: an agent API so an assistant can read and triage issues.
 
+For endpoint setup, health semantics, provider-specific signals, and known
+monitoring limits, see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+
+Copyable integration starters live under [`examples/flutter`](examples/flutter/)
+and [`examples/backend`](examples/backend/). They cover Flutter runtime,
+framework, async, native, and handled errors, backend Sentry or OTLP/HTTP
+export, request correlation, scrubbing, and scheduled-job check-ins. They do
+not modify another application's dependencies or deploy telemetry for it.
+
 The hosted, multi-tenant control plane (auto-wiring DSNs across a fleet) is the
 commercial overlay and is not in this repo. See [LICENSING.md](LICENSING.md).
 

@@ -24,6 +24,33 @@ Sentry.captureException(new Error('payment gateway timeout'));`;
 OTEL_EXPORTER_OTLP_ENDPOINT=https://your-flare-host/otlp
 OTEL_EXPORTER_OTLP_HEADERS=x-flare-key=<key>`;
 
+  const flutterSnippet = `import 'package:sentry_flutter/sentry_flutter.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SentryFlutter.init((options) {
+    options.dsn = const String.fromEnvironment('FLARE_SENTRY_DSN');
+    options.environment = const String.fromEnvironment('FLARE_ENV', defaultValue: 'production');
+    options.release = const String.fromEnvironment('FLARE_RELEASE');
+    options.sendDefaultPii = false;
+    options.tracesSampleRate = 0.1;
+  }, appRunner: () => runApp(const MyApp()));
+}`;
+
+  const frontendSnippet = `# Optional Flare dashboard browser capture (build-time)
+PUBLIC_FLARE_DSN=https://<public-key>@your-flare-host/<project-id>
+PUBLIC_FLARE_ENVIRONMENT=production
+PUBLIC_FLARE_RELEASE=flare-web@<git-sha>
+
+# Compile and template checks still run in CI:
+bun run check
+bun run build`;
+
+  const checkinSnippet = `# Keep a scheduled backend job's silence distinguishable from success
+FLARE_CHECKIN_URL='https://your-flare-host/api/<project-id>/checkins/nightly?sentry_key=<key>'
+curl --fail --connect-timeout 5 --max-time 20 "$FLARE_CHECKIN_URL"
+# Add ?status=error on a failed run.`;
+
   const sourcemapSnippet = `# In CI, after your build, upload each .map for the release:
 curl -X POST "https://your-flare-host/api/<project-id>/artifacts" \\
   -H "Authorization: Bearer $FLARE_API_KEY" \\
@@ -41,8 +68,8 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
 <article class="prose-flare max-w-none">
   <h1 class="text-2xl font-semibold tracking-tight">Flare docs</h1>
   <p class="mt-2 text-sm leading-relaxed text-zinc-400">
-    Flare is sovereign, self-hostable observability: errors, logs and traces on one Postgres. Send data with any
-    Sentry SDK (change only the DSN) or over OpenTelemetry. Manage everything with an org API key.
+    Flare is sovereign, self-hostable observability: errors, logs, traces and metrics on one Postgres. Send data with any
+    Sentry SDK (change only the DSN) or over OpenTelemetry. Use the dashboard for interactive administration and scoped org API keys for automation.
   </p>
 
   <div class="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -66,14 +93,33 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
   <h3 class="mt-5 text-sm font-medium text-zinc-300">Or plain HTTP</h3>
   <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{curlSnippet}</pre>
 
-  <h3 class="mt-5 text-sm font-medium text-zinc-300">Logs & traces over OpenTelemetry</h3>
+  <h3 class="mt-5 text-sm font-medium text-zinc-300">Logs, traces & metrics over OpenTelemetry</h3>
   <p class="mt-1 text-sm text-zinc-500">Point any OTLP exporter at Flare; the OTLP endpoint is on your project page.</p>
   <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{otlpSnippet}</pre>
+
+  <h3 class="mt-5 text-sm font-medium text-zinc-300">Flutter apps</h3>
+  <p class="mt-1 text-sm text-zinc-500">
+    Add <code class="font-mono text-zinc-400">sentry_flutter</code> and pass the DSN with
+    <code class="font-mono text-zinc-400">--dart-define</code>. The SDK captures framework, async, native, and handled
+    errors while the app is running; keep PII disabled and scrub app-specific fields before sending.
+  </p>
+  <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{flutterSnippet}</pre>
+
+  <h3 class="mt-5 text-sm font-medium text-zinc-300">Frontend runtime and syntax checks</h3>
+  <p class="mt-1 text-sm text-zinc-500">
+    The Flare dashboard has an optional bounded browser bridge for runtime errors and unhandled promise rejections.
+    Build-time type and template syntax checks remain separate from runtime capture.
+  </p>
+  <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{frontendSnippet}</pre>
+
+  <h3 class="mt-5 text-sm font-medium text-zinc-300">Scheduled workers</h3>
+  <p class="mt-1 text-sm text-zinc-500">Use a check-in for every job where a missing run should page. A 2xx acknowledges the check-in request, so verify monitor state during rollout.</p>
+  <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{checkinSnippet}</pre>
 
   <h2 id="sourcemaps" class="mt-10 scroll-mt-20 text-lg font-semibold tracking-tight">Readable stack traces (source maps)</h2>
   <p class="mt-1 text-sm text-zinc-400">
     Upload a <code class="font-mono text-zinc-400">.map</code> per release and minified frames resolve to your original
-    source, with context. Do it from CI with an API key (create one in Settings):
+    source, with context. Do it from CI with a <strong>member</strong> API key (create one in Settings; viewer keys are read-only):
   </p>
   <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{sourcemapSnippet}</pre>
 

@@ -1,0 +1,48 @@
+# Minimal OpenTelemetry Collector bridge to Flare.
+#
+# Set FLARE_PUBLIC_KEY in the collector process environment. The value is the
+# public key from the project DSN, not the complete DSN. Flare appends the
+# standard /v1/{logs,traces,metrics} paths to the /otlp endpoint.
+receivers:
+  otlp:
+    protocols:
+      http: {}
+
+processors:
+  batch:
+    send_batch_size: 256
+    timeout: 5s
+  # Keep the collector as the last redaction boundary before data leaves the
+  # application network. Add project-specific keys to this list; never rely on
+  # a backend SDK's defaults for credentials or personal data.
+  attributes/redact:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+      - key: user.email
+        action: delete
+      - key: enduser.id
+        action: delete
+
+exporters:
+  otlphttp/flare:
+    endpoint: https://flare.example.com/otlp
+    headers:
+      X-Flare-Key: ${env:FLARE_PUBLIC_KEY}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [attributes/redact, batch]
+      exporters: [otlphttp/flare]
+    logs:
+      receivers: [otlp]
+      processors: [attributes/redact, batch]
+      exporters: [otlphttp/flare]
+    metrics:
+      receivers: [otlp]
+      processors: [attributes/redact, batch]
+      exporters: [otlphttp/flare]
