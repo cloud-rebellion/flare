@@ -15,6 +15,15 @@ COPY frontend/package.json frontend/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 COPY frontend/ .
+# These values are deliberately limited to public dashboard metadata. The DSN
+# is an ingest-only credential; never pass member/API keys or provider secrets
+# as build arguments because Vite/SvelteKit embeds them in the browser bundle.
+ARG FLARE_DSN=""
+ARG FLARE_ENVIRONMENT=production
+ARG FLARE_RELEASE=development
+ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
+    PUBLIC_FLARE_ENVIRONMENT=${FLARE_ENVIRONMENT} \
+    PUBLIC_FLARE_RELEASE=${FLARE_RELEASE}
 RUN bun run build
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.

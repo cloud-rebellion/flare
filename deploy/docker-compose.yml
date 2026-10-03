@@ -13,6 +13,10 @@ services:
       context: ..
       dockerfile: Dockerfile
       args:
+        # Public browser self-monitoring metadata. Do not pass API keys or
+        # provider credentials here: build args are embedded in the bundle.
+        FLARE_DSN: "${FLARE_DSN:-}"
+        FLARE_ENVIRONMENT: "${FLARE_ENVIRONMENT:-production}"
         FLARE_RELEASE: "${FLARE_RELEASE:-development}"
     image: flare:latest
     container_name: flare
@@ -22,6 +26,9 @@ services:
       ENVIRONMENT: production
       PORT: "8080"
       BASE_URL: "${FLARE_BASE_URL:?set FLARE_BASE_URL in .env}"
+      # Must match the FLARE_RELEASE build arg above; the server rejects a
+      # release image when its runtime identity does not match the binary.
+      FLARE_RELEASE: "${FLARE_RELEASE:-development}"
       # Production refuses to boot without this. Fail here, at compose time,
       # with a readable message rather than in a container restart loop.
       FLARE_SECRET_KEY: "${FLARE_SECRET_KEY:?set FLARE_SECRET_KEY in .env (openssl rand -base64 32)}"
