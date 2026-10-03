@@ -29,6 +29,11 @@ Put a TLS terminator (Caddy, nginx, Traefik) in front for production and set
 
 ## Kubernetes (Helm)
 
+`flare/VERSION` is `v0.4.0`. Keep the chart's `image.tag` at that exact
+release value when upgrading. It is the chart's single release input: the
+deployment uses it for the immutable image tag and passes the same value as
+`FLARE_RELEASE`, so runtime telemetry can be tied to the deployed artifact.
+
 ```bash
 helm install flare ./deploy/helm/flare \
   --set baseURL=https://flare.example.com \

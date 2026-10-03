@@ -47,6 +47,7 @@ type healthQueue struct {
 
 type healthResponse struct {
 	Status    string                          `json:"status"`
+	Release   string                          `json:"release"`
 	DB        healthDB                        `json:"db"`
 	Analytics healthAnalytics                 `json:"analytics"`
 	Retention healthRetention                 `json:"retention"`
@@ -154,8 +155,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		"auto_triage": workerSnapshot(s.bgPool("auto-triage")),
 	}
 	resp := healthResponse{
-		Status: status,
-		DB:     db,
+		Status:  status,
+		Release: s.cfg.Release,
+		DB:      db,
 		Analytics: healthAnalytics{
 			Configured: analyticsConfigured,
 			Healthy:    analyticsOK,

@@ -13,8 +13,11 @@ import (
 
 type Config struct {
 	Environment string
-	Port        string
-	BaseURL     string
+	// Release is the immutable version stamped into the running binary. The
+	// server sets it after checking FLARE_RELEASE against that build identity.
+	Release string
+	Port    string
+	BaseURL string
 
 	DatabaseURL   string
 	DBMaxConns    int32

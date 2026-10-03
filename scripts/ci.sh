@@ -157,6 +157,31 @@ sqlc_check() {
   echo "internal/db/generated matches internal/db/queries and the migration schema"
 }
 
+# The runtime release identity must describe the same artifact as the image a
+# Helm install starts. Keep the single chart release input (image.tag) aligned
+# with flare/VERSION and Chart.yaml, and keep the deployment template wired to
+# pass that value through FLARE_RELEASE. Without this check a healthy pod can
+# report a stale release while its image tag points at a different build.
+helm_release_identity_check() {
+  local release
+  [ -f VERSION ] || { echo "VERSION is missing" >&2; return 1; }
+  release="$(tr -d '[:space:]' < VERSION)"
+  [ -n "$release" ] || { echo "VERSION is empty" >&2; return 1; }
+  grep -qF -- "appVersion: \"$release\"" deploy/helm/flare/Chart.yaml || {
+    echo "Helm Chart.yaml appVersion does not match VERSION ($release)" >&2
+    return 1
+  }
+  grep -qF -- "  tag: $release" deploy/helm/flare/values.yaml || {
+    echo "Helm values image.tag does not match VERSION ($release)" >&2
+    return 1
+  }
+  grep -qF -- 'value: {{ .Values.image.tag | quote }}' deploy/helm/flare/templates/deployment.yaml || {
+    echo "Helm deployment does not pass image.tag through FLARE_RELEASE" >&2
+    return 1
+  }
+  echo "Helm release identity is pinned to $release (image tag, appVersion, FLARE_RELEASE)"
+}
+
 # The dashboard is not a separate deliverable: cmd/server does //go:embed all:frontend/build,
 # so whatever bun produces is what the single binary serves. A frontend that does not
 # typecheck or does not build is a broken release even though every Go gate is green.
@@ -339,6 +364,7 @@ step "test (RUN, not just compile)"           go test ./... -count=1 -timeout=60
 step "gofmt"                                  fmt_check
 step "goose migrations"                       migrations_check
 step "sqlc generated code is current"         sqlc_check
+step "Helm release identity"                  helm_release_identity_check
 step "frontend deps (frozen lockfile)"        bun_step bun install --frozen-lockfile
 step "frontend typecheck (svelte-check)"      bun_step bun run check
 step "frontend build (what the binary embeds)" bun_step bun run build

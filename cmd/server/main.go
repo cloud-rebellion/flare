@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +55,13 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	// The chart passes its image tag as FLARE_RELEASE. Compare that declared
+	// artifact with the version baked into the executable; do not let a healthy
+	// pod advertise a release other than the code it is actually running.
+	cfg.Release, err = releaseIdentity(Version, os.Getenv("FLARE_RELEASE"))
+	if err != nil {
+		return err
 	}
 
 	level := slog.LevelInfo
@@ -210,4 +218,21 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
+}
+
+func releaseIdentity(compiled, declared string) (string, error) {
+	compiled = strings.TrimSpace(compiled)
+	declared = strings.TrimSpace(declared)
+	if compiled == "" {
+		compiled = "dev"
+	}
+	// Local and Compose development builds have no immutable release. A Helm
+	// release has a concrete tag and must use an image built with that tag.
+	if declared == "" || declared == "development" {
+		return compiled, nil
+	}
+	if compiled != declared {
+		return "", fmt.Errorf("FLARE_RELEASE %q does not match binary release %q", declared, compiled)
+	}
+	return compiled, nil
 }
