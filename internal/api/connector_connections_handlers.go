@@ -397,11 +397,18 @@ func (s *Server) handleCheckConnectorConnection(w http.ResponseWriter, r *http.R
 	if probeErr != nil && result.Outcome == "" {
 		result.Outcome, result.StatusClass, result.ErrorCode = integration.ClassifyError(probeErr)
 	}
+	receiptStatus := result.ReceiptStatus
+	if receiptStatus == "" {
+		// A test or third-party adapter that has not adopted RecordResult is
+		// never reported as durably accepted. Keep provider health and receipt
+		// durability as separate bounded outcomes.
+		receiptStatus = "unavailable"
+	}
 	s.audit(ctx, "connector.check", connectionID)
 	writeJSON(w, http.StatusOK, connectorCheckResponse{
 		Provider: row.Provider, Operation: adapter.Operation, Outcome: result.Outcome,
 		StatusClass: result.StatusClass, ErrorCode: result.ErrorCode,
-		ReceiptStatus:  result.ReceiptStatus,
+		ReceiptStatus:  receiptStatus,
 		QuotaRemaining: result.QuotaRemaining, RetryAfterMS: result.RetryAfterMS,
 	})
 }

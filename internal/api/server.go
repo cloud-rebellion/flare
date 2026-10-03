@@ -526,7 +526,10 @@ func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attem
 		metrics.RecordConnectorReceipt("complete", "error")
 		s.observeConnectorReceipt(false)
 		slog.Warn("record connector attempt", "provider", a.Provider, "operation", a.Operation, "error", err)
-		return err
+		// Do not let driver text, SQL fragments, or deployment details cross the
+		// connector boundary. Provider adapters reduce this to the fixed
+		// `unavailable` receipt status and keep their own result unchanged.
+		return errors.New("connector receipt persistence failed")
 	}
 	metrics.RecordConnectorReceipt("complete", "ok")
 	s.observeConnectorReceipt(true)
