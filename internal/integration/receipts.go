@@ -59,9 +59,30 @@ type Attempt struct {
 
 type Recorder func(context.Context, Attempt)
 
+// ResultRecorder is the persistence boundary for a connector receipt. The
+// callback receives only the canonical, payload-free Attempt and returns the
+// durable write error, if any. Provider adapters can use RecordResult when
+// they need to observe persistence failure without changing the provider
+// result they return to their caller.
+type ResultRecorder func(context.Context, Attempt) error
+
+var (
+	// ErrRecorderUnavailable means the process has no installed durable receipt
+	// recorder. It is intentionally distinct from provider errors: callers may
+	// retry the receipt boundary without retrying the provider request.
+	ErrRecorderUnavailable = errors.New("connector receipt recorder unavailable")
+	// ErrUnscopedAttempt means the attempt did not carry tenant provenance.
+	// Record keeps the historical drop behavior for compatibility, while
+	// RecordResult exposes the reason to callers that require durable evidence.
+	ErrUnscopedAttempt = errors.New("connector receipt requires an organization scope")
+	// ErrInvalidAttempt means a required fixed receipt field was absent.
+	ErrInvalidAttempt = errors.New("connector receipt is missing required fields")
+)
+
 var recorder struct {
 	sync.RWMutex
-	fn Recorder
+	fn       Recorder
+	resultFn ResultRecorder
 }
 
 // SetRecorder installs the process-local persistence hook. A nil recorder is
@@ -69,6 +90,18 @@ var recorder struct {
 func SetRecorder(fn Recorder) {
 	recorder.Lock()
 	recorder.fn = fn
+	recorder.resultFn = nil
+	recorder.Unlock()
+}
+
+// SetRecorderWithError installs a recorder that reports durable persistence
+// errors. It replaces the compatibility recorder installed by SetRecorder.
+// The returned error never contains provider response text or credentials;
+// the recorder owns the safe error classification at its storage boundary.
+func SetRecorderWithError(fn ResultRecorder) {
+	recorder.Lock()
+	recorder.fn = nil
+	recorder.resultFn = fn
 	recorder.Unlock()
 }
 
@@ -76,11 +109,23 @@ func SetRecorder(fn Recorder) {
 // an authenticated org scope are intentionally dropped; there is no safe
 // tenant to which they could be attributed.
 func Record(ctx context.Context, attempt Attempt) {
+	_ = RecordResult(ctx, attempt)
+}
+
+// RecordResult forwards a bounded receipt and reports whether the durable
+// recorder accepted it. It deliberately does not retry the provider call and
+// does not mutate Attempt based on the recorder's error. Callers that preserve
+// provider semantics can ignore the return value; callers that need to gate a
+// separate acceptance operation can return or surface it independently.
+func RecordResult(ctx context.Context, attempt Attempt) error {
 	if attempt.Scope.OrgID == "" {
 		attempt.Scope = ScopeFrom(ctx)
 	}
-	if attempt.Scope.OrgID == "" || attempt.Provider == "" || attempt.Operation == "" || attempt.Channel == "" {
-		return
+	if attempt.Scope.OrgID == "" {
+		return ErrUnscopedAttempt
+	}
+	if attempt.Provider == "" || attempt.Operation == "" || attempt.Channel == "" {
+		return ErrInvalidAttempt
 	}
 	attempt.Provider = bound(attempt.Provider, 32)
 	attempt.Operation = bound(attempt.Operation, 64)
@@ -104,9 +149,32 @@ func Record(ctx context.Context, attempt Attempt) {
 	}
 	recorder.RLock()
 	fn := recorder.fn
+	resultFn := recorder.resultFn
 	recorder.RUnlock()
+	if resultFn != nil {
+		return resultFn(ctx, attempt)
+	}
 	if fn != nil {
 		fn(ctx, attempt)
+	}
+	if resultFn == nil && fn == nil {
+		return ErrRecorderUnavailable
+	}
+	return nil
+}
+
+// ReceiptStatus reduces a recorder result to a fixed public value. Database
+// errors and provider text never cross this boundary.
+func ReceiptStatus(err error) string {
+	switch {
+	case err == nil:
+		return "accepted"
+	case errors.Is(err, ErrUnscopedAttempt):
+		return "unscoped"
+	case errors.Is(err, ErrInvalidAttempt):
+		return "invalid"
+	default:
+		return "unavailable"
 	}
 }
 

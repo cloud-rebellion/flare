@@ -46,14 +46,15 @@ type healthQueue struct {
 }
 
 type healthResponse struct {
-	Status    string                          `json:"status"`
-	Release   string                          `json:"release"`
-	DB        healthDB                        `json:"db"`
-	Analytics healthAnalytics                 `json:"analytics"`
-	Retention healthRetention                 `json:"retention"`
-	Email     string                          `json:"email"`
-	Workers   map[string]healthWorkerSnapshot `json:"workers"`
-	Queue     healthQueue                     `json:"queue"`
+	Status            string                          `json:"status"`
+	Release           string                          `json:"release"`
+	DB                healthDB                        `json:"db"`
+	Analytics         healthAnalytics                 `json:"analytics"`
+	Retention         healthRetention                 `json:"retention"`
+	ConnectorReceipts healthConnectorReceipts         `json:"connector_receipts"`
+	Email             string                          `json:"email"`
+	Workers           map[string]healthWorkerSnapshot `json:"workers"`
+	Queue             healthQueue                     `json:"queue"`
 }
 
 // workerSnapshot reports the current occupancy of a bounded pool. A nil
@@ -170,6 +171,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			ColdTier:           coldTier,
 			PartitionTelemetry: "log_only",
 		},
+		ConnectorReceipts: s.connectorReceiptHealthSnapshot(),
 		Email: func() string {
 			if s.cfg.EmailEnabled() {
 				return "configured"

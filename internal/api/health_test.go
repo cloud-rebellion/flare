@@ -86,6 +86,9 @@ func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
 	if got.Retention.Policy != "paused" || got.Retention.Days != 14 {
 		t.Fatalf("retention response = %#v, want paused/14", got.Retention)
 	}
+	if got.ConnectorReceipts.State != "unobserved" || got.ConnectorReceipts.Durable || got.ConnectorReceipts.Started != 0 {
+		t.Fatalf("connector receipt projection = %#v, want unobserved and non-durable", got.ConnectorReceipts)
+	}
 	if got.Queue.Mode != "bounded_drop" || got.Queue.Queued != 0 || got.Queue.Durable || !got.Queue.DropOnFull {
 		t.Fatalf("queue response = %#v, want explicit bounded drop mode", got.Queue)
 	}

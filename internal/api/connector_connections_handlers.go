@@ -82,6 +82,7 @@ type connectorCheckResponse struct {
 	Operation      string `json:"operation"`
 	Outcome        string `json:"outcome"`
 	StatusClass    string `json:"status_class"`
+	ReceiptStatus  string `json:"receipt_status"`
 	ErrorCode      string `json:"error_code,omitempty"`
 	QuotaRemaining *int64 `json:"quota_remaining,omitempty"`
 	RetryAfterMS   *int64 `json:"retry_after_ms,omitempty"`
@@ -400,6 +401,7 @@ func (s *Server) handleCheckConnectorConnection(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, connectorCheckResponse{
 		Provider: row.Provider, Operation: adapter.Operation, Outcome: result.Outcome,
 		StatusClass: result.StatusClass, ErrorCode: result.ErrorCode,
+		ReceiptStatus:  result.ReceiptStatus,
 		QuotaRemaining: result.QuotaRemaining, RetryAfterMS: result.RetryAfterMS,
 	})
 }

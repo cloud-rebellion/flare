@@ -14,7 +14,7 @@ monitor:
 | Endpoint | Auth | Meaning |
 | --- | --- | --- |
 | `GET /livez` | None | Process and HTTP listener are alive. It does not query Postgres or providers. |
-| `GET /readyz` | None | Returns database reachability, latency and pool occupancy, optional analytics and retention state, email, bounded worker-pool occupancy, and queue mode. Postgres failure returns `503`; an optional runtime component can be `degraded` while the HTTP status remains `200`. |
+| `GET /readyz` | None | Returns database reachability, latency and pool occupancy, optional analytics and retention state, connector-receipt durability, email, bounded worker-pool occupancy, and queue mode. Postgres failure returns `503`; an optional runtime component can be `degraded` while the HTTP status remains `200`. |
 | `GET /healthz` | None | Alias for `/readyz`, useful for platforms that reserve `healthz` as their probe name. |
 | `GET /api/health` | None | Compatibility alias for `/readyz`. |
 | `GET /metrics` | Keep on a private network | Prometheus text with bounded HTTP request counters and latency histograms, selected outbound integration call counters and latency, and process-wide ingest request/item outcome counters. Labels are fixed transport, signal, outcome, provider, operation, and channel values; the output contains no request parameters, credentials, tenant IDs, project IDs, or event payloads. |
@@ -49,6 +49,16 @@ busy, and available slots for the alert and auto-triage pools. `queue.mode` is
 currently `bounded_drop`, with `queued: 0`, `durable: false`, and
 `drop_on_full: true`: detached work is intentionally discarded when a bounded
 pool is full, so operators can distinguish saturation from a durable backlog.
+
+`readyz.connector_receipts` is the process-level projection of the outbound
+connector receipt writer. `configured` reports whether the server installed a
+database-backed recorder; `state` is `unobserved`, `healthy`, or `degraded`,
+and `durable` is true only after the latest attempted receipt write completed.
+The bounded counters (`started`, `completed`, `succeeded`, `failed`) and last
+success/failure timestamps make a persistence outage visible without exposing
+tenant IDs, provider data, credentials, or receipt contents. A provider result
+is never retried because its receipt write failed; the write error is returned
+through the internal `RecordResult` boundary and surfaced here instead.
 
 When the partition exporter is enabled, `analytics.export` in `/readyz` and
 the authenticated `GET /api/analytics-health` endpoint expose the same global,
@@ -87,6 +97,13 @@ For an app or service dashboard, use
 `GET /api/projects/{id}/connector-health?hours=24&limit=100` to keep the same
 aggregate scoped to one project. The project route verifies that the caller's
 organization owns the project before reading connector rows.
+
+The on-demand `POST /api/connector-connections/{id}/check` response includes
+`receipt_status` (`accepted`, `unavailable`, `unscoped`, or `invalid`) next to
+the provider `outcome`. A provider success remains a success when persistence
+is temporarily unavailable, while the separate status tells the operator that
+the health observation was not durably accepted; Flare does not repeat the
+provider request merely to retry its receipt.
 
 Use `type: "connector_freshness"` when a provider series is expected to report
 at a known cadence. It requires a provider, optional operation/channel

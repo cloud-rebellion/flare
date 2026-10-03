@@ -141,3 +141,34 @@ func TestConnectorProbesKeepProviderIdentityInProcessMetrics(t *testing.T) {
 		t.Fatalf("untrusted probe labels leaked:\n%s", body)
 	}
 }
+
+func TestConnectorReceiptMetricsExposeStartAndCompletionOutcome(t *testing.T) {
+	m := New()
+	previous := Default
+	Default = m
+	t.Cleanup(func() { Default = previous })
+
+	RecordConnectorReceipt("start", "started")
+	RecordConnectorReceipt("complete", "ok")
+	RecordConnectorReceipt("complete", "error")
+	// Caller-controlled values collapse to a bounded error series rather than
+	// becoming labels that can grow with provider or database text.
+	RecordConnectorReceipt("insert-secret", "bearer-secret")
+
+	out := httptest.NewRecorder()
+	m.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := out.Body.String()
+	for _, want := range []string{
+		`flare_connector_receipts_total{operation="start",outcome="started"} 1`,
+		`flare_connector_receipts_total{operation="complete",outcome="ok"} 1`,
+		`flare_connector_receipts_total{operation="complete",outcome="error"} 1`,
+		`flare_connector_receipts_total{operation="other",outcome="error"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("receipt metric missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "secret") {
+		t.Fatalf("receipt metric leaked untrusted values:\n%s", body)
+	}
+}

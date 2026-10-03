@@ -71,3 +71,33 @@ func TestRecordBoundsProviderHints(t *testing.T) {
 		t.Fatalf("out-of-range hints were retained: retry=%#v sync=%#v", got[0].RetryAfterMS, got[0].SyncLagMS)
 	}
 }
+
+func TestRecordResultReportsPersistenceFailureWithoutProviderData(t *testing.T) {
+	wantErr := errors.New("database temporarily unavailable: bearer-secret")
+	SetRecorderWithError(func(_ context.Context, a Attempt) error {
+		if a.Scope.OrgID != "org-1" || a.Provider != "github" || a.Operation != "create_issue" {
+			t.Fatalf("recorder received unexpected canonical attempt: %#v", a)
+		}
+		return wantErr
+	})
+	t.Cleanup(func() { SetRecorder(nil) })
+	err := RecordResult(WithScope(context.Background(), Scope{OrgID: "org-1"}), Attempt{
+		Provider: "github", Operation: "create_issue", Channel: "http", Outcome: "ok",
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RecordResult error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRecordResultRejectsMissingProvenanceAndRecorder(t *testing.T) {
+	SetRecorder(nil)
+	t.Cleanup(func() { SetRecorder(nil) })
+	if !errors.Is(RecordResult(context.Background(), Attempt{Provider: "github", Operation: "create_issue", Channel: "http"}), ErrUnscopedAttempt) {
+		t.Fatal("unscoped attempt was not rejected by RecordResult")
+	}
+	if !errors.Is(RecordResult(WithScope(context.Background(), Scope{OrgID: "org-1"}), Attempt{
+		Provider: "github", Operation: "create_issue", Channel: "http",
+	}), ErrRecorderUnavailable) {
+		t.Fatal("missing recorder was not reported by RecordResult")
+	}
+}

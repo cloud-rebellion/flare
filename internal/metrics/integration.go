@@ -2,6 +2,24 @@ package metrics
 
 import "time"
 
+// RecordConnectorReceipt records the two phases of the connector persistence
+// boundary. `start/started` counts an attempted durable write and
+// `complete/ok|error` records its result. Keeping the operation and outcome
+// vocabularies fixed makes a persistence outage visible without exposing
+// providers, tenants, error text, or receipt contents.
+func RecordConnectorReceipt(operation, outcome string) {
+	if operation != "start" && operation != "complete" {
+		operation = "other"
+	}
+	switch {
+	case operation == "start" && outcome == "started":
+	case operation == "complete" && (outcome == "ok" || outcome == "error"):
+	default:
+		operation, outcome = "other", "error"
+	}
+	Inc("flare_connector_receipts", map[string]string{"operation": operation, "outcome": outcome})
+}
+
 // RecordIntegration records one outbound integration attempt with a fixed,
 // process-wide label vocabulary. Callers pass constants describing the
 // provider boundary; unknown values collapse to "other" so configuration or

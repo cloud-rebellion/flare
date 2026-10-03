@@ -64,12 +64,13 @@ func (c Client) Check(ctx context.Context, token string) (result Result, err err
 		if receiptOutcome == "" {
 			receiptOutcome = "error"
 		}
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "hubspot", Operation: "account_details", Channel: "http",
 			Outcome: receiptOutcome, StatusClass: result.StatusClass, ErrorCode: result.ErrorCode,
 			Elapsed: time.Since(started), QuotaRemaining: result.QuotaRemaining,
 			RetryAfterMS: result.RetryAfterMS, AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		result.ReceiptStatus = integration.ReceiptStatus(receiptErr)
 	}()
 
 	token = strings.TrimSpace(token)

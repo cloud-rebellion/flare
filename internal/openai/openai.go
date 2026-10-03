@@ -59,12 +59,13 @@ func (c Client) Check(ctx context.Context, token string) (result connectorcheck.
 		if receiptOutcome == "" {
 			receiptOutcome = "error"
 		}
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "openai", Operation: probeOperation, Channel: "http",
 			Outcome: receiptOutcome, StatusClass: result.StatusClass, ErrorCode: result.ErrorCode,
 			Elapsed: time.Since(started), QuotaRemaining: result.QuotaRemaining,
 			RetryAfterMS: result.RetryAfterMS, AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		result.ReceiptStatus = integration.ReceiptStatus(receiptErr)
 	}()
 
 	token = strings.TrimSpace(token)

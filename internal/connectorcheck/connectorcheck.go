@@ -16,6 +16,10 @@ type Result struct {
 	ErrorCode      string
 	QuotaRemaining *int64
 	RetryAfterMS   *int64
+	// ReceiptStatus reports whether Flare durably accepted the payload-free
+	// connector attempt. It is independent of Outcome: an API must not turn a
+	// successful provider call into an error or retry the call on receipt loss.
+	ReceiptStatus string // accepted | unavailable | unscoped | invalid
 }
 
 // Probe is the narrow outbound boundary for one fixed-authority provider

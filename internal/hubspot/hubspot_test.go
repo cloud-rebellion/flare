@@ -30,7 +30,7 @@ func TestCheckSuccessRecordsOnlyBoundedHints(t *testing.T) {
 	defer integration.SetRecorder(nil)
 	client := Client{baseURL: "https://api.hubapi.com", httpClient: &http.Client{Transport: transport}}
 	result, err := client.Check(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), token)
-	if err != nil || result.Outcome != "ok" || result.StatusClass != "2xx" {
+	if err != nil || result.Outcome != "ok" || result.StatusClass != "2xx" || result.ReceiptStatus != "accepted" {
 		t.Fatalf("success result = %#v, err %v", result, err)
 	}
 	if result.QuotaRemaining == nil || *result.QuotaRemaining != 7 || result.RetryAfterMS == nil || *result.RetryAfterMS != 3000 {
@@ -80,6 +80,23 @@ func TestCheckClassifiesAuthAndRateLimitWithoutBody(t *testing.T) {
 				t.Fatalf("error leaked token: %v", err)
 			}
 		})
+	}
+}
+
+func TestCheckKeepsProviderOutcomeWhenReceiptPersistenceFails(t *testing.T) {
+	integration.SetRecorderWithError(func(_ context.Context, _ integration.Attempt) error {
+		return errors.New("database secret must not escape")
+	})
+	t.Cleanup(func() { integration.SetRecorder(nil) })
+	client := Client{
+		baseURL: "https://api.hubapi.com",
+		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return fakeResponse(http.StatusOK, http.Header{}, `{}`), nil
+		})},
+	}
+	result, err := client.Check(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), "token")
+	if err != nil || result.Outcome != "ok" || result.ReceiptStatus != "unavailable" {
+		t.Fatalf("provider outcome changed by receipt failure: result=%#v err=%v", result, err)
 	}
 }
 

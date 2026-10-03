@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -59,6 +60,20 @@ type Server struct {
 	connectorProbes    connectorcheck.Registry
 	hubspotSync        *connectorsync.HubSpotWorker
 	connectorScheduler *connectorsync.Scheduler
+
+	// connectorReceiptMu guards the process-wide durability projection exposed
+	// by /readyz. It contains only write counts and timestamps, never tenant or
+	// provider data. A provider result is not retried when this boundary fails;
+	// the projection makes that durability gap explicit to operators.
+	connectorReceiptMu         sync.RWMutex
+	connectorReceiptConfigured bool
+	connectorReceiptStarted    uint64
+	connectorReceiptCompleted  uint64
+	connectorReceiptSucceeded  uint64
+	connectorReceiptFailed     uint64
+	connectorReceiptState      string
+	connectorReceiptLastOK     time.Time
+	connectorReceiptLastError  time.Time
 
 	// loginLimiter locks out brute-force logins; ingestLimiter caps per-DSN-key
 	// (or per-IP) ingest flooding; mcpLimiter caps per-org MCP request rate so a
@@ -310,22 +325,24 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 	connectorProbes := newConnectorProbeRegistry(hubspotClient)
 	hubspotWorker := connectorsync.NewHubSpotWorker(queries, secretCipher, hubspotClient)
 	srv := &Server{
-		q:                  queries,
-		pool:               pool,
-		store:              pgstore.New(pool),
-		analytics:          analyticsMgr,
-		sessions:           sessions,
-		cfg:                cfg,
-		dispatcher:         alerts.NewDispatcher(mailer),
-		mailer:             mailer,
-		symbolicator:       sourcemaps.NewResolver(),
-		ai:                 ai.New(!allowPrivateAI),
-		allowPrivateAI:     allowPrivateAI,
-		secrets:            secretCipher,
-		hubspotProbe:       hubspotClient,
-		connectorProbes:    connectorProbes,
-		hubspotSync:        hubspotWorker,
-		connectorScheduler: connectorsync.NewScheduler(queries, hubspotWorker),
+		q:                          queries,
+		pool:                       pool,
+		store:                      pgstore.New(pool),
+		analytics:                  analyticsMgr,
+		sessions:                   sessions,
+		cfg:                        cfg,
+		dispatcher:                 alerts.NewDispatcher(mailer),
+		mailer:                     mailer,
+		symbolicator:               sourcemaps.NewResolver(),
+		ai:                         ai.New(!allowPrivateAI),
+		allowPrivateAI:             allowPrivateAI,
+		secrets:                    secretCipher,
+		hubspotProbe:               hubspotClient,
+		connectorProbes:            connectorProbes,
+		hubspotSync:                hubspotWorker,
+		connectorScheduler:         connectorsync.NewScheduler(queries, hubspotWorker),
+		connectorReceiptConfigured: pool != nil,
+		connectorReceiptState:      "unobserved",
 
 		loginLimiter:  ratelimit.New(loginFailBudget, loginFailWindow),
 		ingestLimiter: ratelimit.New(cfg.IngestRatePerMin, time.Minute),
@@ -393,8 +410,10 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 	// visible (last_ok_at / last_error) instead of vanishing into a log line.
 	srv.dispatcher.Recorder = srv.recordChannelDelivery
 	// Persist bounded, payload-free connector attempts for authenticated health
-	// reads. Unscoped calls are dropped by integration.Record.
-	integration.SetRecorder(srv.recordConnectorAttempt)
+	// reads. Unscoped calls are rejected by integration.RecordResult and the
+	// compatibility Record wrapper continues to drop them without changing
+	// provider-call semantics.
+	integration.SetRecorderWithError(srv.recordConnectorAttempt)
 	return srv
 }
 
@@ -464,7 +483,18 @@ func (s *Server) recordChannelDelivery(ctx context.Context, orgID, channelID str
 	}
 }
 
-func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attempt) {
+func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attempt) error {
+	metrics.RecordConnectorReceipt("start", "started")
+	s.connectorReceiptMu.Lock()
+	s.connectorReceiptStarted++
+	s.connectorReceiptMu.Unlock()
+	if s.q == nil {
+		err := errors.New("connector receipt store is not configured")
+		metrics.RecordConnectorReceipt("complete", "error")
+		s.observeConnectorReceipt(false)
+		slog.Warn("record connector attempt", "provider", a.Provider, "operation", a.Operation, "error", err)
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	projectID := pgtype.Text{}
@@ -493,9 +523,14 @@ func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attem
 		AttemptedAt:    pgtype.Timestamptz{Time: a.AttemptedAt.UTC(), Valid: true},
 		CompletedAt:    pgtype.Timestamptz{Time: a.CompletedAt.UTC(), Valid: true},
 	}); err != nil {
-		metrics.Inc("flare_connector_receipts", map[string]string{"operation": "insert", "outcome": "error"})
+		metrics.RecordConnectorReceipt("complete", "error")
+		s.observeConnectorReceipt(false)
 		slog.Warn("record connector attempt", "provider", a.Provider, "operation", a.Operation, "error", err)
+		return err
 	}
+	metrics.RecordConnectorReceipt("complete", "ok")
+	s.observeConnectorReceipt(true)
+	return nil
 }
 
 // dsn builds the Sentry-style DSN a client SDK uses to point at this project.
