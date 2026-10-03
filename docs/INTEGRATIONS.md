@@ -439,6 +439,8 @@ selected directly by a `metric_threshold` rule:
 | `browser.web_vital.inp_ms` | Interaction to Next Paint in milliseconds |
 | `browser.api_request.latency_ms` | Same-origin `/api/` fetch latency |
 | `browser.api_request.failure` | One point for a non-2xx or network failure |
+| `browser.realtime.connect_latency_ms` | WebSocket/EventSource time to open |
+| `browser.realtime.failure` | WebSocket/EventSource construction, runtime, or abnormal close |
 
 The helper is dependency-free and safe to add to any browser bundle:
 
@@ -455,13 +457,16 @@ const stopRum = installFlareBrowserRum({
 ```
 
 Web Vitals are finalized when the page becomes hidden. Request capture wraps
-`fetch`, defaults to same-origin `/api/` calls, and can be widened with an
-explicit `requestFilter`. Metric names, values, labels, and timestamps are
-allow-listed and bounded; labels keep only environment, release, method, HTTP
-status class, and a scrubbed route with query strings, emails, and
-identifier-shaped path segments removed. Request bodies, headers, user
-identifiers, and provider responses are never sent. `sampleRate` is clamped to
-`0..1` and `maxMetricsPerMinute` is
+`fetch` and, by default, XMLHttpRequest, defaults to same-origin `/api/` calls,
+and can be widened with an explicit `requestFilter`. Set `captureXHR: false`
+when an app does not use XHR. Set `captureRealtime: true` to observe
+allow-listed WebSocket and EventSource construction, connect latency, runtime
+errors, and abnormal closes; cleanup restores the original constructors.
+Metric names, values, labels, and timestamps are allow-listed and bounded;
+labels keep only environment, release, method, transport, HTTP status class,
+state, and a scrubbed route with query strings, emails, and identifier-shaped
+path segments removed. Request bodies, headers, user identifiers, and provider
+responses are never sent. `sampleRate` is clamped to `0..1` and `maxMetricsPerMinute` is
 clamped to a bounded client-side budget, while the DSN's server-side ingest
 limit remains the final control. `sendBeacon` and `keepalive` only confirm that
 the browser queued a request; they do not prove durable acceptance. Use the

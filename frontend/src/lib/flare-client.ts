@@ -23,7 +23,9 @@ export const FLARE_RUM_METRICS = Object.freeze({
 	cls: 'browser.web_vital.cls',
 	inpMs: 'browser.web_vital.inp_ms',
 	requestLatencyMs: 'browser.api_request.latency_ms',
-	requestFailure: 'browser.api_request.failure'
+	requestFailure: 'browser.api_request.failure',
+	realtimeConnectLatencyMs: 'browser.realtime.connect_latency_ms',
+	realtimeFailure: 'browser.realtime.failure'
 } as const);
 
 export type FlareRumMetricName = (typeof FLARE_RUM_METRICS)[keyof typeof FLARE_RUM_METRICS];
@@ -38,6 +40,10 @@ export interface FlareBrowserRumOptions {
 	maxMetricsPerMinute?: number;
 	captureWebVitals?: boolean;
 	captureRequests?: boolean;
+	/** Capture same-origin XMLHttpRequest API timings and failures. */
+	captureXHR?: boolean;
+	/** Capture allow-listed WebSocket/EventSource failures and connect latency. */
+	captureRealtime?: boolean;
 	/** Additional allow-list for API URLs. The default only tracks same-origin /api/. */
 	requestFilter?: (url: URL, init?: RequestInit) => boolean;
 }
@@ -346,14 +352,24 @@ function safeMetricRoute(raw: unknown): string | undefined {
 	try {
 		const fallbackOrigin = 'http://flare.invalid';
 		const parsed = new URL(raw, typeof location === 'undefined' ? fallbackOrigin : location.href);
-		const currentOrigin = typeof location === 'undefined' ? fallbackOrigin : location.origin;
 		// Cross-origin destinations are intentionally collapsed. A route path can
 		// contain account ids even after query strings have been removed.
-		if (parsed.origin !== currentOrigin) return 'external';
+		if (!sameMetricOrigin(parsed)) return 'external';
 		return scrubFlareBrowserPath(parsed.pathname, maxRumLabelBytes);
 	} catch {
 		return undefined;
 	}
+}
+
+function sameMetricOrigin(url: URL): boolean {
+	if (typeof location === 'undefined') return url.origin === 'http://flare.invalid';
+	if (url.origin === location.origin) return true;
+	// WebSocket URLs use a different scheme from the page even when they target
+	// the same host. Treat the http/ws and https/wss pairs as same-origin for
+	// route grouping, while retaining the host and port boundary.
+	const websocketPair = (url.protocol === 'ws:' && location.protocol === 'http:') ||
+		(url.protocol === 'wss:' && location.protocol === 'https:');
+	return websocketPair && url.hostname === location.hostname && url.port === location.port;
 }
 
 function safeMetricLabels(raw: Record<string, unknown> | undefined): Record<string, string> | undefined {
@@ -370,6 +386,10 @@ function safeMetricLabels(raw: Record<string, unknown> | undefined): Record<stri
 	if (/^[A-Z]{1,12}$/.test(method)) out.method = method;
 	const statusClass = typeof raw.status_class === 'string' ? raw.status_class.trim().toLowerCase() : '';
 	if (/^[1-5]xx$/.test(statusClass)) out.status_class = statusClass;
+	const transport = typeof raw.transport === 'string' ? raw.transport.trim().toLowerCase() : '';
+	if (/^(?:fetch|xhr|websocket|eventsource)$/.test(transport)) out.transport = transport;
+	const state = typeof raw.state === 'string' ? raw.state.trim().toLowerCase() : '';
+	if (/^(?:opening|open|reconnecting|closed|constructor)$/.test(state)) out.state = state;
 	const route = safeMetricRoute(raw.route);
 	if (route) out.route = route;
 	return Object.keys(out).length > 0 ? out : undefined;
@@ -431,7 +451,7 @@ function statusClass(status: number): string | undefined {
 }
 
 function defaultRequestFilter(url: URL): boolean {
-	if (typeof location !== 'undefined' && url.origin !== location.origin) return false;
+	if (!sameMetricOrigin(url)) return false;
 	return url.pathname === '/api' || url.pathname.startsWith('/api/');
 }
 
@@ -515,6 +535,15 @@ export function installFlareBrowserRum(options: FlareBrowserRumOptions): () => v
 		send(point);
 	};
 
+	const shouldTrackRequest = (url: URL | undefined, init?: RequestInit): boolean => {
+		if (!url || url.href === dsn.metricsEndpoint) return false;
+		try {
+			return options.requestFilter ? options.requestFilter(url, init) : defaultRequestFilter(url);
+		} catch {
+			return false;
+		}
+	};
+
 	if (options.captureWebVitals !== false) {
 		let lcp: number | undefined;
 		let clsSessionValue = 0;
@@ -572,10 +601,7 @@ export function installFlareBrowserRum(options: FlareBrowserRumOptions): () => v
 		const originalFetch = window.fetch;
 		const wrappedFetch = function(this: Window, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
 			const url = requestURL(input);
-			const shouldTrack = !!url && url.href !== dsn.metricsEndpoint && (options.requestFilter ? (() => {
-				try { return options.requestFilter!(url, init); } catch { return false; }
-			})() : defaultRequestFilter(url));
-			if (!shouldTrack) return originalFetch.call(this, input, init);
+			if (!shouldTrackRequest(url, init)) return originalFetch.call(this, input, init);
 			const method = requestMethod(input, init);
 			const route = url ? safeMetricRoute(url.href) : undefined;
 			const started = monotonicNow();
@@ -593,6 +619,158 @@ export function installFlareBrowserRum(options: FlareBrowserRumOptions): () => v
 		} as typeof window.fetch;
 		window.fetch = wrappedFetch;
 		cleanups.push(() => { window.fetch = originalFetch; });
+	}
+
+	if (options.captureXHR !== false) {
+		const xhrPrototype = window.XMLHttpRequest?.prototype;
+		if (xhrPrototype && typeof xhrPrototype.open === 'function' && typeof xhrPrototype.send === 'function') {
+			interface XhrState {
+				url?: URL;
+				method: string;
+				started: number;
+				tracked: boolean;
+				finished: boolean;
+			}
+			const states = new WeakMap<XMLHttpRequest, XhrState>();
+			const listenerCleanups = new Set<() => void>();
+			const originalOpen = xhrPrototype.open;
+			const originalSend = xhrPrototype.send;
+			const patchedOpen = function(this: XMLHttpRequest, ...args: Parameters<XMLHttpRequest['open']>) {
+				const method = typeof args[0] === 'string' && /^[A-Za-z]{1,12}$/.test(args[0].trim()) ? args[0].trim().toUpperCase() : 'GET';
+				const url = requestURL(args[1] as string | URL);
+				const state: XhrState = {
+					url,
+					method,
+					started: monotonicNow(),
+					tracked: shouldTrackRequest(url, { method }),
+					finished: false
+				};
+				states.set(this, state);
+				try {
+					return originalOpen.apply(this, args);
+				} catch (error) {
+					if (state.tracked) {
+						report(FLARE_RUM_METRICS.requestFailure, 1, { method, route: url?.href, transport: 'xhr' });
+						report(FLARE_RUM_METRICS.requestLatencyMs, Math.max(0, monotonicNow() - state.started), { method, route: url?.href, transport: 'xhr' });
+					}
+					state.finished = true;
+					throw error;
+				}
+			} as XMLHttpRequest['open'];
+			const patchedSend = function(this: XMLHttpRequest, ...args: Parameters<XMLHttpRequest['send']>) {
+				const state = states.get(this);
+				if (!state?.tracked || typeof this.addEventListener !== 'function') return originalSend.apply(this, args);
+				const finish = () => {
+					if (state.finished) return;
+					state.finished = true;
+					listenerCleanups.delete(detach);
+					const labels = { method: state.method, route: state.url?.href, status_class: statusClass(this.status), transport: 'xhr' };
+					if (this.status < 200 || this.status >= 300) report(FLARE_RUM_METRICS.requestFailure, 1, labels);
+					report(FLARE_RUM_METRICS.requestLatencyMs, Math.max(0, monotonicNow() - state.started), labels);
+				};
+				const detach = () => {
+					this.removeEventListener('loadend', finish);
+					listenerCleanups.delete(detach);
+				};
+				this.addEventListener('loadend', finish);
+				listenerCleanups.add(detach);
+				try {
+					return originalSend.apply(this, args);
+				} catch (error) {
+					finish();
+					throw error;
+				}
+			} as XMLHttpRequest['send'];
+			xhrPrototype.open = patchedOpen;
+			xhrPrototype.send = patchedSend;
+			cleanups.push(() => {
+				for (const detach of listenerCleanups) detach();
+				if (xhrPrototype.open === patchedOpen) xhrPrototype.open = originalOpen;
+				if (xhrPrototype.send === patchedSend) xhrPrototype.send = originalSend;
+			});
+		}
+	}
+
+	if (options.captureRealtime === true) {
+		const runtimeWindow = window as Window & { WebSocket?: typeof WebSocket; EventSource?: typeof EventSource };
+		const realtimeCleanups = new Set<() => void>();
+		type RealtimeKind = 'websocket' | 'eventsource';
+		const realtimeURL = (value: unknown): URL | undefined => {
+			if (typeof value !== 'string' && !(value instanceof URL)) return undefined;
+			return requestURL(value);
+		};
+		const reportRealtimeConstructionFailure = (kind: RealtimeKind, value: unknown) => {
+			const url = realtimeURL(value);
+			if (!shouldTrackRequest(url, { method: kind === 'websocket' ? 'WS' : 'GET' })) return;
+			report(FLARE_RUM_METRICS.realtimeFailure, 1, { transport: kind, route: url?.href, state: 'constructor' });
+		};
+		const trackRealtime = (kind: RealtimeKind, instance: WebSocket | EventSource, value: unknown) => {
+			const url = realtimeURL(value);
+			if (!shouldTrackRequest(url, { method: kind === 'websocket' ? 'WS' : 'GET' })) return;
+			const started = monotonicNow();
+			let opened = false;
+			let lastFailure = -Infinity;
+			const labels = (state: string) => ({ transport: kind, route: url?.href, state });
+			const onOpen = () => {
+				if (opened) return;
+				opened = true;
+				report(FLARE_RUM_METRICS.realtimeConnectLatencyMs, Math.max(0, monotonicNow() - started), labels('open'));
+			};
+			const onFailure = (state: string) => {
+				const now = Date.now();
+				if (now - lastFailure < duplicateWindowMs) return;
+				lastFailure = now;
+				report(FLARE_RUM_METRICS.realtimeFailure, 1, labels(state));
+			};
+			const onError = () => onFailure(opened ? 'open' : 'opening');
+			const onClose = (event: Event) => {
+				const code = (event as CloseEvent).code;
+				if (code !== 1000 && code !== 1001) onFailure(opened ? 'closed' : 'opening');
+			};
+			instance.addEventListener('open', onOpen);
+			instance.addEventListener('error', onError);
+			if (kind === 'websocket') instance.addEventListener('close', onClose);
+			const detach = () => {
+				instance.removeEventListener('open', onOpen);
+				instance.removeEventListener('error', onError);
+				if (kind === 'websocket') instance.removeEventListener('close', onClose);
+				realtimeCleanups.delete(detach);
+			};
+			realtimeCleanups.add(detach);
+		};
+		const wrapRealtime = <T extends WebSocket | EventSource>(kind: RealtimeKind, original: { new (...args: any[]): T }) => {
+			const wrapped = new Proxy(original, {
+				construct(target, args, newTarget) {
+					try {
+						const instance = Reflect.construct(target, args, newTarget) as T;
+						try { trackRealtime(kind, instance, args[0]); } catch { /* instrumentation must never break app construction */ }
+						return instance;
+					} catch (error) {
+						reportRealtimeConstructionFailure(kind, args[0]);
+						throw error;
+					}
+				}
+			}) as typeof original;
+			return { original, wrapped };
+		};
+		const originalWebSocket = runtimeWindow.WebSocket;
+		if (originalWebSocket) {
+			const { wrapped } = wrapRealtime('websocket', originalWebSocket);
+			runtimeWindow.WebSocket = wrapped as typeof WebSocket;
+			cleanups.push(() => {
+				for (const detach of realtimeCleanups) detach();
+				if (runtimeWindow.WebSocket === wrapped) runtimeWindow.WebSocket = originalWebSocket;
+			});
+		}
+		const originalEventSource = runtimeWindow.EventSource;
+		if (originalEventSource) {
+			const { wrapped } = wrapRealtime('eventsource', originalEventSource);
+			runtimeWindow.EventSource = wrapped as typeof EventSource;
+			cleanups.push(() => {
+				for (const detach of realtimeCleanups) detach();
+				if (runtimeWindow.EventSource === wrapped) runtimeWindow.EventSource = originalEventSource;
+			});
+		}
 	}
 
 	return () => {

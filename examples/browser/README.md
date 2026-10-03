@@ -42,14 +42,21 @@ RUM emits these stable names for `metric_threshold` rules:
 | `browser.web_vital.inp_ms` | Interaction to Next Paint milliseconds |
 | `browser.api_request.latency_ms` | Same-origin `/api/` fetch duration |
 | `browser.api_request.failure` | `1` for non-2xx or network failure |
+| `browser.realtime.connect_latency_ms` | WebSocket/EventSource time to open |
+| `browser.realtime.failure` | WebSocket/EventSource construction, runtime, or abnormal close |
 
-The default request filter captures same-origin `/api/` fetches. Pass an
-explicit `requestFilter` for another allow-listed API origin. Routes are
-scrubbed to remove query strings, emails, and identifier-shaped path segments;
-only method, status class, and the scrubbed route are retained. Request bodies,
-headers, user identifiers, and response bodies are never sent. Sampling and a
-per-minute point cap apply before transport. Web Vitals are flushed when the
-page is hidden or unloaded.
+The default request filter captures same-origin `/api/` fetches and, when
+enabled, XHRs. Pass an explicit `requestFilter` for another allow-listed API
+origin. Set `captureXHR: false` to leave the XHR prototype untouched. Set
+`captureRealtime: true` to observe allow-listed WebSocket and EventSource
+construction, open latency, runtime errors, and abnormal closes; the wrapper
+is removed by the cleanup function. Realtime URLs use the same route filter and
+the `transport`/`state` labels are fixed enums. Routes are scrubbed to remove
+query strings, emails, and identifier-shaped path segments; only method,
+status class, transport, state, and the scrubbed route are retained. Request
+bodies, headers, user identifiers, and response bodies are never sent. Sampling
+and a per-minute point cap apply before transport. Web Vitals are flushed when
+the page is hidden or unloaded.
 
 The browser can only report that `sendBeacon` or `keepalive` queued a request;
 that is not durable acceptance. For release verification, query the project's

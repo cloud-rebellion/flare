@@ -111,4 +111,106 @@ describe('Flare browser RUM request bridge', () => {
 			runtime.PerformanceObserver = oldObserver;
 		}
 	});
+
+	test('captures bounded XHR failures and realtime connection errors, then restores constructors', async () => {
+		const runtime = globalThis as typeof globalThis & {
+			window?: Window;
+			document?: Document;
+			location?: Location;
+			navigator?: Navigator;
+			PerformanceObserver?: typeof PerformanceObserver;
+		};
+		const oldWindow = runtime.window;
+		const oldDocument = runtime.document;
+		const oldLocation = runtime.location;
+		const oldNavigator = runtime.navigator;
+		const oldObserver = runtime.PerformanceObserver;
+		const beacons: Array<{ url: string; body: Blob | string }> = [];
+		const listeners = new Map<string, EventListener>();
+		class FakeXHR {
+			static prototypeMarker = true;
+			status = 503;
+			private listeners = new Map<string, EventListener>();
+			open(_method: string, _url: string | URL) {}
+			send() {
+				this.listeners.get('loadend')?.call(this, new Event('loadend'));
+			}
+			addEventListener(name: string, listener: EventListener) { this.listeners.set(name, listener); }
+			removeEventListener(name: string, listener: EventListener) {
+				if (this.listeners.get(name) === listener) this.listeners.delete(name);
+			}
+		}
+		class FakeWebSocket {
+			private listeners = new Map<string, EventListener>();
+			constructor(public url: string) {}
+			addEventListener(name: string, listener: EventListener) { this.listeners.set(name, listener); }
+			removeEventListener(name: string, listener: EventListener) {
+				if (this.listeners.get(name) === listener) this.listeners.delete(name);
+			}
+			emit(name: string, event = new Event(name)) { this.listeners.get(name)?.call(this, event); }
+		}
+		class FakeEventSource {
+			readyState = 0;
+			private listeners = new Map<string, EventListener>();
+			constructor(public url: string) {}
+			addEventListener(name: string, listener: EventListener) { this.listeners.set(name, listener); }
+			removeEventListener(name: string, listener: EventListener) {
+				if (this.listeners.get(name) === listener) this.listeners.delete(name);
+			}
+			emit(name: string, event = new Event(name)) { this.listeners.get(name)?.call(this, event); }
+		}
+		const fakeWindow = {
+			fetch: async () => new Response('ok'),
+			XMLHttpRequest: FakeXHR,
+			WebSocket: FakeWebSocket,
+			EventSource: FakeEventSource,
+			addEventListener: (name: string, listener: EventListener) => listeners.set(name, listener),
+			removeEventListener: (name: string) => listeners.delete(name)
+		} as unknown as Window;
+		runtime.window = fakeWindow;
+		runtime.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} } as unknown as Document;
+		runtime.location = new URL('https://app.example/') as unknown as Location;
+		runtime.navigator = { sendBeacon: (url: string, body: Blob | string) => { beacons.push({ url, body }); return true; } } as unknown as Navigator;
+		runtime.PerformanceObserver = undefined;
+		try {
+			const cleanup = installFlareBrowserRum({
+				dsn: 'https://public-key@flare.example/123',
+				maxMetricsPerMinute: 20,
+				sampleRate: 1,
+				captureWebVitals: false,
+				captureRealtime: true
+			});
+			const xhr = new (fakeWindow.XMLHttpRequest as unknown as { new (): FakeXHR })();
+			xhr.open('post', '/api/orders/42?token=secret');
+			xhr.send();
+			const socket = new (fakeWindow.WebSocket as unknown as { new (url: string): FakeWebSocket })('wss://app.example/api/stream?token=secret');
+			socket.emit('error');
+			socket.emit('close', Object.assign(new Event('close'), { code: 1006 }));
+			const source = new (fakeWindow.EventSource as unknown as { new (url: string): FakeEventSource })('/api/events/alice%40example.com');
+			source.emit('error');
+			cleanup();
+			const payloads = await Promise.all(beacons.map(async ({ body }) => JSON.parse(typeof body === 'string' ? body : await body.text())));
+			const points = payloads.map((payload) => payload[0]);
+			expect(points.map((point) => point.name)).toEqual([
+				FLARE_RUM_METRICS.requestFailure,
+				FLARE_RUM_METRICS.requestLatencyMs,
+				FLARE_RUM_METRICS.realtimeFailure,
+				FLARE_RUM_METRICS.realtimeFailure
+			]);
+			expect(points[0].labels).toEqual({ method: 'POST', route: '/api/orders/:id', status_class: '5xx', transport: 'xhr' });
+			expect(points[2].labels).toEqual({ transport: 'websocket', route: '/api/stream', state: 'opening' });
+			expect(points[3].labels).toEqual({ transport: 'eventsource', route: '/api/events/[REDACTED_EMAIL]', state: 'opening' });
+			expect(JSON.stringify(points)).not.toContain('secret');
+			expect(JSON.stringify(points)).not.toContain('alice');
+			expect((fakeWindow.XMLHttpRequest as unknown) === FakeXHR).toBe(true);
+			expect((fakeWindow.WebSocket as unknown) === FakeWebSocket).toBe(true);
+			expect((fakeWindow.EventSource as unknown) === FakeEventSource).toBe(true);
+		} finally {
+			runtime.window = oldWindow;
+			runtime.document = oldDocument;
+			runtime.location = oldLocation;
+			runtime.navigator = oldNavigator;
+			runtime.PerformanceObserver = oldObserver;
+		}
+	});
 });
