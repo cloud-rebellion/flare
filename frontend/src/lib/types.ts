@@ -144,6 +144,7 @@ export interface ConnectorCheckResult {
   operation: string;
   outcome: 'ok' | 'error';
   status_class: string;
+  receipt_status: 'accepted' | 'unavailable' | 'unscoped' | 'invalid';
   error_code?: string;
   quota_remaining?: number;
   retry_after_ms?: number;

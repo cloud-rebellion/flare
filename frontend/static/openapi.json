@@ -3804,7 +3804,8 @@
                     "provider",
                     "operation",
                     "outcome",
-                    "status_class"
+                    "status_class",
+                    "receipt_status"
                   ],
                   "properties": {
                     "provider": {
@@ -3833,6 +3834,15 @@
                       "type": "string",
                       "example": "2xx"
                     },
+                    "receipt_status": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "unavailable",
+                        "unscoped",
+                        "invalid"
+                      ],
+                      "description": "Whether Flare durably persisted the payload-free connector receipt; independent of provider outcome."
                     "error_code": {
                       "type": "string"
                     },

@@ -1213,12 +1213,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [provider, operation, outcome, status_class]
+                required: [provider, operation, outcome, status_class, receipt_status]
                 properties:
                   provider: { type: string, enum: [hubspot, github, slack, openai], example: hubspot }
                   operation: { type: string, description: "account_details for HubSpot, user for GitHub, auth.test for Slack, or models for OpenAI", example: account_details }
                   outcome: { type: string, enum: [ok, error] }
                   status_class: { type: string, example: 2xx }
+                  receipt_status: { type: string, enum: [accepted, unavailable, unscoped, invalid], description: "Whether Flare durably persisted the payload-free connector receipt; independent of provider outcome." }
                   error_code: { type: string }
                   quota_remaining: { type: integer, format: int64, minimum: 0 }
                   retry_after_ms: { type: integer, format: int64, minimum: 0 }

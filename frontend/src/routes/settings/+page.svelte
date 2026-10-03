@@ -964,9 +964,14 @@
             {#if check === 'busy'}
               <span class="text-xs text-zinc-500">Checking...</span>
             {:else if check}
-              <span class="text-xs {check.outcome === 'ok' ? 'text-emerald-400' : 'text-rose-400'}">
-                {check.outcome === 'ok' ? 'Healthy' : `Failed${check.error_code ? `: ${check.error_code}` : ''}`}
-              </span>
+              <div class="flex items-center gap-2">
+                <span class="text-xs {check.outcome === 'ok' ? 'text-emerald-400' : 'text-rose-400'}">
+                  {check.outcome === 'ok' ? 'Healthy' : `Failed${check.error_code ? `: ${check.error_code}` : ''}`}
+                </span>
+                {#if check.receipt_status !== 'accepted'}
+                  <span class="text-[11px] text-amber-400" title="The provider result is shown, but Flare could not durably record its health receipt.">Receipt {check.receipt_status}</span>
+                {/if}
+              </div>
             {/if}
             <button onclick={() => checkConnector(connection)} disabled={check === 'busy'} class="text-xs text-zinc-500 transition-colors hover:text-amber-400 disabled:opacity-50">Check</button>
             {#if run === 'busy'}
