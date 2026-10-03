@@ -228,7 +228,10 @@ func releaseIdentity(compiled, declared string) (string, error) {
 	}
 	// Local and Compose development builds have no immutable release. A Helm
 	// release has a concrete tag and must use an image built with that tag.
-	if declared == "" || declared == "development" {
+	if declared == "" {
+		return compiled, nil
+	}
+	if declared == "development" && (compiled == "dev" || compiled == "development") {
 		return compiled, nil
 	}
 	if compiled != declared {
