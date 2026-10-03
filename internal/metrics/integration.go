@@ -19,7 +19,7 @@ func RecordIntegration(provider, operation, channel, outcome string, elapsed tim
 
 func canonicalIntegrationProvider(provider string) string {
 	switch provider {
-	case "alerts", "github", "ai", "oidc":
+	case "alerts", "github", "ai", "oidc", "hubspot", "slack", "openai":
 		return provider
 	default:
 		return "other"
@@ -45,6 +45,18 @@ func canonicalIntegrationOperation(provider, operation string) string {
 		case "discover", "exchange", "fetch_userinfo":
 			return operation
 		}
+	case "hubspot":
+		if operation == "account_details" {
+			return operation
+		}
+	case "slack":
+		if operation == "auth.test" {
+			return operation
+		}
+	case "openai":
+		if operation == "models" {
+			return operation
+		}
 	}
 	return "other"
 }
@@ -61,7 +73,7 @@ func canonicalIntegrationChannel(provider, channel string) string {
 		case "openai", "anthropic":
 			return channel
 		}
-	case "github", "oidc":
+	case "github", "oidc", "hubspot", "slack", "openai":
 		if channel == "http" {
 			return channel
 		}

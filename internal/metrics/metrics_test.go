@@ -101,3 +101,43 @@ func TestRecordIntegrationCanonicalizesUntrustedValues(t *testing.T) {
 		t.Fatalf("untrusted integration labels leaked:\n%s", body)
 	}
 }
+
+func TestConnectorProbesKeepProviderIdentityInProcessMetrics(t *testing.T) {
+	m := New()
+	previous := Default
+	Default = m
+	t.Cleanup(func() { Default = previous })
+
+	for _, probe := range []struct {
+		provider  string
+		operation string
+		outcome   string
+	}{
+		{provider: "hubspot", operation: "account_details", outcome: "ok"},
+		{provider: "slack", operation: "auth.test", outcome: "error"},
+		{provider: "openai", operation: "models", outcome: "ok"},
+	} {
+		RecordIntegration(probe.provider, probe.operation, "http", probe.outcome, 10*time.Millisecond)
+	}
+	// A new adapter cannot use caller-controlled operation/channel values as
+	// unbounded Prometheus labels even when its provider is allowlisted.
+	RecordIntegration("hubspot", "account-secret-123", "https://secret.example", "unexpected", time.Millisecond)
+
+	out := httptest.NewRecorder()
+	m.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := out.Body.String()
+	for _, want := range []string{
+		`flare_integration_requests_total{channel="http",operation="account_details",outcome="ok",provider="hubspot"} 1`,
+		`flare_integration_requests_total{channel="http",operation="auth.test",outcome="error",provider="slack"} 1`,
+		`flare_integration_requests_total{channel="http",operation="models",outcome="ok",provider="openai"} 1`,
+		`flare_integration_request_duration_seconds_count{channel="http",operation="account_details",outcome="ok",provider="hubspot"} 1`,
+		`flare_integration_requests_total{channel="other",operation="other",outcome="error",provider="hubspot"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("integration metric missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "account-secret-123") || strings.Contains(body, "secret.example") {
+		t.Fatalf("untrusted probe labels leaked:\n%s", body)
+	}
+}
