@@ -46,6 +46,122 @@ export interface Release {
   new_issues: number;
 }
 
+export interface ReleaseFreshness {
+  version: string;
+  deploy_marked_at?: string;
+  last_heartbeat_at?: string;
+  age_seconds: number;
+}
+
+export interface ClientHealth {
+  platform: string;
+  environment: string;
+  release: string;
+  event_count: number;
+  error_count: number;
+  error_rate: number;
+  affected_issue_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export interface ConnectorQuotaHealth {
+  connection_id?: string;
+  provider: string;
+  operation: string;
+  channel: string;
+  quota_points: number;
+  retry_points: number;
+  sync_lag_points: number;
+  quota_remaining?: number;
+  quota_observed_at?: string;
+  retry_after_ms?: number;
+  retry_observed_at?: string;
+  sync_lag_ms?: number;
+  sync_lag_observed_at?: string;
+  last_completed_at?: string;
+}
+
+export type ConnectorConnectionStatus = 'pending' | 'active' | 'paused' | 'error' | 'revoked';
+
+/** Tenant-scoped connector metadata. Credentials are write-only and are never returned. */
+export interface ConnectorConnection {
+  id: string;
+  provider: string;
+  installation_id: string;
+  installation_name: string;
+  status: ConnectorConnectionStatus;
+  scopes: string[];
+  credential_configured: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateConnectorConnectionInput {
+  provider: string;
+  installation_id: string;
+  installation_name?: string;
+  status?: ConnectorConnectionStatus;
+  scopes?: string[];
+  /** Write-only credential; the API never includes it in a response. */
+  secret?: string;
+}
+
+export interface UpdateConnectorConnectionInput {
+  provider?: string;
+  installation_id?: string;
+  installation_name?: string;
+  status?: ConnectorConnectionStatus;
+  scopes?: string[];
+  /** Omit to preserve the existing credential; supplying it rotates the credential. */
+  secret?: string;
+}
+
+export interface ConnectorSyncHealth {
+  id: string;
+  connection_id: string;
+  provider: string;
+  installation_name?: string;
+  connection_status: ConnectorConnectionStatus;
+  operation: string;
+  state: 'idle' | 'running' | 'succeeded' | 'failed';
+  cursor_configured: boolean;
+  cursor_version: number;
+  attempt_count: number;
+  last_started_at?: string;
+  last_completed_at?: string;
+  last_success_at?: string;
+  last_error_code?: string;
+  last_sync_lag_ms?: number;
+  next_run_at?: string;
+  lease_active: boolean;
+  lease_expires_at?: string;
+  updated_at?: string;
+}
+
+export interface ConnectorCheckResult {
+  provider: string;
+  operation: string;
+  outcome: 'ok' | 'error';
+  status_class: string;
+  error_code?: string;
+  quota_remaining?: number;
+  retry_after_ms?: number;
+}
+
+/** Result of one explicit, lease-bounded connector worker pass. */
+export interface ConnectorSyncRun {
+  operation: string;
+  state: 'idle' | 'running' | 'succeeded' | 'failed';
+  outcome?: 'ok' | 'error';
+  status_class?: string;
+  error_code?: string;
+  claimed: boolean;
+  skipped: boolean;
+  skip_reason?: 'lease_busy';
+  next_run_at?: string;
+}
+
 export interface GithubConfig {
   configured: boolean;
   repo: string;
@@ -85,6 +201,7 @@ export interface Artifact {
   release: string;
   name: string;
   size: number;
+  parse_status: 'unvalidated' | 'valid' | 'invalid_json' | 'invalid_mappings' | 'unsupported';
   created_at: string;
 }
 
@@ -192,9 +309,11 @@ export interface LogVolumeBucket {
   count: number;
 }
 
+export type AlertChannelType = 'log' | 'email' | 'slack' | 'webhook' | 'automation_webhook';
+
 export interface Channel {
   id: string;
-  type: string;
+  type: AlertChannelType;
   config: Record<string, unknown>;
   enabled: boolean;
   last_attempt_at: string | null;
@@ -220,10 +339,94 @@ export interface Monitor {
 export interface AlertRule {
   id: string;
   name: string;
-  type: string;
+  type: AlertRuleType;
   threshold: number;
   window_minutes: number;
+  metric_name?: string;
+  metric_labels?: Record<string, string>;
+  comparison?: AlertRuleComparison;
+  threshold_value?: number;
+  span_name?: string;
+  percentile?: number;
+  connector_provider?: string;
+  connector_operation?: string;
+  connector_channel?: string;
+  connector_error_code?: string;
+  connector_connection_id?: string;
+  connector_sync_mode?: AlertConnectorSyncMode;
+  connector_quota_metric?: ConnectorQuotaMetric;
+  release_version?: string;
+  service_name?: string;
+  log_severity?: AlertRuleSeverity;
+  usage_surface?: AlertUsageSurface;
+  usage_operation?: string;
+  usage_measure?: AlertUsageMeasure;
+  api_key_hygiene_mode?: AlertAPIKeyHygieneMode;
+  ai_triage_mode?: AlertAITriageMode;
   enabled: boolean;
+}
+
+/** Alert conditions accepted by the project alert-rules API. */
+export type AlertRuleType =
+  | 'new_issue'
+  | 'regression'
+  | 'spike'
+  | 'anomaly'
+  | 'silence'
+  | 'metric_threshold'
+  | 'trace_percentile'
+  | 'service_level'
+  | 'connector_error_rate'
+  | 'connector_quota'
+  | 'connector_freshness'
+  | 'connector_sync_health'
+  | 'service_freshness'
+  | 'release_error_rate'
+  | 'release_freshness'
+  | 'deploy_failure'
+  | 'deploy_acceptance'
+  | 'rollback'
+  | 'log_severity'
+  | 'usage_threshold'
+  | 'api_key_hygiene'
+  | 'ai_triage'
+  | 'ingest_acceptance';
+
+export type AlertRuleComparison = 'gt' | 'gte' | 'lt' | 'lte';
+export type AlertRuleSeverity = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+export type ConnectorQuotaMetric = 'quota_remaining' | 'retry_after_ms' | 'sync_lag_ms';
+export type AlertConnectorSyncMode = 'failed' | 'overdue';
+export type AlertUsageSurface = 'dsn' | 'api_key' | 'mcp';
+export type AlertUsageMeasure = 'requests' | 'errors' | 'denied';
+export type AlertAPIKeyHygieneMode = 'unused' | 'expiring';
+export type AlertAITriageMode = 'failed' | 'stuck';
+
+export interface CreateAlertRuleInput {
+  name: string;
+  type: AlertRuleType;
+  threshold?: number;
+  window_minutes?: number;
+  metric_name?: string;
+  metric_labels?: Record<string, string>;
+  comparison?: AlertRuleComparison;
+  threshold_value?: number;
+  span_name?: string;
+  percentile?: number;
+  connector_provider?: string;
+  connector_operation?: string;
+  connector_channel?: string;
+  connector_error_code?: string;
+  connector_connection_id?: string;
+  connector_sync_mode?: AlertConnectorSyncMode;
+  connector_quota_metric?: ConnectorQuotaMetric;
+  release_version?: string;
+  service_name?: string;
+  log_severity?: AlertRuleSeverity;
+  usage_surface?: AlertUsageSurface;
+  usage_operation?: string;
+  usage_measure?: AlertUsageMeasure;
+  api_key_hygiene_mode?: AlertAPIKeyHygieneMode;
+  ai_triage_mode?: AlertAITriageMode;
 }
 
 export interface OverviewHourBucket {

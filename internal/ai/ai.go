@@ -13,11 +13,14 @@ import (
 	"io"
 	"net"
 
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/netguard"
 	"net/http"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bright-interaction/flare/internal/metrics"
 )
 
 // Client is an HTTP client for chat completions. When guardSSRF is set (prod),
@@ -68,7 +71,27 @@ type Config struct {
 }
 
 // Complete sends a system + user prompt and returns the model's reply text.
-func (c *Client) Complete(ctx context.Context, cfg Config, system, user string) (string, error) {
+func (c *Client) Complete(ctx context.Context, cfg Config, system, user string) (reply string, err error) {
+	startedAt := time.Now().UTC()
+	started := startedAt
+	format := "openai"
+	if cfg.Format == "anthropic" {
+		format = "anthropic"
+	}
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RecordIntegration("ai", "complete", format, outcome, time.Since(started))
+		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
+		scope := integration.ScopeFrom(ctx)
+		integration.Record(ctx, integration.Attempt{
+			Scope: scope, Provider: "ai", Operation: "complete", Channel: format,
+			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
+			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+		})
+	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
 	base := strings.TrimRight(cfg.BaseURL, "/")

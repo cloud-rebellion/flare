@@ -20,6 +20,7 @@ RUN bun run build
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.6-bookworm AS backend
 WORKDIR /app
+ARG FLARE_RELEASE=development
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential gcc g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -30,7 +31,7 @@ COPY . .
 COPY --from=frontend /app/frontend/build ./cmd/server/frontend/build
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /flare ./cmd/server
+    CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -X main.Version=${FLARE_RELEASE}" -o /flare ./cmd/server
 
 # Stage 3: runtime (debian-slim for glibc + libstdc++, which the duckdb static
 # lib needs at runtime).
@@ -46,5 +47,5 @@ USER flare
 ENV FLARE_PARQUET_DIR=/app/data/parquet
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/api/health || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/livez || exit 1
 ENTRYPOINT ["/usr/local/bin/flare"]

@@ -20,6 +20,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/bright-interaction/flare/internal/integration"
+	"github.com/bright-interaction/flare/internal/metrics"
 )
 
 // httpClient is SSRF-guarded: the Control hook runs after DNS resolution with
@@ -79,7 +82,7 @@ var (
 )
 
 // Discover fetches (and caches) the issuer's OIDC discovery document.
-func Discover(ctx context.Context, issuer string) (*Provider, error) {
+func Discover(ctx context.Context, issuer string) (provider *Provider, err error) {
 	issuer = strings.TrimRight(issuer, "/")
 	discMu.Lock()
 	if p, ok := discCache[issuer]; ok {
@@ -88,6 +91,21 @@ func Discover(ctx context.Context, issuer string) (*Provider, error) {
 	}
 	discMu.Unlock()
 
+	startedAt := time.Now().UTC()
+	started := startedAt
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RecordIntegration("oidc", "discover", "http", outcome, time.Since(started))
+		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
+		integration.Record(ctx, integration.Attempt{
+			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "discover", Channel: "http",
+			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
+			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+		})
+	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
@@ -140,7 +158,22 @@ func (p *Provider) AuthCodeURL(clientID, redirectURI, state string) string {
 }
 
 // Exchange swaps an authorization code for an access token (client_secret_post).
-func (p *Provider) Exchange(ctx context.Context, clientID, clientSecret, code, redirectURI string) (string, error) {
+func (p *Provider) Exchange(ctx context.Context, clientID, clientSecret, code, redirectURI string) (accessToken string, err error) {
+	startedAt := time.Now().UTC()
+	started := startedAt
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RecordIntegration("oidc", "exchange", "http", outcome, time.Since(started))
+		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
+		integration.Record(ctx, integration.Attempt{
+			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "exchange", Channel: "http",
+			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
+			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+		})
+	}()
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("client_id", clientID)
@@ -186,7 +219,22 @@ type UserInfo struct {
 }
 
 // FetchUserInfo reads the userinfo endpoint with the access token.
-func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (*UserInfo, error) {
+func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (info *UserInfo, err error) {
+	startedAt := time.Now().UTC()
+	started := startedAt
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RecordIntegration("oidc", "fetch_userinfo", "http", outcome, time.Since(started))
+		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
+		integration.Record(ctx, integration.Attempt{
+			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "fetch_userinfo", Channel: "http",
+			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
+			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+		})
+	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, p.UserinfoURL, nil)
@@ -208,7 +256,7 @@ func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (*User
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
 	}
-	info := &UserInfo{}
+	info = &UserInfo{}
 	if v, ok := raw["sub"].(string); ok {
 		info.Subject = v
 	}

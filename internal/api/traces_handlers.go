@@ -16,6 +16,15 @@ import (
 
 // handleOTLPTraces ingests OTLP/HTTP traces (protobuf or OTLP/JSON).
 func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("span")
+		recordIngestRequest("otlp", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
@@ -24,28 +33,50 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "spans", "otlp", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
+		return
+	}
 	asJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
 	spans, err := ingest.ParseOTLPTraces(body, asJSON)
 	if err != nil {
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid OTLP traces payload")
 		return
 	}
+	receipt.setReceived(len(spans))
+	requestOutcome = ""
 	budget := newIngestBudget()
-	if err := s.persistSpans(r.Context(), project, spans, budget); err != nil {
+	stored, err := s.persistSpans(r.Context(), project, spans, budget)
+	if err != nil {
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// The persistence operation is all-or-nothing for this batch. Rows
+		// admitted by the budget were not durably accepted when it failed.
+		outcome.failed = uint64(len(spans)) - outcome.invalid - outcome.dropped
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slogError(w, "persist spans", err)
 		return
 	}
+	// Report rows that were actually admitted to the bounded request budget.
+	// The database copy is all-or-nothing, so a successful non-zero count is
+	// the durable acceptance count and a zero count is a deliberate drop.
+	outcome.accepted = uint64(stored)
+	outcome.invalid = uint64(budget.invalid)
+	outcome.dropped = uint64(budget.dropped)
 	budget.report(project.ID, "spans")
-	writeJSON(w, http.StatusOK, otlpResponse(budget.dropped, otlpRejectedSpans))
+	writeJSON(w, http.StatusOK, otlpResponse(budget.rejected(), otlpRejectedSpans))
 }
 
-func (s *Server) persistSpans(ctx context.Context, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) error {
+func (s *Server) persistSpans(ctx context.Context, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) (int, error) {
 	// Spend the request's row budget first. handleEnvelope calls this once per
 	// transaction item, so the budget has to be the REQUEST's, not this call's.
 	// See maxIngestRecords.
 	spans = spans[:budget.take(len(spans))]
 	if len(spans) == 0 {
-		return nil
+		return 0, nil
 	}
 	params := make([]generated.InsertSpansParams, 0, len(spans))
 	for _, sp := range spans {
@@ -67,7 +98,10 @@ func (s *Server) persistSpans(ctx context.Context, project *generated.Project, s
 		})
 	}
 	_, err := s.q.InsertSpans(ctx, params)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return len(spans), nil
 }
 
 type traceSummary struct {

@@ -12,6 +12,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        FLARE_RELEASE: "${FLARE_RELEASE:-development}"
     image: flare:latest
     container_name: flare
     restart: unless-stopped

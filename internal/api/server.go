@@ -18,10 +18,19 @@ import (
 	"github.com/bright-interaction/flare/internal/alerts"
 	"github.com/bright-interaction/flare/internal/analytics"
 	"github.com/bright-interaction/flare/internal/config"
+	"github.com/bright-interaction/flare/internal/connectorcheck"
+	"github.com/bright-interaction/flare/internal/connectorsync"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/email"
+	flaregithub "github.com/bright-interaction/flare/internal/github"
+	"github.com/bright-interaction/flare/internal/hubspot"
+	"github.com/bright-interaction/flare/internal/id"
+	"github.com/bright-interaction/flare/internal/integration"
+	"github.com/bright-interaction/flare/internal/metrics"
+	flareopenai "github.com/bright-interaction/flare/internal/openai"
 	"github.com/bright-interaction/flare/internal/ratelimit"
 	"github.com/bright-interaction/flare/internal/secretbox"
+	"github.com/bright-interaction/flare/internal/slack"
 	"github.com/bright-interaction/flare/internal/sourcemaps"
 	"github.com/bright-interaction/flare/internal/telemetry"
 	"github.com/bright-interaction/flare/internal/telemetry/pgstore"
@@ -35,17 +44,21 @@ const (
 )
 
 type Server struct {
-	q            *generated.Queries
-	pool         *pgxpool.Pool
-	store        telemetry.Store
-	analytics    *analytics.Manager // may be nil when DuckDB failed to open
-	sessions     *scs.SessionManager
-	cfg          config.Config
-	dispatcher   *alerts.Dispatcher
-	mailer       *email.Mailer
-	symbolicator *sourcemaps.Resolver
-	ai           *ai.Client
-	secrets      *secretbox.Cipher // encrypts integration secrets at rest
+	q                  *generated.Queries
+	pool               *pgxpool.Pool
+	store              telemetry.Store
+	analytics          *analytics.Manager // may be nil when DuckDB failed to open
+	sessions           *scs.SessionManager
+	cfg                config.Config
+	dispatcher         *alerts.Dispatcher
+	mailer             *email.Mailer
+	symbolicator       *sourcemaps.Resolver
+	ai                 *ai.Client
+	secrets            *secretbox.Cipher // encrypts integration secrets at rest
+	hubspotProbe       connectorProbe
+	connectorProbes    connectorcheck.Registry
+	hubspotSync        *connectorsync.HubSpotWorker
+	connectorScheduler *connectorsync.Scheduler
 
 	// loginLimiter locks out brute-force logins; ingestLimiter caps per-DSN-key
 	// (or per-IP) ingest flooding; mcpLimiter caps per-org MCP request rate so a
@@ -291,19 +304,28 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 			allowPrivateAI = false
 		}
 	}
+	queries := generated.New(pool)
+	secretCipher := secretbox.New(cfg.SecretKey)
+	hubspotClient := hubspot.New()
+	connectorProbes := newConnectorProbeRegistry(hubspotClient)
+	hubspotWorker := connectorsync.NewHubSpotWorker(queries, secretCipher, hubspotClient)
 	srv := &Server{
-		q:              generated.New(pool),
-		pool:           pool,
-		store:          pgstore.New(pool),
-		analytics:      analyticsMgr,
-		sessions:       sessions,
-		cfg:            cfg,
-		dispatcher:     alerts.NewDispatcher(mailer),
-		mailer:         mailer,
-		symbolicator:   sourcemaps.NewResolver(),
-		ai:             ai.New(!allowPrivateAI),
-		allowPrivateAI: allowPrivateAI,
-		secrets:        secretbox.New(cfg.SecretKey),
+		q:                  queries,
+		pool:               pool,
+		store:              pgstore.New(pool),
+		analytics:          analyticsMgr,
+		sessions:           sessions,
+		cfg:                cfg,
+		dispatcher:         alerts.NewDispatcher(mailer),
+		mailer:             mailer,
+		symbolicator:       sourcemaps.NewResolver(),
+		ai:                 ai.New(!allowPrivateAI),
+		allowPrivateAI:     allowPrivateAI,
+		secrets:            secretCipher,
+		hubspotProbe:       hubspotClient,
+		connectorProbes:    connectorProbes,
+		hubspotSync:        hubspotWorker,
+		connectorScheduler: connectorsync.NewScheduler(queries, hubspotWorker),
 
 		loginLimiter:  ratelimit.New(loginFailBudget, loginFailWindow),
 		ingestLimiter: ratelimit.New(cfg.IngestRatePerMin, time.Minute),
@@ -370,7 +392,24 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 	// Persist each delivery outcome so a silently-failing channel becomes
 	// visible (last_ok_at / last_error) instead of vanishing into a log line.
 	srv.dispatcher.Recorder = srv.recordChannelDelivery
+	// Persist bounded, payload-free connector attempts for authenticated health
+	// reads. Unscoped calls are dropped by integration.Record.
+	integration.SetRecorder(srv.recordConnectorAttempt)
 	return srv
+}
+
+// newConnectorProbeRegistry is the compile-time allowlist for on-demand
+// connector checks. Sync remains deliberately separate and HubSpot-only.
+func newConnectorProbeRegistry(hubspotProbe connectorProbe) connectorcheck.Registry {
+	if hubspotProbe == nil {
+		hubspotProbe = hubspot.New()
+	}
+	return connectorcheck.NewRegistry(map[string]connectorcheck.Adapter{
+		"hubspot": {Operation: "account_details", Probe: hubspotProbe},
+		"github":  {Operation: "user", Probe: flaregithub.NewHealthClient()},
+		"slack":   {Operation: "auth.test", Probe: slack.New()},
+		"openai":  {Operation: "models", Probe: flareopenai.New()},
+	})
 }
 
 // dispatchToProject sends one notification to the channels routed to a project,
@@ -383,6 +422,9 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 // production incident and a side project in the same Slack; it is deleted, not
 // deprecated.
 func (s *Server) dispatchToProject(ctx context.Context, org, project string, n alerts.Notification) {
+	if n.ProjectID == "" {
+		n.ProjectID = project
+	}
 	chans, err := s.q.ListEnabledChannelsForProject(ctx, generated.ListEnabledChannelsForProjectParams{
 		OrgID: org, ProjectID: project,
 	})
@@ -419,6 +461,40 @@ func (s *Server) recordChannelDelivery(ctx context.Context, orgID, channelID str
 		OrgID:       orgID,
 	}); err != nil {
 		slog.Warn("record channel delivery", "channel_id", channelID, "error", err)
+	}
+}
+
+func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attempt) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	projectID := pgtype.Text{}
+	if a.Scope.ProjectID != "" {
+		projectID = pgtype.Text{String: a.Scope.ProjectID, Valid: true}
+	}
+	connectionID := pgtype.Text{}
+	if a.Scope.ConnectionID != "" {
+		connectionID = pgtype.Text{String: a.Scope.ConnectionID, Valid: true}
+	}
+	if err := s.q.InsertConnectorAttempt(ctx, generated.InsertConnectorAttemptParams{
+		ID:             id.New(),
+		OrgID:          a.Scope.OrgID,
+		ProjectID:      projectID,
+		ConnectionID:   connectionID,
+		Provider:       a.Provider,
+		Operation:      a.Operation,
+		Channel:        a.Channel,
+		Outcome:        a.Outcome,
+		StatusClass:    a.StatusClass,
+		ErrorCode:      a.ErrorCode,
+		ElapsedMs:      a.Elapsed.Milliseconds(),
+		QuotaRemaining: optionalInt8(a.QuotaRemaining),
+		RetryAfterMs:   optionalInt8(a.RetryAfterMS),
+		SyncLagMs:      optionalInt8(a.SyncLagMS),
+		AttemptedAt:    pgtype.Timestamptz{Time: a.AttemptedAt.UTC(), Valid: true},
+		CompletedAt:    pgtype.Timestamptz{Time: a.CompletedAt.UTC(), Valid: true},
+	}); err != nil {
+		metrics.Inc("flare_connector_receipts", map[string]string{"operation": "insert", "outcome": "error"})
+		slog.Warn("record connector attempt", "provider", a.Provider, "operation", a.Operation, "error", err)
 	}
 }
 

@@ -29,8 +29,19 @@ import (
 //go:embed all:frontend/build
 var frontendFiles embed.FS
 
+// Version is stamped by the release build so Flare can group its own
+// regressions by the exact deployed artifact. Local builds retain a readable
+// fallback rather than reporting an empty release.
+var Version = "dev"
+
 func main() {
+	flarereport.InitFlare("flare", Version)
+	defer flarereport.Flush(2 * time.Second)
 	if err := run(); err != nil {
+		// Config, migration, and database failures happen before the HTTP server
+		// can capture them. Report the terminal startup error while the DSN client
+		// is still alive, then keep the existing stderr log for operators.
+		flarereport.CaptureErr(err)
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
@@ -50,11 +61,6 @@ func run() error {
 		level = slog.LevelDebug
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-
-	// Error reporting to Flare itself (no-op unless FLARE_DSN is set; the DSN
-	// is injected by the Hephaestus flare-provision deploy step). BeforeSend
-	// rate-limits self-reports so an ingest-path panic cannot self-amplify.
-	flarereport.InitFlare("flare", "dev")
 
 	if err := db.RunMigrations(ctx, cfg.DatabaseURL); err != nil {
 		return fmt.Errorf("migrations: %w", err)
@@ -142,6 +148,12 @@ func run() error {
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.
 	go srv.RunWatchdog(ctx, 5*time.Minute)
+	if cfg.ConnectorSyncEnabled {
+		// Provider polling is an explicit operator choice. The scheduler is
+		// bounded, due-gated, and lease-protected; leaving the flag off keeps
+		// connector credentials entirely caller-driven.
+		go srv.RunConnectorSyncScheduler(ctx, cfg.ConnectorSyncInterval)
+	}
 
 	// Re-surface outstanding right-to-erasure obligations on a ticker, not only at
 	// the boot log below. A long-uptime instance would otherwise announce them

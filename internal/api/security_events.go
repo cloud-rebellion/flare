@@ -116,11 +116,11 @@ func (s *Server) ensureSecurityProject(ctx context.Context, org string) (*genera
 	// Best-effort: a failure still leaves the project usable.
 	_, _ = s.q.CreateAlertRule(ctx, generated.CreateAlertRuleParams{
 		ID: id.New(), ProjectID: p.ID, OrgID: org,
-		Name: "Security event spike", Type: "spike", Threshold: 10, WindowMinutes: 5, Enabled: true,
+		Name: "Security event spike", Type: "spike", Threshold: 10, WindowMinutes: 5, MetricLabels: json.RawMessage(`{}`), Enabled: true,
 	})
 	_, _ = s.q.CreateAlertRule(ctx, generated.CreateAlertRuleParams{
 		ID: id.New(), ProjectID: p.ID, OrgID: org,
-		Name: "New security event", Type: "new_issue", Enabled: true,
+		Name: "New security event", Type: "new_issue", MetricLabels: json.RawMessage(`{}`), Enabled: true,
 	})
 	s.cacheSecProject(org, p)
 	return p, nil

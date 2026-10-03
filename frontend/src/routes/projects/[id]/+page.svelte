@@ -5,7 +5,24 @@
   import { api, ApiError } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { relativeTime, levelColor } from '$lib/format';
-  import type { AlertRule, Artifact, Issue, Monitor, PartialErasure, Project } from '$lib/types';
+  import type {
+    AlertRule,
+    AlertRuleComparison,
+    AlertRuleSeverity,
+    AlertRuleType,
+    AlertAITriageMode,
+    AlertAPIKeyHygieneMode,
+    AlertConnectorSyncMode,
+    AlertUsageMeasure,
+    AlertUsageSurface,
+    Artifact,
+    ConnectorQuotaMetric,
+    CreateAlertRuleInput,
+    Issue,
+    Monitor,
+    PartialErasure,
+    Project
+  } from '$lib/types';
 
   const id = $derived(page.params.id ?? '');
 
@@ -25,9 +42,30 @@
   let rules = $state<AlertRule[]>([]);
   let ruleName = $state('');
   let hasChannel = $state(true); // assume true until loaded, so no flash
-  let ruleType = $state('new_issue');
+  let ruleType = $state<AlertRuleType>('new_issue');
   let ruleThreshold = $state(10);
   let ruleWindow = $state(5);
+  let ruleMetricName = $state('');
+  let ruleMetricLabels = $state('');
+  let ruleComparison = $state<AlertRuleComparison>('gte');
+  let ruleThresholdValue = $state(0.95);
+  let ruleSpanName = $state('');
+  let rulePercentile = $state(95);
+  let ruleConnectorProvider = $state('');
+  let ruleConnectorOperation = $state('');
+  let ruleConnectorChannel = $state('');
+  let ruleConnectorErrorCode = $state('');
+  let ruleConnectorConnectionID = $state('');
+  let ruleConnectorSyncMode = $state<AlertConnectorSyncMode>('overdue');
+  let ruleConnectorQuotaMetric = $state<ConnectorQuotaMetric>('quota_remaining');
+  let ruleReleaseVersion = $state('');
+  let ruleServiceName = $state('');
+  let ruleLogSeverity = $state<AlertRuleSeverity>('error');
+  let ruleUsageSurface = $state<AlertUsageSurface>('mcp');
+  let ruleUsageOperation = $state('tools_call');
+  let ruleUsageMeasure = $state<AlertUsageMeasure>('errors');
+  let ruleAPIKeyHygieneMode = $state<AlertAPIKeyHygieneMode>('unused');
+  let ruleAITriageMode = $state<AlertAITriageMode>('failed');
   let confirmName = $state('');
   let deleting = $state(false);
   let partialErasure = $state<PartialErasure | null>(null);
@@ -47,6 +85,11 @@
   let smBusy = $state(false);
 
   const filters = ['unresolved', 'resolved', 'ignored', 'all'];
+  const usageOperations: Record<AlertUsageSurface, string[]> = {
+    dsn: ['envelope', 'event', 'logs', 'metrics', 'traces', 'connector_attempts', 'checkins', 'symbols', 'otlp_logs', 'otlp_traces', 'otlp_metrics'],
+    api_key: ['read', 'write', 'mcp'],
+    mcp: ['initialize', 'ping', 'tools_list', 'tools_call', 'tool_overview', 'tool_list_projects', 'tool_list_issues', 'tool_get_issue', 'tool_search_logs', 'tool_get_trace', 'tool_query_metrics', 'tool_update_issue_status', 'tool_triage_issue']
+  };
 
   $effect(() => {
     if (session.loaded && !session.user) goto('/login', { replaceState: true });
@@ -122,13 +165,140 @@
     e.preventDefault();
     if (!ruleName.trim()) return;
     try {
-      const usesWindow = ruleType === 'spike' || ruleType === 'anomaly' || ruleType === 'silence';
-      const r = await api.createAlertRule(id, {
+      const rule: CreateAlertRuleInput = {
         name: ruleName,
-        type: ruleType,
-        threshold: usesWindow ? ruleThreshold : 0,
-        window_minutes: usesWindow ? ruleWindow : 0
-      });
+        type: ruleType
+      };
+      switch (ruleType) {
+        case 'spike':
+        case 'anomaly':
+        case 'silence':
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'metric_threshold':
+          rule.metric_name = ruleMetricName.trim();
+          if (ruleMetricLabels.trim()) {
+            const parsed = JSON.parse(ruleMetricLabels);
+            if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+              throw new Error('Metric labels must be a JSON object');
+            }
+            rule.metric_labels = parsed as Record<string, string>;
+          }
+          rule.comparison = ruleComparison;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'trace_percentile':
+          rule.span_name = ruleSpanName.trim();
+          rule.comparison = ruleComparison;
+          rule.threshold_value = ruleThresholdValue;
+          rule.percentile = rulePercentile;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'service_level':
+          rule.span_name = ruleSpanName.trim();
+          // Service-level rules reuse the bounded alert fields: threshold is
+          // the latency objective in milliseconds and threshold_value is the
+          // minimum availability target.
+          rule.threshold = ruleThreshold;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'connector_error_rate':
+          rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_operation = ruleConnectorOperation.trim() || undefined;
+          rule.connector_channel = ruleConnectorChannel.trim() || undefined;
+          rule.connector_error_code = ruleConnectorErrorCode.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.comparison = ruleComparison;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'connector_quota':
+          rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_operation = ruleConnectorOperation.trim() || undefined;
+          rule.connector_channel = ruleConnectorChannel.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.connector_quota_metric = ruleConnectorQuotaMetric;
+          rule.comparison = ruleComparison;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'connector_freshness':
+          rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_operation = ruleConnectorOperation.trim() || undefined;
+          rule.connector_channel = ruleConnectorChannel.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'connector_sync_health':
+          rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_operation = ruleConnectorOperation.trim();
+          rule.connector_connection_id = ruleConnectorConnectionID.trim();
+          rule.connector_sync_mode = ruleConnectorSyncMode;
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'release_error_rate':
+          rule.release_version = ruleReleaseVersion.trim() || undefined;
+          rule.comparison = ruleComparison;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'release_freshness':
+          rule.release_version = ruleReleaseVersion.trim();
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'service_freshness':
+          rule.service_name = ruleServiceName.trim();
+          rule.release_version = ruleReleaseVersion.trim();
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'deploy_failure':
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'deploy_acceptance':
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'rollback':
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'log_severity':
+          rule.log_severity = ruleLogSeverity;
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'usage_threshold':
+          rule.usage_surface = ruleUsageSurface;
+          rule.usage_operation = ruleUsageOperation;
+          rule.usage_measure = ruleUsageMeasure;
+          rule.comparison = ruleComparison;
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'api_key_hygiene':
+          rule.api_key_hygiene_mode = ruleAPIKeyHygieneMode;
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'ai_triage':
+          rule.ai_triage_mode = ruleAITriageMode;
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'ingest_acceptance':
+          rule.threshold = ruleThreshold;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'new_issue':
+        case 'regression':
+          break;
+      }
+      const r = await api.createAlertRule(id, rule);
       rules = [r, ...rules];
       ruleName = '';
     } catch (err) {
@@ -146,6 +316,97 @@
     } else if (ruleType === 'silence') {
       ruleThreshold = 20;
       ruleWindow = 30;
+    } else if (ruleType === 'metric_threshold') {
+      ruleMetricName = '';
+      ruleMetricLabels = '';
+      ruleComparison = 'gte';
+      ruleThresholdValue = 0.95;
+      ruleWindow = 5;
+    } else if (ruleType === 'trace_percentile') {
+      ruleSpanName = '';
+      ruleComparison = 'gte';
+      ruleThresholdValue = 500;
+      rulePercentile = 95;
+      ruleWindow = 5;
+    } else if (ruleType === 'service_level') {
+      ruleSpanName = '';
+      ruleThreshold = 1000;
+      ruleThresholdValue = 0.999;
+      ruleWindow = 5;
+    } else if (ruleType === 'connector_error_rate') {
+      ruleConnectorProvider = '';
+      ruleConnectorOperation = '';
+      ruleConnectorChannel = '';
+      ruleConnectorErrorCode = '';
+      ruleConnectorConnectionID = '';
+      ruleComparison = 'gte';
+      ruleThresholdValue = 0.1;
+      ruleWindow = 5;
+    } else if (ruleType === 'connector_quota') {
+      ruleConnectorProvider = '';
+      ruleConnectorOperation = '';
+      ruleConnectorChannel = '';
+      ruleConnectorConnectionID = '';
+      ruleConnectorQuotaMetric = 'quota_remaining';
+      ruleComparison = 'lte';
+      ruleThresholdValue = 100;
+      ruleWindow = 5;
+    } else if (ruleType === 'connector_freshness') {
+      ruleConnectorProvider = '';
+      ruleConnectorOperation = '';
+      ruleConnectorChannel = '';
+      ruleConnectorConnectionID = '';
+      ruleWindow = 30;
+    } else if (ruleType === 'connector_sync_health') {
+      ruleConnectorProvider = '';
+      ruleConnectorOperation = 'account_details';
+      ruleConnectorConnectionID = '';
+      ruleConnectorSyncMode = 'overdue';
+      ruleThreshold = 1;
+      ruleWindow = 15;
+    } else if (ruleType === 'release_error_rate') {
+      ruleReleaseVersion = '';
+      ruleComparison = 'gte';
+      ruleThresholdValue = 0.1;
+      ruleWindow = 30;
+    } else if (ruleType === 'release_freshness') {
+      ruleReleaseVersion = '';
+      ruleWindow = 30;
+    } else if (ruleType === 'service_freshness') {
+      ruleServiceName = '';
+      ruleReleaseVersion = '';
+      ruleWindow = 30;
+    } else if (ruleType === 'deploy_failure') {
+      ruleThreshold = 1;
+      ruleWindow = 30;
+    } else if (ruleType === 'deploy_acceptance') {
+      ruleThreshold = 1;
+      ruleWindow = 15;
+    } else if (ruleType === 'rollback') {
+      ruleThreshold = 1;
+      ruleWindow = 30;
+    } else if (ruleType === 'log_severity') {
+      ruleLogSeverity = 'error';
+      ruleThreshold = 100;
+      ruleWindow = 5;
+    } else if (ruleType === 'usage_threshold') {
+      ruleUsageSurface = 'mcp';
+      ruleUsageOperation = 'tools_call';
+      ruleUsageMeasure = 'errors';
+      ruleComparison = 'gte';
+      ruleThreshold = 1;
+      ruleWindow = 5;
+    } else if (ruleType === 'api_key_hygiene') {
+      ruleAPIKeyHygieneMode = 'unused';
+      ruleThreshold = 1;
+      ruleWindow = 30 * 24 * 60;
+    } else if (ruleType === 'ai_triage') {
+      ruleAITriageMode = 'failed';
+      ruleThreshold = 1;
+      ruleWindow = 15;
+    } else if (ruleType === 'ingest_acceptance') {
+      ruleThreshold = 1;
+      ruleWindow = 15;
     }
   }
 
@@ -154,6 +415,54 @@
     if (r.type === 'anomaly') return `anomaly: ${r.threshold}x baseline over ${r.window_minutes}m`;
     if (r.type === 'silence') return `silence: quiet ${r.window_minutes}m (normally >${r.threshold}/24h)`;
     if (r.type === 'regression') return 'regression';
+    if (r.type === 'metric_threshold') {
+      const labels = r.metric_labels && Object.entries(r.metric_labels).map(([key, value]) => `${key}=${value}`).join(', ');
+      return `metric: ${r.metric_name || 'unknown'}${labels ? ` [${labels}]` : ''} ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'trace_percentile') {
+      return `trace: p${r.percentile || 95} ${r.span_name || 'unknown'} ${r.comparison || 'gte'} ${r.threshold_value ?? 0}ms / ${r.window_minutes}m`;
+    }
+    if (r.type === 'service_level') {
+      return `SLO: ${r.span_name || 'unknown'} availability < ${r.threshold_value ?? 0.999} at ${r.threshold || 1000}ms / ${r.window_minutes}m`;
+    }
+    if (r.type === 'connector_error_rate') {
+      const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
+      const code = r.connector_error_code ? ` (${r.connector_error_code})` : '';
+      const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
+      return `connector: ${selector || 'unknown'}${connection}${code} ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'connector_quota') {
+      const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
+      const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
+      return `quota: ${selector || 'unknown'}${connection} ${r.connector_quota_metric || 'quota_remaining'} ${r.comparison || 'lte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'connector_freshness') {
+      const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
+      const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
+      return `freshness: ${selector || 'unknown'}${connection} every ${r.window_minutes}m`;
+    }
+    if (r.type === 'connector_sync_health') {
+      const selector = [r.connector_provider, r.connector_operation].filter(Boolean).join('/');
+      const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
+      return `sync health: ${selector || 'unknown'}${connection} ${r.connector_sync_mode || 'overdue'} >= ${r.threshold} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'release_error_rate') {
+      return `release: ${r.release_version || 'latest'} ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'release_freshness') {
+      return `release freshness: ${r.release_version || 'unknown'} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'service_freshness') {
+      return `service freshness: ${r.service_name || 'unknown'} / ${r.release_version || 'unknown'} / ${r.window_minutes}m`;
+    }
+    if (r.type === 'deploy_failure') return `deploy failures: >= ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'deploy_acceptance') return `deploy acceptance: >= ${r.threshold} unverified / ${r.window_minutes}m`;
+    if (r.type === 'rollback') return `rollbacks: >= ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'log_severity') return `logs: ${r.log_severity || 'error'} >= ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'usage_threshold') return `usage: ${r.usage_surface || 'mcp'}/${r.usage_operation || 'other'} ${r.usage_measure || 'requests'} ${r.comparison || 'gte'} ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'api_key_hygiene') return `API keys: ${r.api_key_hygiene_mode || 'unused'} >= ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'ai_triage') return `AI triage: ${r.ai_triage_mode || 'failed'} >= ${r.threshold} / ${r.window_minutes}m`;
+    if (r.type === 'ingest_acceptance') return `Ingest acceptance: >= ${r.threshold} incomplete / ${r.window_minutes}m`;
     return 'new issue';
   }
 
@@ -329,8 +638,8 @@
         <h3 class="text-sm font-medium">Alert rules</h3>
         <p class="mt-1 text-xs text-zinc-500">
           New issue, regression, spike (N events in M minutes), anomaly (error rate jumps vs the project's own
-          baseline), or silence (a normally-active project goes quiet). Delivery goes to channels you add under
-          <a href="/settings" class="text-amber-400 hover:text-amber-300">Alerts</a>.
+          baseline), silence, metric thresholds, trace latency, connector error/quota/sync-lag/freshness/sync-state health, release error rates, release freshness, deploy failures, explicit rollbacks, log volume, MCP/API-key/DSN usage, API-key hygiene, AI triage, or incomplete ingest acceptance.
+          Delivery goes to channels you add under <a href="/settings" class="text-amber-400 hover:text-amber-300">Alerts</a>.
         </p>
         {#if !hasChannel}
           <p class="mt-2 rounded-md border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-300/90">
@@ -355,6 +664,24 @@
               <option value="spike">Spike</option>
               <option value="anomaly">Anomaly</option>
               <option value="silence">Silence</option>
+              <option value="metric_threshold">Metric threshold</option>
+              <option value="trace_percentile">Trace latency percentile</option>
+              <option value="service_level">Service-level SLO</option>
+              <option value="connector_error_rate">Connector error rate</option>
+              <option value="connector_quota">Connector quota / rate limit</option>
+              <option value="connector_freshness">Connector freshness</option>
+              <option value="connector_sync_health">Connector sync state / lease health</option>
+              <option value="service_freshness">Service heartbeat freshness</option>
+              <option value="release_error_rate">Release error rate</option>
+              <option value="release_freshness">Release freshness</option>
+              <option value="deploy_failure">Deploy failure</option>
+              <option value="deploy_acceptance">Deploy acceptance gap</option>
+              <option value="rollback">Explicit rollback</option>
+              <option value="log_severity">Log severity volume</option>
+              <option value="usage_threshold">MCP/API-key/DSN usage</option>
+              <option value="api_key_hygiene">API-key hygiene</option>
+              <option value="ai_triage">AI triage health</option>
+              <option value="ingest_acceptance">Ingest acceptance health</option>
             </select>
           </div>
           {#if ruleType === 'spike'}
@@ -410,6 +737,741 @@
                 class="w-16 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
               />
               <span>events/24h</span>
+            </div>
+          {:else if ruleType === 'metric_threshold'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Metric name
+                <input
+                  bind:value={ruleMetricName}
+                  required
+                  maxlength="128"
+                  placeholder="client.web.lcp_ms"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Label selectors (JSON, optional)
+                <input
+                  bind:value={ruleMetricLabels}
+                  maxlength="1024"
+                  placeholder="&#123;&quot;environment&quot;:&quot;production&quot;,&quot;route&quot;:&quot;/checkout&quot;&#125;"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Comparison
+                <select
+                  bind:value={ruleComparison}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="gte">at least</option>
+                  <option value="gt">greater than</option>
+                  <option value="lte">at most</option>
+                  <option value="lt">less than</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Threshold
+                <input
+                  type="number"
+                  step="any"
+                  bind:value={ruleThresholdValue}
+                  class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'trace_percentile'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Span operation
+                <input
+                  bind:value={ruleSpanName}
+                  required
+                  maxlength="128"
+                  placeholder="GET /checkout"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Percentile
+                <select
+                  bind:value={rulePercentile}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value={50}>p50</option>
+                  <option value={75}>p75</option>
+                  <option value={90}>p90</option>
+                  <option value={95}>p95</option>
+                  <option value={99}>p99</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Latency
+                <input
+                  type="number"
+                  min="0"
+                  max="86400000"
+                  step="any"
+                  bind:value={ruleThresholdValue}
+                  class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>ms over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'service_level'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Span operation
+                <input
+                  bind:value={ruleSpanName}
+                  required
+                  maxlength="128"
+                  placeholder="GET /checkout"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Availability target
+                <input
+                  type="number"
+                  min="0.000001"
+                  max="0.999999"
+                  step="0.000001"
+                  bind:value={ruleThresholdValue}
+                  class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Good span latency at most
+                <input
+                  type="number"
+                  min="1"
+                  max="86400000"
+                  bind:value={ruleThreshold}
+                  class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>ms over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'connector_error_rate'}
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Provider
+                <input
+                  bind:value={ruleConnectorProvider}
+                  required
+                  maxlength="32"
+                  placeholder="hubspot"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Operation (optional)
+                <input
+                  bind:value={ruleConnectorOperation}
+                  maxlength="64"
+                  placeholder="contacts.list"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Channel (optional)
+                <input
+                  bind:value={ruleConnectorChannel}
+                  maxlength="32"
+                  placeholder="backend"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Error code (optional)
+                <input
+                  bind:value={ruleConnectorErrorCode}
+                  maxlength="64"
+                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                  placeholder="auth_expired"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Connection ID (optional)
+                <input
+                  bind:value={ruleConnectorConnectionID}
+                  maxlength="128"
+                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                  placeholder="registered installation id"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Error rate
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  bind:value={ruleThresholdValue}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'connector_quota'}
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Provider
+                <input
+                  bind:value={ruleConnectorProvider}
+                  required
+                  maxlength="32"
+                  placeholder="hubspot"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Operation (optional)
+                <input
+                  bind:value={ruleConnectorOperation}
+                  maxlength="64"
+                  placeholder="contacts.list"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Channel (optional)
+                <input
+                  bind:value={ruleConnectorChannel}
+                  maxlength="32"
+                  placeholder="backend"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Connection ID (optional)
+                <input
+                  bind:value={ruleConnectorConnectionID}
+                  maxlength="128"
+                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                  placeholder="registered installation id"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Provider signal
+                <select
+                  bind:value={ruleConnectorQuotaMetric}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="quota_remaining">Quota remaining</option>
+                  <option value="retry_after_ms">Retry-after delay (ms)</option>
+                  <option value="sync_lag_ms">Sync lag (ms)</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Trigger when latest is
+                <select
+                  bind:value={ruleComparison}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="lte">at most</option>
+                  <option value="lt">less than</option>
+                  <option value="gte">at least</option>
+                  <option value="gt">greater than</option>
+                </select>
+                <input
+                  type="number"
+                  min="0"
+                  max="1000000000000000"
+                  step="1"
+                  bind:value={ruleThresholdValue}
+                  class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                observed over
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'connector_freshness'}
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Provider
+                <input
+                  bind:value={ruleConnectorProvider}
+                  required
+                  maxlength="32"
+                  placeholder="hubspot"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Operation (optional)
+                <input
+                  bind:value={ruleConnectorOperation}
+                  maxlength="64"
+                  placeholder="contacts.list"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Channel (optional)
+                <input
+                  bind:value={ruleConnectorChannel}
+                  maxlength="32"
+                  placeholder="backend"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Connection ID (optional)
+                <input
+                  bind:value={ruleConnectorConnectionID}
+                  maxlength="128"
+                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                  placeholder="registered installation id"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Require a completed attempt every
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'connector_sync_health'}
+            <div class="grid gap-2 sm:grid-cols-4">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Provider
+                <input
+                  bind:value={ruleConnectorProvider}
+                  required
+                  maxlength="32"
+                  placeholder="hubspot"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Sync operation
+                <input
+                  bind:value={ruleConnectorOperation}
+                  required
+                  maxlength="64"
+                  placeholder="account_details"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Registered connection ID
+                <input
+                  bind:value={ruleConnectorConnectionID}
+                  required
+                  maxlength="128"
+                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                  placeholder="connector installation id"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Condition
+                <select
+                  bind:value={ruleConnectorSyncMode}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="overdue">Overdue schedule or lease</option>
+                  <option value="failed">Recent failed state</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500 sm:col-span-2">
+                Alert at
+                <input
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  bind:value={ruleThreshold}
+                  class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                matching state(s), after
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'release_error_rate'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Release (optional; blank uses latest)
+                <input
+                  bind:value={ruleReleaseVersion}
+                  maxlength="128"
+                  placeholder="2026.10.02"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Error rate
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  bind:value={ruleThresholdValue}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'release_freshness'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Deployed release (required)
+                <input
+                  bind:value={ruleReleaseVersion}
+                  required
+                  maxlength="128"
+                  placeholder="2026.10.02"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Alert when heartbeat is older than
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>minutes</span>
+              </label>
+            </div>
+          {:else if ruleType === 'service_freshness'}
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Service name (exact heartbeat)
+                <input
+                  bind:value={ruleServiceName}
+                  required
+                  maxlength="64"
+                  placeholder="api-web"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Release (exact)
+                <input
+                  bind:value={ruleReleaseVersion}
+                  required
+                  maxlength="128"
+                  placeholder="2026.10.03"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Alert when heartbeat is older than
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>minutes</span>
+              </label>
+            </div>
+          {:else if ruleType === 'deploy_failure'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when failed or blocked deploys reach</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>in</span>
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
+            </div>
+          {:else if ruleType === 'deploy_acceptance'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when passed deploys without synthetic verification reach</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>after</span>
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
+            </div>
+          {:else if ruleType === 'rollback'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when explicit rollback outcomes reach</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>in</span>
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
+            </div>
+          {:else if ruleType === 'log_severity'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when</span>
+              <select
+                bind:value={ruleLogSeverity}
+                class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              >
+                <option value="trace">trace</option>
+                <option value="debug">debug</option>
+                <option value="info">info</option>
+                <option value="warn">warn</option>
+                <option value="error">error</option>
+                <option value="fatal">fatal</option>
+              </select>
+              <span>reaches</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>records in</span>
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
+            </div>
+          {:else if ruleType === 'usage_threshold'}
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Surface
+                <select
+                  bind:value={ruleUsageSurface}
+                  onchange={() => (ruleUsageOperation = usageOperations[ruleUsageSurface][0])}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="mcp">MCP (org-wide)</option>
+                  <option value="api_key">API key (org-wide)</option>
+                  <option value="dsn">DSN (project)</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Operation
+                <select
+                  bind:value={ruleUsageOperation}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  {#each usageOperations[ruleUsageSurface] as operation}
+                    <option value={operation}>{operation}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Counter
+                <select
+                  bind:value={ruleUsageMeasure}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="requests">requests</option>
+                  <option value="errors">errors</option>
+                  <option value="denied">denied</option>
+                </select>
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                When
+                <select
+                  bind:value={ruleComparison}
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                >
+                  <option value="gte">at least</option>
+                  <option value="gt">greater than</option>
+                  <option value="lte">at most</option>
+                  <option value="lt">less than</option>
+                </select>
+                <input
+                  type="number"
+                  min="1"
+                  max="1000000000"
+                  bind:value={ruleThreshold}
+                  class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>in</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'api_key_hygiene'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when</span>
+              <select
+                bind:value={ruleAPIKeyHygieneMode}
+                class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              >
+                <option value="unused">inactive/unused keys are older than</option>
+                <option value="expiring">keys expire within</option>
+              </select>
+              <input
+                type="number"
+                min="1"
+                max="129600"
+                bind:value={ruleWindow}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes and count reaches</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>keys</span>
+            </div>
+          {:else if ruleType === 'ai_triage'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when</span>
+              <select
+                bind:value={ruleAITriageMode}
+                class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              >
+                <option value="failed">failed triage calls reach</option>
+                <option value="stuck">triage calls stay pending beyond</option>
+              </select>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              {#if ruleAITriageMode === 'failed'}
+                <span>calls in</span>
+              {:else}
+                <span>calls older than</span>
+              {/if}
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
+            </div>
+          {:else if ruleType === 'ingest_acceptance'}
+            <div class="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <span>when incomplete ingest receipts reach</span>
+              <input
+                type="number"
+                min="1"
+                max="1000000"
+                bind:value={ruleThreshold}
+                class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>older than</span>
+              <input
+                type="number"
+                min="1"
+                max="720"
+                bind:value={ruleWindow}
+                class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              />
+              <span>minutes</span>
             </div>
           {/if}
           <button class="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 transition-colors hover:bg-zinc-800 active:translate-y-px">Add rule</button>
@@ -483,6 +1545,9 @@
               <span class="rounded bg-zinc-800/80 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">{a.release}</span>
               <span class="truncate font-mono text-[13px] text-zinc-200">{a.name}</span>
               <span class="text-xs text-zinc-600">{fmtSize(a.size)}</span>
+              <span class={a.parse_status === 'valid' ? 'text-xs text-emerald-400' : 'text-xs text-amber-400'} title="Source-map parser acceptance outcome">
+                {a.parse_status === 'valid' ? 'parse ok' : a.parse_status.replace('_', ' ')}
+              </span>
               <button
                 onclick={() => removeArtifact(a.id)}
                 class="ml-auto shrink-0 text-xs text-zinc-600 transition-colors hover:text-rose-400"

@@ -14,6 +14,7 @@ import (
 	"github.com/bright-interaction/flare/internal/auth"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/netguard"
 	"github.com/bright-interaction/flare/internal/oidc"
 )
@@ -195,7 +196,8 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		ssoError(w, r, "sso_disabled")
 		return
 	}
-	provider, err := oidc.Discover(ctx, cfg.Issuer)
+	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: org.ID})
+	provider, err := oidc.Discover(connectorCtx, cfg.Issuer)
 	if err != nil {
 		ssoError(w, r, "sso_discovery")
 		return
@@ -227,7 +229,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		ssoError(w, r, "sso_disabled")
 		return
 	}
-	provider, err := oidc.Discover(ctx, cfg.Issuer)
+	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: sessOrg})
+	provider, err := oidc.Discover(connectorCtx, cfg.Issuer)
 	if err != nil {
 		ssoError(w, r, "sso_discovery")
 		return
@@ -238,12 +241,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		ssoError(w, r, "sso_exchange")
 		return
 	}
-	accessToken, err := provider.Exchange(ctx, cfg.ClientID, clientSecret, code, s.oidcRedirectURI())
+	accessToken, err := provider.Exchange(connectorCtx, cfg.ClientID, clientSecret, code, s.oidcRedirectURI())
 	if err != nil {
 		ssoError(w, r, "sso_exchange")
 		return
 	}
-	info, err := provider.FetchUserInfo(ctx, accessToken)
+	info, err := provider.FetchUserInfo(connectorCtx, accessToken)
 	if err != nil || info.Email == "" || info.Subject == "" {
 		ssoError(w, r, "sso_userinfo")
 		return

@@ -172,6 +172,7 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		s.goBackgroundFor(org, "monitor-failed", 15*time.Second, func(ctx context.Context) {
 			// A monitor belongs to a project, so this respects routing.
 			s.dispatchToProject(ctx, org, pid, alerts.Notification{
+				ProjectID:   pid,
 				ProjectName: name,
 				Title:       "Monitor failed: " + slug,
 				Level:       "warning",

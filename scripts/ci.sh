@@ -169,6 +169,102 @@ bun_step() {
   ( cd "$FRONTEND" && "$@" )
 }
 
+# Browser capture is shipped as a small framework-neutral bridge. Keep its
+# runtime contract in the same gate as the dashboard so a TypeScript change
+# cannot silently break the web SDK while the Svelte app still builds. The
+# mirrored first-party bridges are checked when this script runs from the
+# monorepo; the public Flare mirror only has examples/browser. First-party
+# roots use both `frontend/src/lib` and `src/lib` layouts.
+browser_rum_check() {
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "not run: bun is not installed (https://bun.sh). The Docker build installs it for you."
+    return 99
+  fi
+  ( cd examples/browser && bun test flare-browser.test.ts ) || return $?
+
+  local files=() file tmp
+  while IFS= read -r file; do files+=("$file"); done < <(
+    find .. \( -path '*/frontend/src/lib/flare-client.ts' -o -path '*/src/lib/flare-client.ts' \) -type f -print 2>/dev/null | sort
+  )
+  if [ ${#files[@]} -eq 0 ]; then
+    echo "no mirrored first-party browser bridges found; example bridge test passed"
+    return 0
+  fi
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/flare-rum-ci.XXXXXX")"
+  trap 'rm -rf "$tmp"' RETURN
+  for file in "${files[@]}"; do
+    bun build "$file" --target browser --outfile "$tmp/$(basename "$(dirname "$(dirname "$file")")").js" >/dev/null || {
+      echo "browser bridge failed to transpile: $file" >&2
+      return 1
+    }
+  done
+  echo "browser example and ${#files[@]} mirrored bridge(s) passed"
+}
+
+# A bridge that compiles but is never installed is silent telemetry loss. Keep
+# the first-party wiring contract beside the transpile gate: every shipped web
+# entrypoint must install both runtime exception capture and RUM, and every
+# mirrored bridge must still be present. The public Flare mirror has only the
+# example bridge, so this check is intentionally skipped there.
+first_party_browser_wiring_check() {
+  local repo_root spec bridge entry bridge_count
+  # A public Flare checkout has neither sibling app root. If one marker is
+  # present, this is the monorepo and a missing sibling must fail loudly
+  # rather than turning the whole first-party check into a skip.
+  if [ ! -d ../atomicsite ] && [ ! -d ../brightcrm ]; then
+    echo "not run: first-party app roots are not present (public Flare mirror)"
+    return 99
+  fi
+  if [ ! -d ../atomicsite ] || [ ! -d ../brightcrm ]; then
+    echo "first-party app roots are incomplete; refusing to skip browser wiring" >&2
+    return 1
+  fi
+
+  local -a specs=(
+    "atomicsite/frontend/src/lib/flare-client.ts|atomicsite/frontend/src/routes/+layout.svelte"
+    "bright-interaction-website/src/lib/flare-client.ts|bright-interaction-website/src/layouts/Layout.astro"
+    "brightcommunity/frontend/src/lib/flare-client.ts|brightcommunity/frontend/src/routes/+layout.svelte"
+    "brightcrm/frontend/src/lib/flare-client.ts|brightcrm/frontend/src/routes/+layout.svelte"
+    "dockyard/frontend/src/lib/flare-client.ts|dockyard/frontend/src/main.tsx"
+    "hash/frontend/src/lib/flare-client.ts|hash/frontend/src/routes/+layout.svelte"
+    "portal/src/lib/flare-client.ts|portal/src/main.tsx"
+    "sentinel/frontend/src/lib/flare-client.ts|sentinel/frontend/src/main.tsx"
+    "svar/portal/frontend/src/lib/flare-client.ts|svar/portal/frontend/src/main.tsx"
+    "trustissues/frontend/src/lib/flare-client.ts|trustissues/frontend/src/main.tsx"
+    "flare/frontend/src/lib/flare-client.ts|flare/frontend/src/routes/+layout.svelte"
+  )
+  repo_root=".."
+  bridge_count="$(find "$repo_root" \( -path '*/frontend/src/lib/flare-client.ts' -o -path '*/src/lib/flare-client.ts' \) -type f -print 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$bridge_count" -ne "${#specs[@]}" ]; then
+    echo "first-party bridge inventory changed: found $bridge_count, expected ${#specs[@]} (update this gate and the integration map)" >&2
+    return 1
+  fi
+  for spec in "${specs[@]}"; do
+    bridge="${spec%%|*}"
+    entry="${spec#*|}"
+    if [ ! -f "$repo_root/$bridge" ]; then
+      echo "missing first-party browser bridge: $bridge" >&2
+      return 1
+    fi
+    if [ ! -f "$repo_root/$entry" ]; then
+      echo "missing first-party browser entrypoint: $entry" >&2
+      return 1
+    fi
+    if ! grep -Eq 'export[[:space:]]+function[[:space:]]+installFlareBrowserCapture' "$repo_root/$bridge" ||
+      ! grep -Eq 'export[[:space:]]+function[[:space:]]+installFlareBrowserRum' "$repo_root/$bridge"; then
+      echo "first-party bridge does not export capture and RUM: $bridge" >&2
+      return 1
+    fi
+    if ! grep -Eq 'installFlareBrowserCapture[[:space:]]*\(' "$repo_root/$entry" ||
+      ! grep -Eq 'installFlareBrowserRum[[:space:]]*\(' "$repo_root/$entry"; then
+      echo "first-party entrypoint does not install capture and RUM: $entry" >&2
+      return 1
+    fi
+  done
+
+  echo "${#specs[@]} first-party browser bridges are present and installed"
+}
+
 # The scanners below read CONTENT, never a pipeline's exit status. `producer | grep -q X`
 # under pipefail returns 141 when grep short-circuits and the producer takes SIGPIPE, so
 # that shape reports "clean" exactly when there is the most to find.
@@ -246,6 +342,8 @@ step "sqlc generated code is current"         sqlc_check
 step "frontend deps (frozen lockfile)"        bun_step bun install --frozen-lockfile
 step "frontend typecheck (svelte-check)"      bun_step bun run check
 step "frontend build (what the binary embeds)" bun_step bun run build
+step "browser RUM bridge tests and transpile" browser_rum_check
+step "first-party browser bridge wiring" first_party_browser_wiring_check
 if [ "$IN_MIRROR" = "1" ]; then
   step "secret scan (full history)" secret_scan
 else

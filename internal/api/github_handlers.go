@@ -12,6 +12,7 @@ import (
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/github"
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/telemetry"
 )
 
@@ -116,7 +117,8 @@ func (s *Server) handleCreateGithubIssue(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadGateway, "the stored GitHub token could not be read; reconnect the integration")
 		return
 	}
-	url, err := github.CreateIssue(ctx, token, cfg.Repo, title, body)
+	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: issue.ProjectID})
+	url, err := github.CreateIssue(connectorCtx, token, cfg.Repo, title, body)
 	if err != nil {
 		slogError(w, "github create issue", err)
 		writeErr(w, http.StatusBadGateway, "could not create the GitHub issue (check the repo and token)")

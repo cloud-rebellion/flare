@@ -15,7 +15,7 @@ servers:
     description: Self-host (default)
 tags:
   - name: Ingest
-    description: Send events, logs and traces. Authenticated by the DSN public key.
+    description: Send events, logs, traces, metrics, and bounded connector outcomes. Authenticated by the DSN public key.
   - name: Projects
     description: Manage projects and their DSNs.
   - name: Issues
@@ -29,11 +29,13 @@ tags:
   - name: Team
     description: Members, invitations and the audit log.
   - name: Integrations
-    description: GitHub and OIDC single sign-on configuration.
+    description: GitHub, OIDC single sign-on, and tenant-scoped connector connection configuration.
   - name: Auth
     description: Session authentication for the dashboard.
   - name: System
     description: Health and data export.
+  - name: Native symbols
+    description: Retain bounded Flutter, Dart, Android, and iOS debug artifacts by release.
 components:
   securitySchemes:
     apiKey:
@@ -62,6 +64,77 @@ components:
       type: object
       properties:
         error: { type: string }
+    LiveResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    HealthResponse:
+      type: object
+      required: [status, db, analytics, retention, email, workers, queue]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        db:
+          type: object
+          properties:
+            healthy: { type: boolean }
+            latency_ms: { type: integer, format: int64, minimum: 0 }
+            total_conns: { type: integer, format: int32, minimum: 0 }
+            acquired_conns: { type: integer, format: int32, minimum: 0 }
+            idle_conns: { type: integer, format: int32, minimum: 0 }
+            max_conns: { type: integer, format: int32, minimum: 0 }
+        analytics:
+          type: object
+          properties:
+            configured: { type: boolean }
+            healthy: { type: boolean }
+            export: { $ref: "#/components/schemas/AnalyticsHealthResponse" }
+        retention:
+          type: object
+          properties:
+            retention_days: { type: integer, minimum: 1 }
+            policy: { type: string, enum: [export_before_drop, paused, drop_without_export] }
+            export_required: { type: boolean }
+            cold_tier: { type: string, enum: [local, s3] }
+            partition_telemetry: { type: string, enum: [log_only] }
+        email: { type: string, enum: [configured, disabled] }
+        workers:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              capacity: { type: integer, minimum: 0 }
+              busy: { type: integer, minimum: 0 }
+              available: { type: integer, minimum: 0 }
+        queue:
+          type: object
+          properties:
+            mode: { type: string, enum: [bounded_drop] }
+            queued: { type: integer, minimum: 0 }
+            durable: { type: boolean }
+            drop_on_full: { type: boolean }
+    AnalyticsHealthResponse:
+      type: object
+      description: Global payload-free cold-tier exporter telemetry; no tenant IDs or provider payloads.
+      required: [configured, cold_tier, connection_status, retention_status, quota_status, success_count, failure_count, attempted_count, exported_bytes, bytes_known, bytes_observations, avg_latency_ms, max_latency_ms]
+      properties:
+        configured: { type: boolean }
+        cold_tier: { type: string, enum: [local, s3] }
+        connection_status: { type: string, enum: [disabled, unknown, in_progress, observed_success, observed_failure] }
+        retention_status: { type: string, enum: [paused, drop_without_export, unknown, in_progress, observed_success, observed_failure] }
+        quota_status: { type: string, enum: [not_configured, provider_unknown] }
+        success_count: { type: integer, format: int64, minimum: 0 }
+        failure_count: { type: integer, format: int64, minimum: 0 }
+        attempted_count: { type: integer, format: int64, minimum: 0 }
+        exported_bytes: { type: integer, format: int64, minimum: 0 }
+        bytes_known: { type: boolean }
+        bytes_observations: { type: integer, format: int64, minimum: 0 }
+        avg_latency_ms: { type: number, format: double, minimum: 0 }
+        max_latency_ms: { type: integer, format: int64, minimum: 0 }
+        latest_attempt_at: { type: string, format: date-time, nullable: true }
+        latest_success_at: { type: string, format: date-time, nullable: true }
+        latest_failure_at: { type: string, format: date-time, nullable: true }
+        latest_error_code: { type: string, maxLength: 64 }
     Project:
       type: object
       properties:
@@ -125,9 +198,40 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        type: { type: string, enum: [new_issue, regression, spike] }
-        threshold: { type: integer, description: "events (spike only)" }
-        window_minutes: { type: integer, description: "window (spike only)" }
+        type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
+        threshold: { type: integer, description: "event, usage, API-key, AI receipt, or incomplete ingest receipt count for most rules; service_level uses it as the good-span latency objective in milliseconds" }
+        window_minutes: { type: integer, minimum: 1, maximum: 720, description: "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period" }
+        threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target" }
+        comparison: { type: string, enum: [gt, gte, lt, lte] }
+        metric_name: { type: string }
+        metric_labels:
+          type: object
+          maxProperties: 5
+          additionalProperties: false
+          description: "exact low-cardinality selectors for metric_threshold: environment, release, route, method, or status_class"
+          properties:
+            environment: { type: string, maxLength: 128 }
+            release: { type: string, maxLength: 128 }
+            route: { type: string, maxLength: 128 }
+            method: { type: string, maxLength: 12, pattern: "^[A-Z]+$" }
+            status_class: { type: string, enum: [1xx, 2xx, 3xx, 4xx, 5xx] }
+        span_name: { type: string, description: "exact span operation for trace_percentile and service_level rules" }
+        percentile: { type: integer, enum: [50, 75, 90, 95, 99] }
+        connector_provider: { type: string }
+        connector_operation: { type: string }
+        connector_channel: { type: string }
+        connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
+        connector_connection_id: { type: string, maxLength: 128, description: "optional registered connector installation selector; tenant checked and provider must match" }
+        connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
+        connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
+        release_version: { type: string }
+        service_name: { type: string, maxLength: 64, description: "exact bounded service name in the service-up:<service> heartbeat; pair with release_version for service_freshness" }
+        log_severity: { type: string, enum: [trace, debug, info, warn, error, fatal] }
+        usage_surface: { type: string, enum: [dsn, api_key, mcp], description: "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant" }
+        usage_operation: { type: string, maxLength: 64, description: "fixed allowlisted operation for the usage surface" }
+        usage_measure: { type: string, enum: [requests, errors, denied], description: "usage counter; denied includes tenant-known role refusals" }
+        api_key_hygiene_mode: { type: string, enum: [unused, expiring], description: "org-scoped API-key hygiene mode; the response contains aggregate counts only" }
+        ai_triage_mode: { type: string, enum: [failed, stuck], description: "project-scoped payload-free AI receipt mode; failed counts terminal failures and stuck counts started receipts older than the bounded window" }
         enabled: { type: boolean }
     Artifact:
       type: object
@@ -136,15 +240,112 @@ components:
         release: { type: string }
         name: { type: string, description: "the minified file the map applies to" }
         size: { type: integer }
+        parse_status: { type: string, enum: [unvalidated, valid, invalid_json, invalid_mappings, unsupported], description: "bounded parser outcome; map bytes are never returned" }
         created_at: { type: string, format: date-time }
+    NativeSymbolArtifact:
+      type: object
+      properties:
+        id: { type: string }
+        release: { type: string }
+        platform: { type: string, enum: [flutter, android, ios] }
+        format: { type: string, enum: [dart_symbols, proguard, breakpad, dsym, elf] }
+        name: { type: string, description: "bounded artifact basename" }
+        digest: { type: string, description: "SHA-256 digest of the decoded artifact bytes" }
+        size: { type: integer, format: int64 }
+        validation_status: { type: string, enum: [not_checked, recognized, invalid, unsupported], description: "durable upload-time container validation outcome; does not imply frame symbolication" }
+        created_at: { type: string, format: date-time }
+    ConnectorConnection:
+      type: object
+      required: [id, provider, installation_id, installation_name, status, scopes, credential_configured, created_at, updated_at]
+      properties:
+        id: { type: string }
+        provider: { type: string, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$" }
+        installation_id: { type: string, minLength: 1, maxLength: 128 }
+        installation_name: { type: string, maxLength: 128 }
+        status: { type: string, enum: [pending, active, paused, error, revoked] }
+        scopes:
+          type: array
+          maxItems: 64
+          items: { type: string, minLength: 1, maxLength: 128 }
+        credential_configured: { type: boolean, description: "Whether an encrypted credential is present; the credential is never returned." }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
 paths:
+  /livez:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      description: Process and HTTP listener probe; does not query dependencies.
+      security: []
+      responses:
+        "200":
+          description: Process is serving HTTP requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveResponse" }
+  /readyz:
+    get:
+      tags: [System]
+      summary: Readiness probe
+      description: Bounded database, analytics, retention, worker, and queue state with no tenant payloads.
+      security: []
+      responses:
+        "200":
+          description: Core database is reachable; optional components may be degraded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          description: Core database is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+  /healthz:
+    get:
+      tags: [System]
+      summary: Readiness probe alias
+      security: []
+      responses:
+        "200":
+          description: Core database is reachable; optional components may be degraded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          description: Core database is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
   /api/health:
     get:
       tags: [System]
-      summary: Health check
+      summary: Readiness probe compatibility alias
       security: []
       responses:
-        "200": { description: OK }
+        "200":
+          description: Core database is reachable; optional components may be degraded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          description: Core database is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+  /api/analytics-health:
+    get:
+      tags: [System]
+      summary: Query cold-tier exporter health
+      description: Global payload-free export counts, bytes, latency, and fixed failure stages. Requires an authenticated viewer.
+      security: [{ apiKey: [] }, { session: [] }]
+      responses:
+        "200":
+          description: Bounded cold-tier exporter telemetry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsHealthResponse" }
+        "401": { description: Authentication required }
+        "500": { description: Analytics health query failed }
   /api/{projectID}/envelope:
     post:
       tags: [Ingest]
@@ -219,6 +420,41 @@ paths:
                       attributes: { type: object }
       responses:
         "200": { description: Accepted }
+  /api/{projectID}/connector-attempts:
+    post:
+      tags: [Ingest]
+      summary: Record one external connector outcome
+      description: >
+        DSN-authenticated, payload-free health receipt for a SaaS or app
+        connector. Flare supplies tenant/project scope and timestamps and
+        acknowledges only after the connector attempt is stored.
+      security: [{ flareKey: [] }, { sentryKey: [] }]
+      parameters:
+        - { name: projectID, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, operation, channel, outcome]
+              additionalProperties: false
+              properties:
+                provider: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
+                connection_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$', description: "Optional registered connector installation ID; it must belong to the authenticated workspace and match provider." }
+                operation: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+                channel: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
+                outcome: { type: string, enum: [ok, error] }
+                status_class: { type: string, pattern: '^[1-5]xx$' }
+                error_code: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+                elapsed_ms: { type: integer, minimum: 0, maximum: 86400000, default: 0 }
+                quota_remaining: { type: integer, format: int64, minimum: 0, maximum: 1000000000000000 }
+                retry_after_ms: { type: integer, format: int64, minimum: 0, maximum: 604800000 }
+                sync_lag_ms: { type: integer, format: int64, minimum: 0, maximum: 604800000 }
+      responses:
+        "202": { description: Stored, content: { application/json: { schema: { type: object, properties: { accepted: { type: boolean } } } } } }
+        "400": { description: Invalid bounded outcome, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: Invalid ingest key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /otlp/v1/logs:
     post:
       tags: [Ingest]
@@ -384,7 +620,7 @@ paths:
     post:
       tags: [Source maps]
       summary: Upload a source map for a release
-      description: name is the minified file (e.g. app.min.js); content is the .map JSON. Call from CI after a build.
+      description: name is the minified file (e.g. app.min.js); content is the .map JSON. Call from CI after a build. The 201 response includes a bounded parse_status; malformed maps remain stored for compatibility but are excluded from symbolication.
       security: [{ apiKey: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
@@ -409,6 +645,72 @@ paths:
         - { name: artifactID, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: Deleted }
+  /api/projects/{id}/symbol-artifacts:
+    get:
+      tags: [Native symbols]
+      summary: List native symbol artifact metadata
+      description: Returns release-scoped metadata and digests only; raw symbol bytes are never returned.
+      security: [{ apiKey: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/NativeSymbolArtifact" } } } } }
+    post:
+      tags: [Native symbols]
+      summary: Upload a native symbol artifact
+      description: Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. Flutter Dart symbols receive a bounded container validation at upload; the response includes the durable validation_status. Upload acceptance does not claim frame symbolication.
+      security: [{ apiKey: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [release, platform, format, name, content_base64]
+              properties:
+                release: { type: string, maxLength: 128 }
+                platform: { type: string, enum: [flutter, android, ios] }
+                format: { type: string, enum: [dart_symbols, proguard, breakpad, dsym, elf] }
+                name: { type: string, maxLength: 128 }
+                content_base64: { type: string, description: "base64 encoded artifact, decoded size <= 30 MiB" }
+      responses:
+        "201": { description: Uploaded, content: { application/json: { schema: { $ref: "#/components/schemas/NativeSymbolArtifact" } } } }
+        "400": { description: Invalid artifact metadata or encoding, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "507": { description: Project artifact quota reached, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/projects/{id}/symbol-artifacts/{artifactID}:
+    delete:
+      tags: [Native symbols]
+      summary: Delete a native symbol artifact
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: artifactID, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+  /api/projects/{id}/native-symbol-health:
+    get:
+      tags: [Native symbols]
+      summary: Query native symbol readiness
+      description: Returns bounded artifact metadata with an explicit retained_unresolved status. Symbol bytes and inferred frame locations are never returned.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded native artifact readiness rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - { $ref: "#/components/schemas/NativeSymbolArtifact" }
+                    - type: object
+                      required: [symbolication_status, validation_status]
+                      properties:
+                        symbolication_status: { type: string, enum: [retained_unresolved] }
+                        validation_status: { type: string, enum: [recognized, invalid, unsupported, not_checked] }
   /api/projects/{id}/logs:
     get:
       tags: [Projects]
@@ -438,6 +740,346 @@ paths:
         - { name: traceID, in: path, required: true, schema: { type: string } }
       responses:
         "200": { description: OK }
+  /api/connector-health:
+    get:
+      tags: [Integrations]
+      summary: Query outbound connector health
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded provider and operation aggregates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    connection_id: { type: string, maxLength: 128, description: "Opaque registered installation ID; omitted for legacy or external DSN receipts." }
+                    provider: { type: string }
+                    operation: { type: string }
+                    channel: { type: string }
+                    attempts: { type: integer }
+                    ok_count: { type: integer }
+                    error_count: { type: integer }
+                    error_rate: { type: number }
+                    avg_elapsed_ms: { type: number }
+                    max_elapsed_ms: { type: integer }
+                    last_attempted_at: { type: string, format: date-time }
+                    last_completed_at: { type: string, format: date-time }
+  /api/connector-sync-health:
+    get:
+      tags: [Integrations]
+      summary: Query connector synchronization state
+      description: "Returns tenant-scoped worker state, lease status, cursor presence/version, and bounded completion metadata. Cursor material, credentials, provider payloads, and tenant identifiers are never returned."
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded connector synchronization state
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, connection_id, provider, connection_status, operation, state, cursor_configured, cursor_version, attempt_count, lease_active]
+                  properties:
+                    id: { type: string }
+                    connection_id: { type: string }
+                    provider: { type: string }
+                    installation_name: { type: string }
+                    connection_status: { type: string, enum: [pending, active, paused, error, revoked] }
+                    operation: { type: string, maxLength: 64 }
+                    state: { type: string, enum: [idle, running, succeeded, failed] }
+                    cursor_configured: { type: boolean, description: "Whether an encrypted cursor is present; the cursor is never returned." }
+                    cursor_version: { type: integer, format: int64, minimum: 0 }
+                    attempt_count: { type: integer, format: int64, minimum: 0 }
+                    last_started_at: { type: string, format: date-time, nullable: true }
+                    last_completed_at: { type: string, format: date-time, nullable: true }
+                    last_success_at: { type: string, format: date-time, nullable: true }
+                    last_error_code: { type: string, maxLength: 64 }
+                    last_sync_lag_ms: { type: integer, format: int64, minimum: 0, nullable: true }
+                    next_run_at: { type: string, format: date-time, nullable: true }
+                    lease_active: { type: boolean }
+                    lease_expires_at: { type: string, format: date-time, nullable: true }
+                    updated_at: { type: string, format: date-time, nullable: true }
+  /api/projects/{id}/connector-health:
+    get:
+      tags: [Integrations]
+      summary: Query project-scoped connector health
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: "Bounded connector aggregates scoped to the project" }
+        "404": { description: Project not found }
+  /api/usage:
+    get:
+      tags: [System]
+      summary: Query durable MCP, API-key, and DSN usage
+      description: >
+        Returns bounded, tenant-scoped one-minute usage aggregates. The
+        projection contains only fixed surface and operation names, opaque
+        project or API-key row identifiers belonging to the caller's tenant,
+        counters, and timestamps. Request bodies, credentials, user IDs, and
+        provider payloads are never returned.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded tenant usage aggregates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    project_id: { type: string }
+                    credential_id: { type: string, description: "Opaque API-key row ID; omitted for sessions and DSNs" }
+                    surface: { type: string, enum: [dsn, api_key, mcp] }
+                    operation: { type: string, description: "Fixed or allowlisted operation" }
+                    requests: { type: integer, format: int64 }
+                    errors: { type: integer, format: int64 }
+                    denied: { type: integer, format: int64 }
+                    error_rate: { type: number }
+                    first_seen_at: { type: string, format: date-time }
+                    last_seen_at: { type: string, format: date-time }
+        "401": { description: Authentication required }
+  /api/connector-quota-health:
+    get:
+      tags: [Integrations]
+      summary: Query latest connector quota, rate-limit, and sync-lag hints
+      description: "Returns bounded, payload-free provider metadata grouped by connector series. Values are omitted when the provider did not report that hint. Sync lag is explicitly reported by the bridge after a completed sync/read; it is not inferred from silence."
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded latest quota, retry-after, and sync-lag aggregates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    connection_id: { type: string, description: "Opaque registered installation ID; omitted for legacy external receipts" }
+                    provider: { type: string }
+                    operation: { type: string }
+                    channel: { type: string }
+                    quota_points: { type: integer }
+                    retry_points: { type: integer }
+                    sync_lag_points: { type: integer }
+                    quota_remaining: { type: integer, format: int64, nullable: true }
+                    quota_observed_at: { type: string, format: date-time, nullable: true }
+                    retry_after_ms: { type: integer, format: int64, nullable: true }
+                    retry_observed_at: { type: string, format: date-time, nullable: true }
+                    sync_lag_ms: { type: integer, format: int64, nullable: true }
+                    sync_lag_observed_at: { type: string, format: date-time, nullable: true }
+                    last_completed_at: { type: string, format: date-time, nullable: true }
+  /api/projects/{id}/connector-quota-health:
+    get:
+      tags: [Projects]
+      summary: Query project connector quota, rate-limit, and sync-lag hints
+      description: "Returns the same bounded connector hint projection as the organization route after verifying that the caller's organization owns the project."
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded project latest quota, retry-after, and sync-lag aggregates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    connection_id: { type: string, description: "Opaque registered installation ID; omitted for legacy external receipts" }
+                    provider: { type: string }
+                    operation: { type: string }
+                    channel: { type: string }
+                    quota_points: { type: integer }
+                    retry_points: { type: integer }
+                    sync_lag_points: { type: integer }
+                    quota_remaining: { type: integer, format: int64, nullable: true }
+                    quota_observed_at: { type: string, format: date-time, nullable: true }
+                    retry_after_ms: { type: integer, format: int64, nullable: true }
+                    retry_observed_at: { type: string, format: date-time, nullable: true }
+                    sync_lag_ms: { type: integer, format: int64, nullable: true }
+                    sync_lag_observed_at: { type: string, format: date-time, nullable: true }
+                    last_completed_at: { type: string, format: date-time, nullable: true }
+        "404": { description: Project not found }
+  /api/projects/{id}/client-health:
+    get:
+      tags: [Projects]
+      summary: Query client and runtime health
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: "Bounded platform, environment, and release aggregates" }
+  /api/projects/{id}/release-health:
+    get:
+      tags: [Releases]
+      summary: Query release error health
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: Bounded release event and error aggregates }
+  /api/projects/{id}/release-freshness:
+    get:
+      tags: [Releases]
+      summary: Query explicit release deploy and heartbeat freshness
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: Bounded explicit deploy marker and heartbeat age aggregates }
+  /api/projects/{id}/symbolication-health:
+    get:
+      tags: [Source maps]
+      summary: Query source-map coverage by release
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200": { description: Bounded artifact matching and mapped-frame aggregates }
+  /api/projects/{id}/analytics/service-level:
+    get:
+      tags: [Projects]
+      summary: Query a sampled trace service-level objective
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: span_name, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: latency_ms, in: query, schema: { type: number, minimum: 0, maximum: 86400000, default: 1000 } }
+        - { name: target, in: query, schema: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.999 } }
+      responses:
+        "200": { description: "Sampled span count, availability, and error-budget aggregate" }
+  /api/projects/{id}/ingest-receipts:
+    get:
+      tags: [Projects]
+      summary: Query durable ingest acceptance receipts
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: Bounded payload-free request accounting }
+  /api/projects/{id}/ai-receipts:
+    get:
+      tags: [Projects]
+      summary: Query bounded AI action receipts
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: Bounded payload-free AI operation outcomes; fresh calls include an evidence_digest SHA-256 fingerprint, while cached reads leave it empty }
+  /api/projects/{id}/automation-next:
+    get:
+      tags: [Projects]
+      summary: Query the next eligible fix-to-deploy workflow stage
+      description: Read-only, tenant-scoped handoff for an external coding-loop worker. It returns bounded stage metadata only; Flare never executes the returned action or dereferences evidence.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: issue_id, in: query, required: true, schema: { type: string, maxLength: 128 } }
+      responses:
+        "200": { description: "Bounded next-stage state (`ready`, `pending`, `retry`, `blocked`, `complete`, or `not_started`)" }
+        "400": { description: Invalid or missing issue_id }
+  /api/projects/{id}/automation-claims:
+    post:
+      tags: [Projects]
+      summary: Claim one executable workflow stage
+      description: Atomically leases one tenant-scoped stage and target revision to an external worker. The opaque claim id grants no repository, CI, deployment, or probe capability. A passed execution receipt must include the active claim id.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issue_id, stage, target_revision, worker_ref]
+              additionalProperties: false
+              properties:
+                issue_id: { type: string, maxLength: 128 }
+                stage: { type: string, enum: [patch, ci, merge, deploy, synthetic] }
+                target_revision: { type: string, maxLength: 256 }
+                worker_ref: { type: string, maxLength: 128 }
+                evidence_ref: { type: string, maxLength: 256, description: "Required for patch claims and must be the lowercase AI evidence digest" }
+                lease_seconds: { type: integer, minimum: 1, maximum: 3600, default: 600 }
+      responses:
+        "201": { description: Opaque lease created }
+        "400": { description: Invalid bounded claim }
+        "404": { description: Project or issue not found }
+        "409": { description: Stage is not eligible or is already claimed }
+  /api/projects/{id}/automation-receipts:
+    get:
+      tags: [Projects]
+      summary: Query fix-to-deploy workflow receipts
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: "Bounded triage, patch, CI, deploy, rollback, and synthetic receipts" }
+    post:
+      tags: [Projects]
+      summary: Record a human-gated workflow receipt
+      description: Passed patch, CI, merge, deploy, and synthetic receipts must advance the same target revision in order. A passed patch requires evidence_ref to be the 64-character lowercase SHA-256 digest from a completed fresh AI triage receipt for the same issue. Review approval requires a human session actor; execution passes require run_ref. A passed synthetic receipt additionally requires evidence_ref for the observed canary or probe result. Rollback receipts require source_revision and target_revision, and a passed rollback requires run_ref. Failed or blocked stages may be recorded without a predecessor; rollback is never inferred from deploy receipts.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [issue_id, stage, status, idempotency_key]
+              additionalProperties: false
+              properties:
+                issue_id: { type: string }
+                stage: { type: string, enum: [triage, patch, review, ci, merge, deploy, rollback, synthetic] }
+                status: { type: string, enum: [pending, approved, passed, failed, blocked] }
+                idempotency_key: { type: string }
+                claim_id: { type: string, maxLength: 128, description: "Required for passed patch, CI, merge, deploy, and synthetic receipts; obtained from automation-claims" }
+                evidence_ref: { type: string, description: "required for passed patch receipts as a 64-character lowercase AI evidence digest; required for passed synthetic receipts as an opaque canary or probe result reference" }
+                source_revision: { type: string, description: "required for rollback receipts; revision being removed" }
+                target_revision: { type: string, description: "required for approved review and passed patch/CI/merge/deploy/rollback/synthetic stages" }
+                run_ref: { type: string, description: "required for passed CI/merge/deploy/rollback/synthetic stages" }
+                retryable: { type: boolean }
+                error_code: { type: string }
+      responses:
+        "201": { description: Created }
+        "200": { description: Idempotent replay }
   /api/projects/{id}/alert-rules:
     get:
       tags: [Alerts]
@@ -459,11 +1101,161 @@ paths:
               required: [name, type]
               properties:
                 name: { type: string }
-                type: { type: string, enum: [new_issue, regression, spike] }
-                threshold: { type: integer, description: "spike: min events" }
-                window_minutes: { type: integer, description: "spike: window" }
+                type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
+                threshold: { type: integer, description: "event, usage, API-key, AI receipt, or incomplete ingest receipt count for most rules; service_level uses it as the good-span latency objective in milliseconds" }
+                window_minutes: { type: integer, minimum: 1, maximum: 720, description: "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period" }
+                threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target" }
+                comparison: { type: string, enum: [gt, gte, lt, lte] }
+                metric_name: { type: string, maxLength: 128 }
+                metric_labels:
+                  type: object
+                  maxProperties: 5
+                  additionalProperties: false
+                  description: "exact low-cardinality selectors for metric_threshold: environment, release, route, method, or status_class"
+                  properties:
+                    environment: { type: string, maxLength: 128 }
+                    release: { type: string, maxLength: 128 }
+                    route: { type: string, maxLength: 128 }
+                    method: { type: string, maxLength: 12, pattern: "^[A-Z]+$" }
+                    status_class: { type: string, enum: [1xx, 2xx, 3xx, 4xx, 5xx] }
+                span_name: { type: string, maxLength: 128, description: "exact span operation for trace_percentile and service_level rules" }
+                percentile: { type: integer, enum: [50, 75, 90, 95, 99] }
+                connector_provider: { type: string, maxLength: 32 }
+                connector_operation: { type: string, maxLength: 64 }
+                connector_channel: { type: string, maxLength: 32 }
+                connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
+                connector_connection_id: { type: string, maxLength: 128, description: "optional registered connector installation selector; tenant checked and provider must match" }
+                connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
+                connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
+                release_version: { type: string, maxLength: 128 }
+                service_name: { type: string, maxLength: 64, description: "exact bounded service name in the service-up:<service> heartbeat; pair with release_version for service_freshness" }
+                log_severity: { type: string, enum: [trace, debug, info, warn, error, fatal] }
+                usage_surface: { type: string, enum: [dsn, api_key, mcp], description: "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant" }
+                usage_operation: { type: string, maxLength: 64, description: "fixed allowlisted operation for the usage surface" }
+                usage_measure: { type: string, enum: [requests, errors, denied], description: "usage counter; denied includes tenant-known role refusals" }
+                api_key_hygiene_mode: { type: string, enum: [unused, expiring], description: "org-scoped API-key hygiene mode; the query returns aggregate counts only" }
+                ai_triage_mode: { type: string, enum: [failed, stuck], description: "project-scoped payload-free AI receipt mode; failed counts terminal failures and stuck counts started receipts older than the bounded window" }
       responses:
         "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/AlertRule" } } } }
+  /api/connector-connections:
+    get:
+      tags: [Integrations]
+      summary: List connector connections (admin)
+      description: "Returns tenant-scoped provider and installation metadata only. Credentials and encrypted ciphertext are never returned."
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ConnectorConnection" } } } }
+        "403": { description: admin only }
+    post:
+      tags: [Integrations]
+      summary: Register a connector connection (admin)
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, installation_id]
+              properties:
+                provider: { type: string, maxLength: 32 }
+                installation_id: { type: string, minLength: 1, maxLength: 128 }
+                installation_name: { type: string, maxLength: 128 }
+                status: { type: string, enum: [pending, active, paused, error, revoked], default: pending }
+                scopes: { type: array, maxItems: 64, items: { type: string, maxLength: 128 } }
+                secret: { type: string, maxLength: 16384, writeOnly: true, description: "Encrypted with FLARE_SECRET_KEY before storage; never returned." }
+      responses: { "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/ConnectorConnection" } } } }, "409": { description: Duplicate provider installation } }
+  /api/connector-connections/{id}:
+    get:
+      tags: [Integrations]
+      summary: Get a connector connection (admin)
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ConnectorConnection" } } } }, "404": { description: Not found } }
+    patch:
+      tags: [Integrations]
+      summary: Update connector connection metadata or rotate its credential (admin)
+      description: "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only."
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider: { type: string, maxLength: 32 }
+                installation_id: { type: string, minLength: 1, maxLength: 128 }
+                installation_name: { type: string, maxLength: 128 }
+                status: { type: string, enum: [pending, active, paused, error, revoked] }
+                scopes: { type: array, maxItems: 64, items: { type: string, maxLength: 128 } }
+                secret: { type: string, maxLength: 16384, writeOnly: true }
+      responses: { "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/ConnectorConnection" } } } }, "404": { description: Not found } }
+    delete:
+      tags: [Integrations]
+      summary: Disconnect a connector connection (admin)
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: Deleted }, "404": { description: Not found } }
+  /api/connector-connections/{id}/check:
+    post:
+      tags: [Integrations]
+      summary: Run a bounded connector health check (admin)
+      description: "Runs one fixed-authority adapter: HubSpot account metadata, GitHub user, Slack auth.test, or OpenAI models. Provider response bodies and credentials are discarded; the result contains bounded status and rate-limit hints and emits a tenant-scoped connector attempt."
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Probe result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider, operation, outcome, status_class]
+                properties:
+                  provider: { type: string, enum: [hubspot, github, slack, openai], example: hubspot }
+                  operation: { type: string, description: "account_details for HubSpot, user for GitHub, auth.test for Slack, or models for OpenAI", example: account_details }
+                  outcome: { type: string, enum: [ok, error] }
+                  status_class: { type: string, example: 2xx }
+                  error_code: { type: string }
+                  quota_remaining: { type: integer, format: int64, minimum: 0 }
+                  retry_after_ms: { type: integer, format: int64, minimum: 0 }
+        "400": { description: Credential is not configured }
+        "404": { description: Not found }
+        "409": { description: Connection is paused or revoked }
+        "422": { description: Provider is not supported by the bounded probe }
+  /api/connector-connections/{id}/sync:
+    post:
+      tags: [Integrations]
+      summary: Run one bounded connector synchronization pass (admin)
+      description: "Claims a short tenant-scoped lease and runs the HubSpot account-details adapter. The provider body and credential are discarded; no background polling is started by this endpoint."
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Synchronization pass completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operation, state, claimed, skipped]
+                properties:
+                  operation: { type: string, example: account_details }
+                  state: { type: string, enum: [idle, running, succeeded, failed] }
+                  outcome: { type: string, enum: [ok, error] }
+                  status_class: { type: string }
+                  error_code: { type: string, maxLength: 64 }
+                  claimed: { type: boolean }
+                  skipped: { type: boolean }
+                  skip_reason: { type: string, enum: [lease_busy] }
+                  next_run_at: { type: string, format: date-time, nullable: true }
+        "202": { description: Another worker owns the lease; no provider call was made }
+        "400": { description: Credential is not configured }
+        "404": { description: Not found }
+        "409": { description: Connection is paused, revoked, or otherwise disabled }
+        "422": { description: Provider is not supported by the bounded worker }
   /api/channels:
     get:
       tags: [Alerts]
@@ -473,7 +1265,7 @@ paths:
     post:
       tags: [Alerts]
       summary: Create a notification channel
-      description: "type: log | email | slack | webhook, with the matching config."
+      description: "type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys."
       security: [{ apiKey: [] }]
       requestBody:
         content:
@@ -481,11 +1273,21 @@ paths:
             schema:
               type: object
               properties:
-                type: { type: string, enum: [log, email, slack, webhook] }
-                config: { type: object }
+                type: { type: string, enum: [log, email, slack, webhook, automation_webhook] }
+                config:
+                  type: object
+                  properties:
+                    url: { type: string, format: uri, description: "public HTTPS destination; loopback/private/link-local targets are rejected" }
+                    signing_secret: { type: string, minLength: 16, maxLength: 256, writeOnly: true, description: "printable HMAC secret for automation_webhook; encrypted at rest" }
             examples:
               slack: { value: { type: slack, config: { webhook_url: "https://hooks.slack.com/services/..." } } }
               email: { value: { type: email, config: { to: "alerts@team.com" } } }
+              automation_webhook:
+                value:
+                  type: automation_webhook
+                  config:
+                    url: "https://worker.example.com/flare"
+                    signing_secret: "16-or-more-printable-bytes"
       responses: { "201": { description: Created } }
   /api/members:
     get:

@@ -60,11 +60,16 @@ func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project not found")
 		return
 	}
-	if err := s.q.UpsertRelease(r.Context(), generated.UpsertReleaseParams{
+	marked, err := s.q.MarkReleaseDeploy(r.Context(), generated.MarkReleaseDeployParams{
 		ID: id.New(), ProjectID: proj.ID, OrgID: proj.OrgID, Version: req.Version,
-	}); err != nil {
+	})
+	if err != nil {
 		slogError(w, "create release", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, releaseResponse{Version: req.Version, CreatedAt: time.Now()})
+	createdAt := time.Now()
+	if marked.CreatedAt.Valid {
+		createdAt = marked.CreatedAt.Time
+	}
+	writeJSON(w, http.StatusCreated, releaseResponse{Version: marked.Version, CreatedAt: createdAt})
 }

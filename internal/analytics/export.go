@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,10 +41,21 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 	day = day.UTC()
 	dayStr := day.Format("2006-01-02")
 	child := fmt.Sprintf("%s_%s", table, day.Format("2006_01_02"))
+	started := time.Now()
 
-	var existing int
-	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM export_log WHERE tbl=$1 AND day=$2`, table, day).Scan(&existing); err == nil && existing > 0 {
+	var existingStatus string
+	if err := e.pool.QueryRow(ctx, `SELECT status FROM export_log WHERE tbl=$1 AND day=$2`, table, day).Scan(&existingStatus); err != nil && err != pgx.ErrNoRows {
+		return fmt.Errorf("read export_log: %w", err)
+	}
+	if existingStatus == "succeeded" {
 		return nil // already exported
+	}
+	if err := e.beginAttempt(ctx, table, day); err != nil {
+		return fmt.Errorf("begin export attempt: %w", err)
+	}
+	fail := func(code string, err error) error {
+		e.recordFailure(ctx, table, day, started, code)
+		return fmt.Errorf("%s: %w", code, err)
 	}
 
 	// Only a genuinely ABSENT partition is "nothing to archive". Deciding that
@@ -56,19 +68,24 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 	if err := e.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r')`, child,
 	).Scan(&childExists); err != nil {
-		return fmt.Errorf("check partition %s exists: %w", child, err)
+		return fail("partition_probe", fmt.Errorf("check partition %s exists: %w", child, err))
 	}
 	if !childExists {
+		if err := e.recordSuccess(ctx, table, day, 0, 0, true, started); err != nil {
+			return fmt.Errorf("record absent partition: %w", err)
+		}
 		return nil // child partition does not exist; nothing to archive
 	}
 
 	d := e.duck.db
 	var srcCount int64
 	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM hot.public.%s", child)).Scan(&srcCount); err != nil {
-		return fmt.Errorf("count rows in %s: %w", child, err)
+		return fail("source_read", fmt.Errorf("count rows in %s: %w", child, err))
 	}
 	if srcCount == 0 {
-		_, _ = e.pool.Exec(ctx, `INSERT INTO export_log (tbl, day, row_count) VALUES ($1,$2,0) ON CONFLICT (tbl,day) DO NOTHING`, table, day)
+		if err := e.recordSuccess(ctx, table, day, 0, 0, true, started); err != nil {
+			return fmt.Errorf("record empty export: %w", err)
+		}
 		return nil
 	}
 
@@ -79,35 +96,113 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 	local := e.duck.cfg.S3Endpoint == ""
 	if local {
 		if err := os.MkdirAll(filepath.FromSlash(destDir), 0o755); err != nil {
-			return fmt.Errorf("mkdir parquet dir: %w", err)
+			return fail("cold_write", fmt.Errorf("mkdir parquet dir: %w", err))
 		}
 		writeTarget = final + ".tmp"
 	}
 
 	copySQL := fmt.Sprintf("COPY (SELECT * FROM hot.public.%s) TO '%s' (FORMAT parquet, COMPRESSION zstd)", child, escapeSQL(writeTarget))
 	if _, err := d.ExecContext(ctx, copySQL); err != nil {
-		return fmt.Errorf("copy %s to parquet: %w", child, err)
+		return fail("cold_write", fmt.Errorf("copy %s to parquet: %w", child, err))
 	}
 
 	var pqCount int64
 	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", escapeSQL(writeTarget))).Scan(&pqCount); err != nil {
-		return fmt.Errorf("verify parquet: %w", err)
+		return fail("verify", fmt.Errorf("verify parquet: %w", err))
 	}
 	if pqCount != srcCount {
-		return fmt.Errorf("parquet row count %d != source %d for %s (not committing)", pqCount, srcCount, child)
+		return fail("verify", fmt.Errorf("parquet row count %d != source %d for %s (not committing)", pqCount, srcCount, child))
 	}
 
 	if local {
 		if err := os.Rename(filepath.FromSlash(writeTarget), filepath.FromSlash(final)); err != nil {
-			return fmt.Errorf("rename parquet: %w", err)
+			return fail("cold_write", fmt.Errorf("rename parquet: %w", err))
 		}
 	}
 
-	if _, err := e.pool.Exec(ctx,
-		`INSERT INTO export_log (tbl, day, row_count) VALUES ($1,$2,$3)
-		 ON CONFLICT (tbl,day) DO UPDATE SET row_count=EXCLUDED.row_count, exported_at=now()`,
-		table, day, srcCount); err != nil {
+	var bytes int64
+	bytesKnown := false
+	if local {
+		info, err := os.Stat(filepath.FromSlash(final))
+		if err != nil {
+			return fail("cold_stat", fmt.Errorf("stat parquet: %w", err))
+		}
+		bytes = info.Size()
+		bytesKnown = true
+	}
+	if err := e.recordSuccess(ctx, table, day, srcCount, bytes, bytesKnown, started); err != nil {
 		return fmt.Errorf("write export_log: %w", err)
+	}
+	return nil
+}
+
+// beginAttempt writes a single bounded state row before touching the cold tier.
+// The row is global operational metadata: it intentionally contains no tenant,
+// provider, path, credential, or payload fields.
+func (e *Exporter) beginAttempt(ctx context.Context, table string, day time.Time) error {
+	_, err := e.pool.Exec(ctx, `
+		INSERT INTO export_log (tbl, day, status, attempted_at, exported_bytes, bytes_known, export_latency_ms, error_code, row_count)
+		VALUES ($1,$2,'attempted',now(),0,false,0,'',0)
+		ON CONFLICT (tbl,day) DO UPDATE SET status='attempted', attempted_at=now(), exported_bytes=0,
+		  bytes_known=false, export_latency_ms=0, error_code=''`, table, day)
+	return err
+}
+
+// recordFailure stores only a fixed stage token. Raw provider/SQL errors stay
+// in process logs and never become durable API-visible telemetry.
+func (e *Exporter) recordFailure(ctx context.Context, table string, day, started time.Time, code string) {
+	code = boundedExportErrorCode(code)
+	latency := time.Since(started).Milliseconds()
+	if latency < 0 {
+		latency = 0
+	}
+	// A timeout in COPY/verification cancels the caller's context. Use a short
+	// detached write context so the durable failure is still visible for the
+	// next retention cycle; the raw failure remains in the caller's log only.
+	writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = e.pool.Exec(writeCtx, `
+		UPDATE export_log
+		SET status='failed', attempted_at=now(), exported_bytes=0, bytes_known=false,
+		    export_latency_ms=$3, error_code=$4
+		WHERE tbl=$1 AND day=$2`, table, day, latency, code)
+}
+
+var exportErrorCodes = map[string]struct{}{
+	"partition_probe": {},
+	"source_read":     {},
+	"cold_write":      {},
+	"cold_stat":       {},
+	"verify":          {},
+}
+
+// boundedExportErrorCode keeps durable exporter state to a small, documented
+// vocabulary. Raw SQL/provider errors remain process logs only.
+func boundedExportErrorCode(code string) string {
+	if _, ok := exportErrorCodes[code]; ok {
+		return code
+	}
+	return "unknown"
+}
+
+// recordSuccess finalizes the latest attempt. bytesKnown is true for local
+// files (and empty partitions); DuckDB's current httpfs COPY API does not
+// expose a remote object length, so S3/MinIO exports report unknown bytes.
+func (e *Exporter) recordSuccess(ctx context.Context, table string, day time.Time, rowCount, bytes int64, bytesKnown bool, started time.Time) error {
+	if bytes < 0 {
+		bytes = 0
+	}
+	latency := time.Since(started).Milliseconds()
+	if latency < 0 {
+		latency = 0
+	}
+	_, err := e.pool.Exec(ctx, `
+		UPDATE export_log
+		SET status='succeeded', exported_at=now(), attempted_at=COALESCE(attempted_at, now()),
+		    row_count=$3, exported_bytes=$4, bytes_known=$5, export_latency_ms=$6, error_code=''
+		WHERE tbl=$1 AND day=$2`, table, day, rowCount, bytes, bytesKnown, latency)
+	if err != nil {
+		return err
 	}
 	return nil
 }

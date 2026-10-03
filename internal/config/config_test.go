@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // prodEnv sets the minimum env for a production Load, letting a test omit one
@@ -109,5 +110,31 @@ func TestSignupOptInSpellings(t *testing.T) {
 				t.Errorf("FLARE_ALLOW_SIGNUP=%q must NOT enable signup", v)
 			}
 		})
+	}
+}
+
+func TestConnectorSyncSchedulerIsOptInAndBoundedCadenceLoads(t *testing.T) {
+	prodEnv(t, "")
+	t.Setenv("FLARE_CONNECTOR_SYNC_ENABLED", "")
+	t.Setenv("FLARE_CONNECTOR_SYNC_INTERVAL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ConnectorSyncEnabled {
+		t.Fatal("connector sync scheduler must be disabled by default")
+	}
+	if cfg.ConnectorSyncInterval != 5*time.Minute {
+		t.Fatalf("default connector sync interval = %v", cfg.ConnectorSyncInterval)
+	}
+
+	t.Setenv("FLARE_CONNECTOR_SYNC_ENABLED", "yes")
+	t.Setenv("FLARE_CONNECTOR_SYNC_INTERVAL", "45s")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load enabled: %v", err)
+	}
+	if !cfg.ConnectorSyncEnabled || cfg.ConnectorSyncInterval != 45*time.Second {
+		t.Fatalf("enabled connector sync config = %#v", cfg)
 	}
 }

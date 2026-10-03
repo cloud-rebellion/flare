@@ -8,6 +8,8 @@ const (
 	ctxUserID ctxKey = iota
 	ctxOrgID
 	ctxRole
+	ctxAuthSource
+	ctxCredentialID
 )
 
 func userIDFrom(ctx context.Context) string {
@@ -22,6 +24,21 @@ func orgIDFrom(ctx context.Context) string {
 
 func roleFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxRole).(string)
+	return v
+}
+
+// authSourceFrom identifies the credential boundary that admitted a request.
+// It is intentionally a small internal vocabulary; raw bearer tokens, DSNs,
+// session IDs, and user identifiers never cross into usage accounting.
+func authSourceFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxAuthSource).(string)
+	return v
+}
+
+// credentialIDFrom returns only an opaque API-key row identifier. Session and
+// DSN credentials deliberately have no credential ID in usage buckets.
+func credentialIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxCredentialID).(string)
 	return v
 }
 

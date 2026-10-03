@@ -175,6 +175,87 @@ MaterialApp(
 - For custom spans or transactions, use the `sentry_flutter` API directly and
   keep operation names low-cardinality (for example `sync.refresh`, not an ID).
 
+## Mobile health: startup, frames, lifecycle, and API calls
+
+The optional [`lib/flare_health.dart`](lib/flare_health.dart) helper and
+[`lib/flare_flutter_health.dart`](lib/flare_flutter_health.dart) binding add
+payload-free health signals to the same project. They use the existing native
+metric and connector-attempt contracts; they do not add server fields or a
+second mobile credential.
+
+```bash
+flutter pub add http
+```
+
+Create the reporter before `runApp`, then install the binding after
+`WidgetsFlutterBinding.ensureInitialized()`:
+
+```dart
+import 'package:http/http.dart' as http;
+import 'flare_health.dart';
+import 'flare_flutter_health.dart';
+
+final dsn = FlareDsn.parse(const String.fromEnvironment('FLARE_SENTRY_DSN'));
+final health = FlareHealthReporter(
+  // Keep these byte-for-byte aligned with initializeFlareObservability below.
+  // They become bounded metric labels for release-specific thresholds.
+  environment: const String.fromEnvironment('FLARE_ENV', defaultValue: 'development'),
+  release: const String.fromEnvironment('FLARE_RELEASE'),
+  metricSink: dsn == null ? null : (point) async {
+    await http.post(
+      dsn.metricEndpoint,
+      headers: {'content-type': 'application/json'},
+      body: encodeFlareMetricBatch([point]),
+    );
+  },
+  connectorSink: dsn == null ? null : (attempt) async {
+    await http.post(
+      dsn.connectorEndpoint,
+      headers: {'content-type': 'application/json'},
+      body: encodeFlareConnectorAttempt(attempt),
+    );
+  },
+);
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final healthBinding = installFlareFlutterHealth(health);
+  await initializeFlareObservability(appRunner: () => runApp(const MyApp()));
+  // Keep healthBinding alive for the process lifetime. Dispose it when the
+  // application replaces its WidgetsBinding.
+}
+```
+
+The binding records one first-frame startup duration, aggregates up to 120
+frame timings at a time (`frame.max_ms`, `jank_frames`, and `jank_rate`), and
+records bounded lifecycle state counters. Wrap backend calls with
+`health.trackApi('GET /orders', request)` to emit an API latency metric and a
+payload-free connector attempt. Pass `connectionId: 'backend-prod'` when the
+project has a registered connector installation; Flare checks that opaque ID
+against the authenticated workspace before storing the attempt. The operation
+is reduced to a stable token;
+request URLs, response bodies, exception messages, credentials, and user data
+never enter these signals. A failed transport is swallowed so telemetry cannot
+break the app, and the application's HTTP layer owns batching, retry, and
+offline persistence. Report that queue with
+`health.recordOfflineQueueDepth(queue.length)` after bounded changes (the
+helper caps it at 10,000). `environment` and `release` are sanitized into
+bounded `environment` and `release` labels on every metric (for example,
+`mobile-app@1.8.0+42` becomes `mobile-app@1.8.0_42`); use those exact normalized
+values in `metric_threshold.metric_labels` selectors so staging and production
+series cannot mix.
+
+Use stable metric names such as `client.flutter.startup_ms`,
+`client.flutter.frame.max_ms`, `client.flutter.jank_rate`,
+`client.flutter.offline_queue_depth`, and
+`client.flutter.api_errors.<operation>` in `metric_threshold` rules. A mobile
+process may be suspended or killed, so an app lifecycle signal is not an
+availability check. Put a Flare check-in on the backend or scheduler that owns
+background sync, and pair it with the app's queue depth and API connector
+series. Run `flutter test test/flare_health_test.dart` from the copied helper's
+Flutter test suite; it is intentionally copyable and does not change an app's
+`pubspec.yaml`.
+
 ## Syntax checks and CI check-ins
 
 Runtime telemetry does not replace compile or static analysis checks. Run these
@@ -217,14 +298,30 @@ Always set `environment` and `release` consistently across the app and backend.
 Use a unique release per build, such as `mobile-app@1.8.0+42`, so Flare can
 group regressions by release.
 
-Flare currently accepts Sentry events and JavaScript source-map artifacts. The
-Flutter helper therefore gives useful Dart stack traces and event grouping, but
-native Android/iOS symbolication and Dart obfuscation maps still require a
-symbol artifact pipeline that Flare does not yet provide. Keep the original
-`mapping.txt`, dSYM, and `split-debug-info` output for the release; do not claim
-native frames are readable until the artifact has been uploaded and verified.
-Flutter web builds can use the existing Flare source-map upload path after a
-release is registered, subject to its size and artifact limits.
+Flare accepts Sentry events, JavaScript source-map artifacts, and bounded native
+symbol artifacts. Upload the Flutter `--split-debug-info` `.symbols` output as
+CI evidence with a member API key (the endpoint also accepts Android
+`mapping.txt`/ELF and iOS dSYM or Breakpad bundles):
+
+```bash
+symbols_b64=$(base64 < build/split-debug-info/app.android-arm64.symbols | tr -d '\n')
+curl -fsS -X POST "$FLARE_URL/api/projects/$FLARE_PROJECT_ID/symbol-artifacts" \
+  -H "Authorization: Bearer $FLARE_MEMBER_KEY" \
+  -H 'Content-Type: application/json' \
+  --data "$(jq -n --arg release "$FLARE_RELEASE" --arg content "$symbols_b64" \
+    '{release:$release,platform:"flutter",format:"dart_symbols",name:"app.android-arm64.symbols",content_base64:$content}')"
+```
+
+The response contains only the release, platform, format, size, SHA-256 digest,
+and durable `validation_status`; symbol bytes never enter hot events or API
+responses. Flutter `dart_symbols` uploads are checked for a recognized
+executable/DWARF container at upload time. Android and iOS formats remain
+`not_checked` until their parsers are enabled. Native upload acceptance proves
+that the artifact is retained for the release, while format-specific Dart,
+Android, and iOS frame resolvers are still pending. Keep the original event and
+release tags and do not claim native frames are readable until a resolver has
+verified them. Flutter web builds can use the existing source-map upload path
+after a release is registered, subject to its size and artifact limits.
 
 ## Isolates and background work
 

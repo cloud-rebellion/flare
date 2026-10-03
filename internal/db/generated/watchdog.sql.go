@@ -7,6 +7,7 @@ package generated
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -59,32 +60,830 @@ func (q *Queries) CountEventsForProjectSince(ctx context.Context, arg CountEvent
 	return count, err
 }
 
+const getAITriageStats = `-- name: GetAITriageStats :one
+       SELECT count(*) FILTER (
+           WHERE status = 'failed'
+             AND completed_at IS NOT NULL
+             AND started_at >= $1
+       )::bigint AS failed_count,
+       count(*) FILTER (
+           WHERE status = 'failed'
+             AND completed_at IS NOT NULL
+             AND started_at >= $1
+             AND error_code IS NOT NULL
+       )::bigint AS failed_error_count,
+       count(*) FILTER (
+           WHERE status = 'started'
+             AND completed_at IS NULL
+             AND started_at < $1
+       )::bigint AS stuck_count
+FROM ai_action_receipts
+WHERE project_id = $2::text
+  AND org_id = $3::text
+  AND operation = 'triage'
+  AND (
+      (status = 'failed' AND completed_at IS NOT NULL AND started_at >= $1)
+      OR (status = 'started' AND completed_at IS NULL AND started_at < $1)
+  )
+`
+
+type GetAITriageStatsParams struct {
+	Cutoff    pgtype.Timestamptz `json:"cutoff"`
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+}
+
+type GetAITriageStatsRow struct {
+	FailedCount      int64 `json:"failed_count"`
+	FailedErrorCount int64 `json:"failed_error_count"`
+	StuckCount       int64 `json:"stuck_count"`
+}
+
+// AI triage rules aggregate only safe status/error-code counts. Failed calls
+// are measured by their bounded start time; stuck calls are still in `started`
+// with no completion and older than the same cutoff. Prompts, completions,
+// issue content, provider details, and error text never cross this boundary.
+func (q *Queries) GetAITriageStats(ctx context.Context, arg GetAITriageStatsParams) (*GetAITriageStatsRow, error) {
+	row := q.db.QueryRow(ctx, getAITriageStats, arg.Cutoff, arg.ProjectID, arg.OrgID)
+	var i GetAITriageStatsRow
+	err := row.Scan(&i.FailedCount, &i.FailedErrorCount, &i.StuckCount)
+	return &i, err
+}
+
+const getAPIKeyHygieneStats = `-- name: GetAPIKeyHygieneStats :one
+SELECT count(*)::bigint AS key_count
+FROM api_keys
+WHERE org_id = $1::text
+  AND (
+      ($2::text = 'unused'
+       AND (last_used_at IS NULL OR last_used_at <= $3)
+       AND created_at <= $3)
+      OR
+      ($2::text = 'expiring'
+       AND expires_at IS NOT NULL
+       AND expires_at > $4
+       AND expires_at <= $5)
+  )
+`
+
+type GetAPIKeyHygieneStatsParams struct {
+	OrgID         string             `json:"org_id"`
+	Mode          string             `json:"mode"`
+	OlderThan     pgtype.Timestamptz `json:"older_than"`
+	AsOf          pgtype.Timestamptz `json:"as_of"`
+	ExpiresBefore pgtype.Timestamptz `json:"expires_before"`
+}
+
+// API-key hygiene rules aggregate only a count of org-owned credentials. The
+// selected project routes the notification, but API keys are organization
+// scoped by design, so the org predicate is the authoritative tenant fence.
+// `unused` counts keys that have never been used (or have been idle) and are
+// older than the configured horizon. `expiring` counts non-expired keys whose
+// expiry falls within the same horizon. No key names, prefixes, hashes, users, or expiry
+// timestamps leave the aggregate query.
+func (q *Queries) GetAPIKeyHygieneStats(ctx context.Context, arg GetAPIKeyHygieneStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getAPIKeyHygieneStats,
+		arg.OrgID,
+		arg.Mode,
+		arg.OlderThan,
+		arg.AsOf,
+		arg.ExpiresBefore,
+	)
+	var key_count int64
+	err := row.Scan(&key_count)
+	return key_count, err
+}
+
+const getConnectorErrorRateStats = `-- name: GetConnectorErrorRateStats :one
+SELECT count(*)::bigint AS attempts,
+       count(*) FILTER (WHERE outcome = 'error')::bigint AS error_count
+FROM connector_attempts
+WHERE COALESCE(project_id, '') = $1::text
+  AND org_id = $2::text
+  AND provider = $3::text
+  AND ($4::text = '' OR operation = $4::text)
+  AND ($5::text = '' OR channel = $5::text)
+  AND ($6::text = '' OR error_code = $6::text)
+  AND ($7::text = '' OR connection_id = $7::text)
+  AND completed_at >= $8
+`
+
+type GetConnectorErrorRateStatsParams struct {
+	ProjectID    string             `json:"project_id"`
+	OrgID        string             `json:"org_id"`
+	Provider     string             `json:"provider"`
+	Operation    string             `json:"operation"`
+	Channel      string             `json:"channel"`
+	ErrorCode    string             `json:"error_code"`
+	ConnectionID string             `json:"connection_id"`
+	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
+}
+
+type GetConnectorErrorRateStatsRow struct {
+	Attempts   int64 `json:"attempts"`
+	ErrorCount int64 `json:"error_count"`
+}
+
+// Connector error-rate rules aggregate only the project and org selected by
+// the watchdog row. Empty operation/channel selectors intentionally match all
+// values, and an empty error-code selector intentionally matches all errors.
+// Provider is always required by the API. No response payloads or connector
+// credentials cross this query boundary.
+func (q *Queries) GetConnectorErrorRateStats(ctx context.Context, arg GetConnectorErrorRateStatsParams) (*GetConnectorErrorRateStatsRow, error) {
+	row := q.db.QueryRow(ctx, getConnectorErrorRateStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Provider,
+		arg.Operation,
+		arg.Channel,
+		arg.ErrorCode,
+		arg.ConnectionID,
+		arg.CompletedAt,
+	)
+	var i GetConnectorErrorRateStatsRow
+	err := row.Scan(&i.Attempts, &i.ErrorCount)
+	return &i, err
+}
+
+const getConnectorFreshnessStats = `-- name: GetConnectorFreshnessStats :one
+SELECT max(completed_at)::timestamptz AS last_completed_at
+FROM connector_attempts
+WHERE COALESCE(project_id, '') = $1::text
+  AND org_id = $2::text
+  AND provider = $3::text
+  AND ($4::text = '' OR operation = $4::text)
+  AND ($5::text = '' OR channel = $5::text)
+  AND ($6::text = '' OR connection_id = $6::text)
+  AND completed_at >= $7
+`
+
+type GetConnectorFreshnessStatsParams struct {
+	ProjectID    string             `json:"project_id"`
+	OrgID        string             `json:"org_id"`
+	Provider     string             `json:"provider"`
+	Operation    string             `json:"operation"`
+	Channel      string             `json:"channel"`
+	ConnectionID string             `json:"connection_id"`
+	BaselineAt   pgtype.Timestamptz `json:"baseline_at"`
+}
+
+// Connector-freshness rules use an explicit rule baseline and only completed
+// attempts after that baseline.  A missing row is intentional: the watchdog
+// falls back to the durable baseline, so a newly configured empty series stays
+// quiet until its cadence has elapsed.  Provider/operation/channel selectors
+// are all tenant/project scoped and no connector body crosses this query.
+func (q *Queries) GetConnectorFreshnessStats(ctx context.Context, arg GetConnectorFreshnessStatsParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getConnectorFreshnessStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Provider,
+		arg.Operation,
+		arg.Channel,
+		arg.ConnectionID,
+		arg.BaselineAt,
+	)
+	var last_completed_at pgtype.Timestamptz
+	err := row.Scan(&last_completed_at)
+	return last_completed_at, err
+}
+
+const getConnectorSyncHealthStats = `-- name: GetConnectorSyncHealthStats :one
+SELECT count(*) FILTER (
+           WHERE s.state = 'failed'
+             AND s.updated_at >= $1
+       )::bigint AS failed_count,
+       count(*) FILTER (
+           WHERE (
+               s.next_run_at IS NOT NULL
+               AND s.next_run_at < $1
+           ) OR (
+               s.state = 'running'
+               AND s.lease_expires_at IS NOT NULL
+               AND s.lease_expires_at < $1
+           )
+       )::bigint AS overdue_count
+FROM connector_sync_states s
+JOIN connector_connections c
+  ON c.id = s.connection_id
+ AND c.org_id = s.org_id
+WHERE s.org_id = $2::text
+  AND s.connection_id = $3::text
+  AND c.provider = $4::text
+  AND s.operation = $5::text
+  AND c.status IN ('active', 'pending', 'error')
+`
+
+type GetConnectorSyncHealthStatsParams struct {
+	Cutoff       pgtype.Timestamptz `json:"cutoff"`
+	OrgID        string             `json:"org_id"`
+	ConnectionID string             `json:"connection_id"`
+	Provider     string             `json:"provider"`
+	Operation    string             `json:"operation"`
+}
+
+type GetConnectorSyncHealthStatsRow struct {
+	FailedCount  int64 `json:"failed_count"`
+	OverdueCount int64 `json:"overdue_count"`
+}
+
+// Sync state is organization-owned because one registered installation may be
+// used by several project routes. The alert itself remains project-scoped for
+// notification routing, but the selector is always one exact connection and
+// operation. `failed` counts recent terminal failures; `overdue` counts rows
+// whose scheduled run or lease expiry is past the configured grace cutoff.
+// Paused/revoked connections are excluded so intentional disconnects do not
+// page. Only counts cross the watchdog boundary.
+func (q *Queries) GetConnectorSyncHealthStats(ctx context.Context, arg GetConnectorSyncHealthStatsParams) (*GetConnectorSyncHealthStatsRow, error) {
+	row := q.db.QueryRow(ctx, getConnectorSyncHealthStats,
+		arg.Cutoff,
+		arg.OrgID,
+		arg.ConnectionID,
+		arg.Provider,
+		arg.Operation,
+	)
+	var i GetConnectorSyncHealthStatsRow
+	err := row.Scan(&i.FailedCount, &i.OverdueCount)
+	return &i, err
+}
+
+const getDeployAcceptanceStats = `-- name: GetDeployAcceptanceStats :one
+SELECT count(*)::bigint AS acceptance_count
+FROM automation_receipts d
+WHERE d.project_id = $1::text
+  AND d.org_id = $2::text
+  AND d.stage = 'deploy'
+  AND d.status = 'passed'
+  AND d.completed_at IS NOT NULL
+  AND d.completed_at >= $3
+  AND d.completed_at < $4
+  AND NOT EXISTS (
+      SELECT 1
+      FROM automation_receipts s
+      WHERE s.project_id = d.project_id
+        AND s.org_id = d.org_id
+        AND s.issue_id = d.issue_id
+        AND s.stage = 'synthetic'
+        AND s.status = 'passed'
+        AND s.target_revision = d.target_revision
+        AND s.completed_at IS NOT NULL
+        AND s.completed_at >= d.completed_at
+  )
+`
+
+type GetDeployAcceptanceStatsParams struct {
+	ProjectID   string             `json:"project_id"`
+	OrgID       string             `json:"org_id"`
+	Since       pgtype.Timestamptz `json:"since"`
+	GraceCutoff pgtype.Timestamptz `json:"grace_cutoff"`
+}
+
+// Deploy-acceptance rules count passed deploy receipts that have aged beyond
+// the configured grace period without a later passed synthetic receipt for the
+// same issue and target revision. The lookback is bounded by the watchdog so a
+// forgotten historical deploy cannot page forever. Only tenant-safe counts
+// cross this boundary; receipt references and issue content stay out.
+func (q *Queries) GetDeployAcceptanceStats(ctx context.Context, arg GetDeployAcceptanceStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getDeployAcceptanceStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Since,
+		arg.GraceCutoff,
+	)
+	var acceptance_count int64
+	err := row.Scan(&acceptance_count)
+	return acceptance_count, err
+}
+
+const getDeployFailureStats = `-- name: GetDeployFailureStats :one
+SELECT count(*)::bigint AS failure_count
+FROM automation_receipts
+WHERE project_id = $1::text
+  AND org_id = $2::text
+  AND stage = 'deploy'
+  AND status IN ('failed', 'blocked')
+  AND created_at >= $3
+`
+
+type GetDeployFailureStatsParams struct {
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+// Deploy-failure rules count only failed or blocked deploy stages in the same
+// tenant and project. The receipt contract stores bounded stage/status/error
+// metadata, so this query never crosses source, provider, or issue payloads.
+func (q *Queries) GetDeployFailureStats(ctx context.Context, arg GetDeployFailureStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getDeployFailureStats, arg.ProjectID, arg.OrgID, arg.Since)
+	var failure_count int64
+	err := row.Scan(&failure_count)
+	return failure_count, err
+}
+
+const getIngestAcceptanceStats = `-- name: GetIngestAcceptanceStats :one
+SELECT count(*)::bigint AS stale_count
+FROM ingest_receipts
+WHERE project_id = $1::text
+  AND org_id = $2::text
+  AND outcome = 'in_progress'
+  AND completed_at IS NULL
+  AND received_at < $3
+`
+
+type GetIngestAcceptanceStatsParams struct {
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Cutoff    pgtype.Timestamptz `json:"cutoff"`
+}
+
+// In-progress receipts are created before a telemetry handler touches the
+// payload. A process crash or lost completion write leaves one here forever,
+// making an HTTP 202/200 impossible to distinguish from durable acceptance.
+// Count only old, incomplete rows and return no body, request id, or payload.
+// The watchdog applies the project and org predicates so this remains a
+// tenant-safe aggregate even though the rule worker is global.
+func (q *Queries) GetIngestAcceptanceStats(ctx context.Context, arg GetIngestAcceptanceStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getIngestAcceptanceStats, arg.ProjectID, arg.OrgID, arg.Cutoff)
+	var stale_count int64
+	err := row.Scan(&stale_count)
+	return stale_count, err
+}
+
+const getLogSeverityStats = `-- name: GetLogSeverityStats :one
+SELECT count(*)::bigint AS log_count
+FROM logs
+WHERE project_id = $1
+  AND org_id = $2
+  AND (
+      severity = $3
+      OR ($3::text = 'warn' AND severity = 'warning')
+      OR ($3::text = 'fatal' AND severity = 'critical')
+  )
+  AND observed_at >= $4
+`
+
+type GetLogSeverityStatsParams struct {
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Severity  string             `json:"severity"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+// Log-severity rules inspect only a count for one canonical severity in one
+// tenant and project. Bodies, attributes, trace IDs, and span IDs never cross
+// this watchdog boundary.
+func (q *Queries) GetLogSeverityStats(ctx context.Context, arg GetLogSeverityStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getLogSeverityStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Severity,
+		arg.Since,
+	)
+	var log_count int64
+	err := row.Scan(&log_count)
+	return log_count, err
+}
+
+const getMetricThresholdStats = `-- name: GetMetricThresholdStats :one
+SELECT count(*)::bigint AS points,
+       COALESCE(min(value), 0)::double precision AS min_value,
+       COALESCE(max(value), 0)::double precision AS max_value
+FROM metrics
+WHERE project_id = $1
+  AND org_id = $2
+  AND name = $3
+  AND COALESCE(labels, '{}'::jsonb) @> $4::jsonb
+  AND observed_at >= $5
+`
+
+type GetMetricThresholdStatsParams struct {
+	ProjectID    string             `json:"project_id"`
+	OrgID        string             `json:"org_id"`
+	Name         string             `json:"name"`
+	MetricLabels json.RawMessage    `json:"metric_labels"`
+	ObservedAt   pgtype.Timestamptz `json:"observed_at"`
+}
+
+type GetMetricThresholdStatsRow struct {
+	Points   int64   `json:"points"`
+	MinValue float64 `json:"min_value"`
+	MaxValue float64 `json:"max_value"`
+}
+
+// Metric threshold rules inspect only aggregate values from one bounded,
+// tenant-scoped series. A normalized JSON object selector keeps stable metric
+// names independently alertable by environment, release, route, or method.
+// Min/max let the rule express both high-water and low-water alerts without
+// returning labels or raw points to the watchdog.
+// A zero point count is preserved so a low-water rule does not fire merely
+// because a series has never reported.
+func (q *Queries) GetMetricThresholdStats(ctx context.Context, arg GetMetricThresholdStatsParams) (*GetMetricThresholdStatsRow, error) {
+	row := q.db.QueryRow(ctx, getMetricThresholdStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Name,
+		arg.MetricLabels,
+		arg.ObservedAt,
+	)
+	var i GetMetricThresholdStatsRow
+	err := row.Scan(&i.Points, &i.MinValue, &i.MaxValue)
+	return &i, err
+}
+
+const getReleaseErrorRateStats = `-- name: GetReleaseErrorRateStats :one
+WITH release_candidates AS (
+    SELECT r.version,
+           r.created_at,
+           max(e.received_at) AS last_seen
+    FROM releases r
+    LEFT JOIN events e
+      ON e.project_id = r.project_id
+     AND e.org_id = r.org_id
+     AND e.release = r.version
+     AND e.received_at >= $3
+    WHERE r.project_id = $1
+      AND r.org_id = $2
+      AND (
+        $4::text = ''
+        OR r.version = $4::text
+      )
+    GROUP BY r.version, r.created_at
+), selected_release AS (
+    SELECT version
+    FROM release_candidates
+    WHERE $4::text <> ''
+       OR created_at >= $3
+       OR last_seen IS NOT NULL
+    ORDER BY COALESCE(last_seen, created_at) DESC, version DESC
+    LIMIT 1
+)
+SELECT COALESCE((SELECT version FROM selected_release), '')::text AS release_version,
+       COALESCE((
+           SELECT count(e.id)
+           FROM events e
+           JOIN selected_release s ON s.version = e.release
+           WHERE e.project_id = $1
+             AND e.org_id = $2
+             AND e.received_at >= $3
+       ), 0)::bigint AS event_count,
+       COALESCE((
+           SELECT count(e.id)
+           FROM events e
+           JOIN selected_release s ON s.version = e.release
+           WHERE e.project_id = $1
+             AND e.org_id = $2
+             AND e.received_at >= $3
+             AND e.level NOT IN ('info', 'debug')
+       ), 0)::bigint AS error_count
+`
+
+type GetReleaseErrorRateStatsParams struct {
+	ProjectID      string             `json:"project_id"`
+	OrgID          string             `json:"org_id"`
+	Since          pgtype.Timestamptz `json:"since"`
+	ReleaseVersion string             `json:"release_version"`
+}
+
+type GetReleaseErrorRateStatsRow struct {
+	ReleaseVersion string `json:"release_version"`
+	EventCount     int64  `json:"event_count"`
+	ErrorCount     int64  `json:"error_count"`
+}
+
+// Release error-rate rules inspect only aggregate event counts for one
+// project-owned release. An explicit release_version is checked against the
+// tenant/project release registry. An empty selector chooses the newest
+// release with either a deploy marker or event in the bounded watchdog window;
+// no raw event payload, issue text, or stacktrace crosses this boundary.
+func (q *Queries) GetReleaseErrorRateStats(ctx context.Context, arg GetReleaseErrorRateStatsParams) (*GetReleaseErrorRateStatsRow, error) {
+	row := q.db.QueryRow(ctx, getReleaseErrorRateStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Since,
+		arg.ReleaseVersion,
+	)
+	var i GetReleaseErrorRateStatsRow
+	err := row.Scan(&i.ReleaseVersion, &i.EventCount, &i.ErrorCount)
+	return &i, err
+}
+
+const getReleaseFreshnessStats = `-- name: GetReleaseFreshnessStats :many
+SELECT r.version,
+       r.deploy_marked_at,
+       r.last_heartbeat_at,
+       EXTRACT(EPOCH FROM (now() - COALESCE(r.last_heartbeat_at, r.deploy_marked_at)))::double precision AS age_seconds
+FROM releases r
+WHERE r.project_id = $1::text
+  AND r.org_id = $2::text
+  AND r.version = $3::text
+  AND r.deploy_marked_at IS NOT NULL
+LIMIT 1
+`
+
+type GetReleaseFreshnessStatsParams struct {
+	ProjectID      string `json:"project_id"`
+	OrgID          string `json:"org_id"`
+	ReleaseVersion string `json:"release_version"`
+}
+
+type GetReleaseFreshnessStatsRow struct {
+	Version         string             `json:"version"`
+	DeployMarkedAt  pgtype.Timestamptz `json:"deploy_marked_at"`
+	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
+	AgeSeconds      float64            `json:"age_seconds"`
+}
+
+// Release-freshness rules require an explicit release selector and an explicit
+// deploy marker. The row is absent for releases that were only auto-created by
+// event traffic. Age is measured from the last canonical service-up heartbeat,
+// or from the deploy marker until the first heartbeat arrives.
+func (q *Queries) GetReleaseFreshnessStats(ctx context.Context, arg GetReleaseFreshnessStatsParams) ([]*GetReleaseFreshnessStatsRow, error) {
+	rows, err := q.db.Query(ctx, getReleaseFreshnessStats, arg.ProjectID, arg.OrgID, arg.ReleaseVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*GetReleaseFreshnessStatsRow{}
+	for rows.Next() {
+		var i GetReleaseFreshnessStatsRow
+		if err := rows.Scan(
+			&i.Version,
+			&i.DeployMarkedAt,
+			&i.LastHeartbeatAt,
+			&i.AgeSeconds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getRollbackStats = `-- name: GetRollbackStats :one
+SELECT count(*)::bigint AS rollback_count
+FROM automation_receipts
+WHERE project_id = $1::text
+  AND org_id = $2::text
+  AND stage = 'rollback'
+  AND status IN ('passed', 'failed', 'blocked')
+  AND created_at >= $3
+`
+
+type GetRollbackStatsParams struct {
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+// Rollback rules count only explicit terminal rollback receipts. The dedicated
+// stage keeps an ordinary deploy failure from being mistaken for a rollback;
+// source/target revisions remain bounded opaque references on the receipt.
+func (q *Queries) GetRollbackStats(ctx context.Context, arg GetRollbackStatsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getRollbackStats, arg.ProjectID, arg.OrgID, arg.Since)
+	var rollback_count int64
+	err := row.Scan(&rollback_count)
+	return rollback_count, err
+}
+
+const getServiceFreshnessStats = `-- name: GetServiceFreshnessStats :one
+SELECT max(e.received_at)::timestamptz AS last_heartbeat_at
+FROM events e
+WHERE e.project_id = $1::text
+  AND e.org_id = $2::text
+  AND e.release = $3::text
+  AND e.level = 'info'
+  AND e.message = ('service-up:' || $4::text)
+  AND e.received_at >= $5
+`
+
+type GetServiceFreshnessStatsParams struct {
+	ProjectID      string             `json:"project_id"`
+	OrgID          string             `json:"org_id"`
+	ReleaseVersion string             `json:"release_version"`
+	ServiceName    string             `json:"service_name"`
+	BaselineAt     pgtype.Timestamptz `json:"baseline_at"`
+}
+
+// Service-freshness rules inspect only the exact canonical heartbeat for one
+// service/release dimension. A service sharing a release with another
+// component cannot keep this rule fresh. Tenant, project, release, and
+// bounded service selectors all participate in the predicate; no event body
+// or heartbeat content crosses the watchdog boundary.
+func (q *Queries) GetServiceFreshnessStats(ctx context.Context, arg GetServiceFreshnessStatsParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getServiceFreshnessStats,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.ReleaseVersion,
+		arg.ServiceName,
+		arg.BaselineAt,
+	)
+	var last_heartbeat_at pgtype.Timestamptz
+	err := row.Scan(&last_heartbeat_at)
+	return last_heartbeat_at, err
+}
+
+const getServiceLevelStats = `-- name: GetServiceLevelStats :one
+SELECT count(*)::bigint AS span_count,
+       count(*) FILTER (
+           WHERE status NOT ILIKE '%error%'
+             AND duration_ms <= $1::double precision
+       )::bigint AS good_count
+FROM spans
+WHERE project_id = $2
+  AND org_id = $3
+  AND name = $4
+  AND start_time >= $5
+`
+
+type GetServiceLevelStatsParams struct {
+	LatencyMs float64            `json:"latency_ms"`
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	SpanName  string             `json:"span_name"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+type GetServiceLevelStatsRow struct {
+	SpanCount int64 `json:"span_count"`
+	GoodCount int64 `json:"good_count"`
+}
+
+// Service-level rules evaluate the observed availability of one exact span
+// operation against a latency objective.  The watchdog stores the latency
+// objective in the existing integer threshold column and the target in the
+// existing decimal threshold_value column, so this adds no unbounded rule
+// fields or migration.  A missing series remains quiet; service freshness or
+// a check-in should page when the producer stops reporting altogether.
+func (q *Queries) GetServiceLevelStats(ctx context.Context, arg GetServiceLevelStatsParams) (*GetServiceLevelStatsRow, error) {
+	row := q.db.QueryRow(ctx, getServiceLevelStats,
+		arg.LatencyMs,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.SpanName,
+		arg.Since,
+	)
+	var i GetServiceLevelStatsRow
+	err := row.Scan(&i.SpanCount, &i.GoodCount)
+	return &i, err
+}
+
+const getTracePercentileStats = `-- name: GetTracePercentileStats :one
+SELECT count(*)::bigint AS points,
+       COALESCE(
+           percentile_cont($1::double precision)
+           WITHIN GROUP (ORDER BY duration_ms),
+           0
+       )::double precision AS percentile_value
+FROM spans
+WHERE project_id = $2
+  AND org_id = $3
+  AND name = $4
+  AND start_time >= $5
+`
+
+type GetTracePercentileStatsParams struct {
+	Percentile float64            `json:"percentile"`
+	ProjectID  string             `json:"project_id"`
+	OrgID      string             `json:"org_id"`
+	SpanName   string             `json:"span_name"`
+	Since      pgtype.Timestamptz `json:"since"`
+}
+
+type GetTracePercentileStatsRow struct {
+	Points          int64   `json:"points"`
+	PercentileValue float64 `json:"percentile_value"`
+}
+
+// Trace percentile rules inspect one bounded span operation.  The count is
+// preserved so a newly-created rule never fires before that operation has
+// reported a span.  percentile_cont is computed inside PostgreSQL over the
+// tenant and project predicate; no span names, attributes, or raw rows leave
+// the database.
+func (q *Queries) GetTracePercentileStats(ctx context.Context, arg GetTracePercentileStatsParams) (*GetTracePercentileStatsRow, error) {
+	row := q.db.QueryRow(ctx, getTracePercentileStats,
+		arg.Percentile,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.SpanName,
+		arg.Since,
+	)
+	var i GetTracePercentileStatsRow
+	err := row.Scan(&i.Points, &i.PercentileValue)
+	return &i, err
+}
+
+const getUsageThresholdStats = `-- name: GetUsageThresholdStats :one
+SELECT count(*)::bigint AS bucket_count,
+       COALESCE(sum(request_count), 0)::bigint AS request_count,
+       COALESCE(sum(error_count), 0)::bigint AS error_count,
+       COALESCE(sum(denied_count), 0)::bigint AS denied_count
+FROM usage_buckets
+WHERE org_id = $1::text
+  AND surface = $2::text
+  AND operation = $3::text
+  AND bucket_start >= $4
+  AND (
+      project_id = $5::text
+      OR (surface IN ('api_key', 'mcp') AND project_id = '')
+  )
+`
+
+type GetUsageThresholdStatsParams struct {
+	OrgID     string             `json:"org_id"`
+	Surface   string             `json:"surface"`
+	Operation string             `json:"operation"`
+	Since     pgtype.Timestamptz `json:"since"`
+	ProjectID string             `json:"project_id"`
+}
+
+type GetUsageThresholdStatsRow struct {
+	BucketCount  int64 `json:"bucket_count"`
+	RequestCount int64 `json:"request_count"`
+	ErrorCount   int64 `json:"error_count"`
+	DeniedCount  int64 `json:"denied_count"`
+}
+
+// Usage threshold rules aggregate only durable, payload-free one-minute
+// buckets. DSN rows are project scoped. API-key and MCP rows are org-wide and
+// use an empty project_id; those surfaces use the explicit org-wide branch
+// while preserving the owning project's tenant boundary.
+func (q *Queries) GetUsageThresholdStats(ctx context.Context, arg GetUsageThresholdStatsParams) (*GetUsageThresholdStatsRow, error) {
+	row := q.db.QueryRow(ctx, getUsageThresholdStats,
+		arg.OrgID,
+		arg.Surface,
+		arg.Operation,
+		arg.Since,
+		arg.ProjectID,
+	)
+	var i GetUsageThresholdStatsRow
+	err := row.Scan(
+		&i.BucketCount,
+		&i.RequestCount,
+		&i.ErrorCount,
+		&i.DeniedCount,
+	)
+	return &i, err
+}
+
 const listWatchdogRules = `-- name: ListWatchdogRules :many
 
 SELECT r.id, r.project_id, r.org_id, r.name, r.type, r.threshold, r.window_minutes,
-       r.last_fired_at, p.name AS project_name
+       r.metric_name, r.comparison, r.threshold_value, r.span_name, r.percentile,
+       r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_sync_mode,
+       r.release_version, r.service_name, r.log_severity, r.connector_quota_metric,
+       r.usage_surface, r.usage_operation, r.usage_measure,
+       r.api_key_hygiene_mode, r.ai_triage_mode, r.metric_labels,
+       r.connector_freshness_baseline_at, r.service_freshness_baseline_at,
+       r.created_at, r.last_fired_at, p.name AS project_name
 FROM alert_rules r
 JOIN projects p ON p.id = r.project_id
-WHERE r.enabled = true AND r.type IN ('anomaly', 'silence')
+WHERE r.enabled = true AND r.type IN ('anomaly', 'silence', 'metric_threshold', 'trace_percentile', 'service_level', 'connector_error_rate', 'connector_freshness', 'connector_sync_health', 'service_freshness', 'release_freshness', 'connector_quota', 'release_error_rate', 'deploy_failure', 'deploy_acceptance', 'rollback', 'log_severity', 'usage_threshold', 'api_key_hygiene', 'ai_triage', 'ingest_acceptance')
 `
 
 type ListWatchdogRulesRow struct {
-	ID            string             `json:"id"`
-	ProjectID     string             `json:"project_id"`
-	OrgID         string             `json:"org_id"`
-	Name          string             `json:"name"`
-	Type          string             `json:"type"`
-	Threshold     int32              `json:"threshold"`
-	WindowMinutes int32              `json:"window_minutes"`
-	LastFiredAt   pgtype.Timestamptz `json:"last_fired_at"`
-	ProjectName   string             `json:"project_name"`
+	ID                           string             `json:"id"`
+	ProjectID                    string             `json:"project_id"`
+	OrgID                        string             `json:"org_id"`
+	Name                         string             `json:"name"`
+	Type                         string             `json:"type"`
+	Threshold                    int32              `json:"threshold"`
+	WindowMinutes                int32              `json:"window_minutes"`
+	MetricName                   string             `json:"metric_name"`
+	Comparison                   string             `json:"comparison"`
+	ThresholdValue               float64            `json:"threshold_value"`
+	SpanName                     string             `json:"span_name"`
+	Percentile                   int32              `json:"percentile"`
+	ConnectorProvider            string             `json:"connector_provider"`
+	ConnectorOperation           string             `json:"connector_operation"`
+	ConnectorChannel             string             `json:"connector_channel"`
+	ConnectorErrorCode           string             `json:"connector_error_code"`
+	ConnectorConnectionID        string             `json:"connector_connection_id"`
+	ConnectorSyncMode            string             `json:"connector_sync_mode"`
+	ReleaseVersion               string             `json:"release_version"`
+	ServiceName                  string             `json:"service_name"`
+	LogSeverity                  string             `json:"log_severity"`
+	ConnectorQuotaMetric         string             `json:"connector_quota_metric"`
+	UsageSurface                 string             `json:"usage_surface"`
+	UsageOperation               string             `json:"usage_operation"`
+	UsageMeasure                 string             `json:"usage_measure"`
+	ApiKeyHygieneMode            string             `json:"api_key_hygiene_mode"`
+	AiTriageMode                 string             `json:"ai_triage_mode"`
+	MetricLabels                 json.RawMessage    `json:"metric_labels"`
+	ConnectorFreshnessBaselineAt pgtype.Timestamptz `json:"connector_freshness_baseline_at"`
+	ServiceFreshnessBaselineAt   pgtype.Timestamptz `json:"service_freshness_baseline_at"`
+	CreatedAt                    pgtype.Timestamptz `json:"created_at"`
+	LastFiredAt                  pgtype.Timestamptz `json:"last_fired_at"`
+	ProjectName                  string             `json:"project_name"`
 }
 
 // Watchdog worker queries. The worker runs across all orgs/projects, so
 // ListWatchdogRules is intentionally not project-scoped; the per-project reads
 // it drives (CountEventsForProjectSince) carry the project_id + org_id predicate.
-// ciguard:allow-unscoped global watchdog worker; every downstream read (CountEventsForProjectSince) re-scopes by project_id AND org_id, and TrySetAlertRuleFired filters org_id
-// Enabled anomaly/silence rules with the project name + org for dispatch.
+// ciguard:allow-unscoped global watchdog worker; every downstream read (CountEventsForProjectSince, GetMetricThresholdStats, GetTracePercentileStats, GetServiceLevelStats, GetConnectorErrorRateStats, GetConnectorQuotaStats, GetConnectorFreshnessStats, GetConnectorSyncHealthStats, GetServiceFreshnessStats, GetReleaseErrorRateStats, GetReleaseFreshnessStats, GetDeployFailureStats, GetDeployAcceptanceStats, GetRollbackStats, GetLogSeverityStats, GetUsageThresholdStats, GetAPIKeyHygieneStats, GetAITriageStats, GetIngestAcceptanceStats) re-scopes by project_id/org_id or org_id for org-owned API keys, and TrySetAlertRuleFired filters org_id
+// Enabled watchdog rules with the project name + org for dispatch.
 func (q *Queries) ListWatchdogRules(ctx context.Context) ([]*ListWatchdogRulesRow, error) {
 	rows, err := q.db.Query(ctx, listWatchdogRules)
 	if err != nil {
@@ -102,6 +901,30 @@ func (q *Queries) ListWatchdogRules(ctx context.Context) ([]*ListWatchdogRulesRo
 			&i.Type,
 			&i.Threshold,
 			&i.WindowMinutes,
+			&i.MetricName,
+			&i.Comparison,
+			&i.ThresholdValue,
+			&i.SpanName,
+			&i.Percentile,
+			&i.ConnectorProvider,
+			&i.ConnectorOperation,
+			&i.ConnectorChannel,
+			&i.ConnectorErrorCode,
+			&i.ConnectorConnectionID,
+			&i.ConnectorSyncMode,
+			&i.ReleaseVersion,
+			&i.ServiceName,
+			&i.LogSeverity,
+			&i.ConnectorQuotaMetric,
+			&i.UsageSurface,
+			&i.UsageOperation,
+			&i.UsageMeasure,
+			&i.ApiKeyHygieneMode,
+			&i.AiTriageMode,
+			&i.MetricLabels,
+			&i.ConnectorFreshnessBaselineAt,
+			&i.ServiceFreshnessBaselineAt,
+			&i.CreatedAt,
 			&i.LastFiredAt,
 			&i.ProjectName,
 		); err != nil {

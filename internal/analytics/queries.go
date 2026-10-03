@@ -24,6 +24,24 @@ type SpanLatency struct {
 	Count int64   `json:"count"`
 }
 
+// ServiceLevel is a bounded SLO aggregate over sampled spans. Good spans have
+// a non-error status and complete within the configured latency objective.
+// ErrorBudgetConsumed is the observed bad-event rate divided by the allowed
+// error rate (1 - target); values above 1 mean the budget is exhausted.
+type ServiceLevel struct {
+	Operation           string  `json:"operation,omitempty"`
+	WindowHours         int     `json:"window_hours"`
+	LatencyThresholdMs  float64 `json:"latency_threshold_ms"`
+	Target              float64 `json:"target"`
+	SpanCount           int64   `json:"span_count"`
+	GoodCount           int64   `json:"good_count"`
+	ErrorCount          int64   `json:"error_count"`
+	SlowCount           int64   `json:"slow_count"`
+	ErrorRate           float64 `json:"error_rate"`
+	Availability        float64 `json:"availability"`
+	ErrorBudgetConsumed float64 `json:"error_budget_consumed"`
+}
+
 // source builds a "(hot UNION ALL cold) AS src" subquery exposing exactly the
 // requested columns. The cold (Parquet) arm is included only when cold data is
 // known to exist, because DuckDB errors on a read_parquet glob that matches
@@ -124,4 +142,62 @@ func (m *Manager) SpanLatencyPercentiles(ctx context.Context, projectID, orgID s
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// SpanServiceLevel returns one tenant-scoped availability/error-budget
+// aggregate for spans in the requested window. The operation filter is
+// optional; when present it is an exact operation name. A span is good only
+// when its status is not an error and its duration is within latencyThreshold.
+// This is evidence over received/sampled spans, not a claim about requests
+// that emitted no trace.
+func (m *Manager) SpanServiceLevel(ctx context.Context, projectID, orgID string, sinceHours int, operation string, latencyThreshold, target float64) (*ServiceLevel, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, fmt.Errorf("analytics: closed")
+	}
+	src := m.source("spans", []string{"name", "status", "duration_ms", "project_id", "org_id", "start_time"})
+	whereOperation := ""
+	if operation != "" {
+		whereOperation = " AND name = ?"
+	}
+	// The latency threshold is deliberately repeated in the CASE expression so
+	// the aggregate remains one row and no raw span data crosses the API.
+	q := fmt.Sprintf(`
+		SELECT count(*)::BIGINT AS total,
+		       COALESCE(sum(CASE WHEN status NOT ILIKE '%%error%%' AND duration_ms <= ? THEN 1 ELSE 0 END), 0)::BIGINT AS good,
+		       COALESCE(sum(CASE WHEN status ILIKE '%%error%%' THEN 1 ELSE 0 END), 0)::BIGINT AS errors,
+		       COALESCE(sum(CASE WHEN status NOT ILIKE '%%error%%' AND duration_ms > ? THEN 1 ELSE 0 END), 0)::BIGINT AS slow
+		FROM %s
+		WHERE project_id = ? AND org_id = ?
+		  AND start_time >= now() - (? * INTERVAL '1 hour')%s`, src, whereOperation)
+	// DuckDB binds each '?' in positional order. The SELECT has two threshold
+	// placeholders, followed by the tenant/window predicates and optional name.
+	args := []any{latencyThreshold, latencyThreshold, projectID, orgID, sinceHours}
+	if operation != "" {
+		args = append(args, operation)
+	}
+	var total, good, errors, slow int64
+	if err := m.db.QueryRowContext(ctx, q, args...).Scan(&total, &good, &errors, &slow); err != nil {
+		return nil, err
+	}
+	out := &ServiceLevel{
+		Operation:          operation,
+		WindowHours:        sinceHours,
+		LatencyThresholdMs: latencyThreshold,
+		Target:             target,
+		SpanCount:          total,
+		GoodCount:          good,
+		ErrorCount:         errors,
+		SlowCount:          slow,
+	}
+	if total > 0 {
+		out.Availability = float64(good) / float64(total)
+		out.ErrorRate = 1 - out.Availability
+	}
+	allowedErrorRate := 1 - target
+	if allowedErrorRate > 0 {
+		out.ErrorBudgetConsumed = out.ErrorRate / allowedErrorRate
+	}
+	return out, nil
 }

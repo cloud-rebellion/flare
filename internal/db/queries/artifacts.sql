@@ -1,12 +1,12 @@
 -- name: UpsertSourceMap :one
-INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content, parse_status)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (project_id, release, name) DO UPDATE
-  SET content = EXCLUDED.content, created_at = now()
-RETURNING id, project_id, org_id, release, name, length(content) AS size, created_at;
+  SET content = EXCLUDED.content, parse_status = EXCLUDED.parse_status, created_at = now()
+RETURNING id, project_id, org_id, release, name, length(content) AS size, parse_status, created_at;
 
 -- name: ListSourceMapsByProject :many
-SELECT id, release, name, length(content) AS size, created_at
+SELECT id, release, name, length(content) AS size, parse_status, created_at
 FROM source_map_artifacts
 WHERE project_id = $1 AND org_id = $2
 ORDER BY release DESC, name ASC;
@@ -29,6 +29,7 @@ SELECT name, content FROM (
            sum(octet_length(content)) OVER (ORDER BY created_at DESC, name) AS running_bytes
     FROM source_map_artifacts
     WHERE project_id = $1 AND org_id = $2 AND release = $3
+      AND parse_status IN ('unvalidated', 'valid')
 ) t
 WHERE running_bytes <= sqlc.arg(max_bytes)::bigint
 ORDER BY created_at DESC

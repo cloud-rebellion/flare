@@ -47,6 +47,30 @@ const (
 
 // handleEnvelope ingests a Sentry envelope (the modern @sentry/* SDK path).
 func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
+	var eventOutcome, transactionOutcome, spanOutcome, otherOutcome ingestOutcome
+	var budget *ingestBudget
+	var droppedEvents, droppedTransactions, droppedOther uint64
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		if budget != nil {
+			spanOutcome.dropped = uint64(budget.dropped)
+		}
+		eventOutcome.dropped += droppedEvents
+		transactionOutcome.dropped += droppedTransactions
+		otherOutcome.dropped += droppedOther
+		eventOutcome.record("event")
+		transactionOutcome.record("transaction")
+		spanOutcome.record("span")
+		otherOutcome.record("other")
+		total := eventOutcome
+		total.add(transactionOutcome)
+		total.add(spanOutcome)
+		total.add(otherOutcome)
+		recordIngestRequest("sentry", total, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, total, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
@@ -55,28 +79,44 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "envelope", "sentry", &eventOutcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
+		return
+	}
 	items, err := ingest.ParseEnvelope(body)
 	if err != nil {
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid envelope")
 		return
 	}
+	receipt.setReceived(len(items))
+	requestOutcome = ""
 	// Truncate rather than reject. A legitimate SDK never comes near this, and
 	// answering 4xx would make Sentry clients DISCARD the payload as malformed;
 	// accepting the first maxEnvelopeItems keeps real data flowing while the
 	// amplification is bounded.
-	dropped := 0
 	if len(items) > maxEnvelopeItems {
-		dropped = len(items) - maxEnvelopeItems
+		for _, item := range items[maxEnvelopeItems:] {
+			switch item.Type {
+			case "event":
+				droppedEvents++
+			case "transaction":
+				droppedTransactions++
+			default:
+				droppedOther++
+			}
+		}
 		items = items[:maxEnvelopeItems]
 		slog.Warn("envelope truncated: too many items",
-			"project_id", project.ID, "kept", maxEnvelopeItems, "dropped", dropped)
+			"project_id", project.ID, "kept", maxEnvelopeItems,
+			"dropped", droppedEvents+droppedTransactions+droppedOther)
 	}
 
 	// One budget for the whole request. maxEnvelopeItems bounds the ITEMS, and on
 	// the events path one item is one row, but a transaction item carries its
 	// whole span tree: capping per persistSpans call would still let one envelope
 	// write maxEnvelopeItems x cap span rows. See maxIngestRecords.
-	budget := newIngestBudget()
+	budget = newIngestBudget()
 
 	var lastID string
 	var events, stored int
@@ -91,31 +131,51 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	for _, item := range items {
 		switch item.Type {
 		case "transaction":
+			transactions++
 			// Sentry-wire tracing: a transaction item carries the root span plus
 			// its children. Map to Flare spans and store via the same path OTLP
-			// traces use. Best-effort: a bad transaction never fails the ingest.
+			// traces use. A persistence error is surfaced as retryable below so a
+			// Sentry SDK cannot discard a transaction that was never stored.
 			spans, perr := ingest.ParseSentryTransaction(item.Payload)
 			if perr != nil {
+				transactionOutcome.invalid++
 				slog.Warn("envelope transaction parse failed", "project_id", project.ID, "error", perr)
 				continue
 			}
-			transactions++
-			if perr := s.persistSpans(r.Context(), project, spans, budget); perr != nil {
+			storedSpans, perr := s.persistSpans(r.Context(), project, spans, budget)
+			if perr != nil {
+				transactionOutcome.failed++
 				slog.Warn("persist transaction spans failed", "project_id", project.ID, "error", perr)
 				continue
 			}
+			if storedSpans == 0 {
+				// The request budget may have admitted no rows after an earlier
+				// transaction consumed the cap. Do not tell Sentry that this
+				// transaction was accepted when no span row was written.
+				transactionOutcome.dropped++
+				continue
+			}
 			storedTransactions++
+			transactionOutcome.accepted++
 		case "event":
 			events++
 			eid, ierr := s.ingestOne(r.Context(), project, item.Payload)
 			if ierr != nil {
+				var parseErr *ingestParseError
+				if errors.As(ierr, &parseErr) {
+					eventOutcome.invalid++
+				} else {
+					eventOutcome.failed++
+				}
 				slog.Warn("envelope event ingest failed", "project_id", project.ID, "error", ierr)
 				continue
 			}
 			stored++
+			eventOutcome.accepted++
 			lastID = eid
 		default:
 			// sessions, attachments, client reports: not stored.
+			otherOutcome.invalid++
 		}
 	}
 	// A 200 tells the SDK the payload was accepted, so it drops it. Answering
@@ -125,14 +185,30 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	// problem, not a malformed request. Partial success still returns 200,
 	// because the SDK cannot retry individual items.
 	if events > 0 && stored == 0 {
-		writeErr(w, http.StatusServiceUnavailable, "no event in the envelope could be stored")
+		if eventOutcome.failed > 0 {
+			requestOutcome = "failed"
+			receiptStatus = http.StatusServiceUnavailable
+			writeErr(w, http.StatusServiceUnavailable, "no event in the envelope could be stored")
+			return
+		}
+		requestOutcome = "rejected"
+		receiptStatus = http.StatusBadRequest
+		writeErr(w, http.StatusBadRequest, "every event in the envelope was invalid")
 		return
 	}
 	// Same rule for an envelope that carried only transactions. A parse failure
 	// is the client's problem and is not counted here; a persist failure is
 	// ours, and telling the SDK "accepted" is how the span tree is lost.
 	if events == 0 && transactions > 0 && storedTransactions == 0 {
-		writeErr(w, http.StatusServiceUnavailable, "no transaction in the envelope could be stored")
+		if transactionOutcome.failed > 0 {
+			requestOutcome = "failed"
+			receiptStatus = http.StatusServiceUnavailable
+			writeErr(w, http.StatusServiceUnavailable, "no transaction in the envelope could be stored")
+			return
+		}
+		requestOutcome = "rejected"
+		receiptStatus = http.StatusBadRequest
+		writeErr(w, http.StatusBadRequest, "every transaction in the envelope was invalid")
 		return
 	}
 	budget.report(project.ID, "spans")
@@ -142,6 +218,15 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 // handleStore ingests a single event JSON (Sentry /store/ and Flare's native
 // /events endpoint).
 func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("event")
+		recordIngestRequest("sentry", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
@@ -150,6 +235,11 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "event", "sentry", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
+		return
+	}
+	receipt.setReceived(1)
 	eid, err := s.ingestOne(r.Context(), project, body)
 	if err != nil {
 		// Distinguish a client PARSE failure from a server-side store/DB failure.
@@ -158,13 +248,20 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		// handleEnvelope: 4xx only for a bad body, 503 for a store failure.
 		var perr *ingestParseError
 		if errors.As(err, &perr) {
+			outcome.invalid = 1
+			receiptStatus = http.StatusBadRequest
 			writeErr(w, http.StatusBadRequest, "invalid event")
 			return
 		}
+		outcome.failed = 1
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slog.Warn("store event failed", "project_id", project.ID, "error", err)
 		writeErr(w, http.StatusServiceUnavailable, "could not store event")
 		return
 	}
+	outcome.accepted = 1
+	requestOutcome = ""
 	writeJSON(w, http.StatusOK, map[string]string{"id": eid})
 }
 
@@ -244,7 +341,7 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		}
 	}
 
-	if err := s.q.InsertEvent(ctx, generated.InsertEventParams{
+	insertParams := generated.InsertEventParams{
 		ID:             id.New(),
 		ProjectID:      project.ID,
 		OrgID:          project.OrgID,
@@ -260,7 +357,21 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		Payload:        payload,
 		TraceID:        textOrNull(traceID),
 		SpanID:         textOrNull(spanID),
-	}); err != nil {
+	}
+	// A release freshness signal is deliberately narrower than generic
+	// activity: only the built-in info-level service-up:<service> heartbeat,
+	// carrying a non-empty release, advances the release heartbeat timestamp.
+	// This keeps arbitrary event traffic from making a deployed release look
+	// live while retaining the payload-free event record as the source of truth.
+	if release != "" && isReleaseHeartbeat(level, msg) {
+		if err := s.storeHeartbeatAtomically(ctx, insertParams, generated.TouchReleaseHeartbeatParams{
+			ProjectID: project.ID,
+			OrgID:     project.OrgID,
+			Version:   release,
+		}); err != nil {
+			return "", err
+		}
+	} else if err := s.q.InsertEvent(ctx, insertParams); err != nil {
 		return "", err
 	}
 
@@ -294,6 +405,65 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		s.maybeAutoTriage(project.OrgID, issue.ID)
 	}
 	return eventID, nil
+}
+
+// storeHeartbeatAtomically keeps the event row and its release freshness marker
+// in one transaction. A marker update failure must not leave a heartbeat that
+// the caller is told to retry, because that would duplicate the event on the
+// next attempt while the ingest receipt remains failed. Ordinary events keep
+// the existing single-write path.
+func (s *Server) storeHeartbeatAtomically(ctx context.Context, event generated.InsertEventParams, heartbeat generated.TouchReleaseHeartbeatParams) error {
+	if s.pool == nil {
+		// Lightweight servers used by unit tests may not carry a pool. Preserve
+		// the old query path there; production servers always have a pool.
+		if err := s.q.InsertEvent(ctx, event); err != nil {
+			return err
+		}
+		rows, err := s.q.TouchReleaseHeartbeat(ctx, heartbeat)
+		if err != nil {
+			return fmt.Errorf("persist release heartbeat: %w", err)
+		}
+		if rows != 1 {
+			return fmt.Errorf("persist release heartbeat: release %q is not registered", heartbeat.Version)
+		}
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin release heartbeat transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	qtx := s.q.WithTx(tx)
+	if err := qtx.InsertEvent(ctx, event); err != nil {
+		return err
+	}
+	rows, err := qtx.TouchReleaseHeartbeat(ctx, heartbeat)
+	if err != nil {
+		return fmt.Errorf("persist release heartbeat: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("persist release heartbeat: release %q is not registered", heartbeat.Version)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit release heartbeat: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func isReleaseHeartbeat(level, message string) bool {
+	if level != "info" {
+		return false
+	}
+	service := strings.TrimSpace(strings.TrimPrefix(message, "service-up:"))
+	return strings.HasPrefix(message, "service-up:") && service != ""
 }
 
 // evaluateAlerts matches an ingested event against the project's enabled alert
@@ -424,6 +594,7 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		// detectSensitive decides whether to raise the badge. It never decides
 		// whether redaction runs.
 		s.dispatcher.Dispatch(ctx, channels, alerts.Notification{
+			ProjectID:   project.ID,
 			ProjectName: project.Name,
 			IssueID:     issue.ID,
 			Title:       ai.Scrub(issue.Title),
@@ -497,6 +668,13 @@ func (s *Server) authIngest(w http.ResponseWriter, r *http.Request) (*generated.
 		writeErr(w, http.StatusUnauthorized, "key does not match project")
 		return nil, false
 	}
+	// Record the authenticated DSN request at the boundary. The payload-free
+	// ingest receipt later records acceptance/rejection counts; this usage
+	// bucket also covers check-ins, which do not create a receipt row.
+	s.recordUsage(r.Context(), usageDelta{
+		OrgID: project.OrgID, ProjectID: project.ID,
+		Surface: "dsn", Operation: dsnUsageOperation(r), Requests: 1,
+	})
 	return project, true
 }
 

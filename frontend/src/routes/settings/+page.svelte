@@ -13,7 +13,10 @@
     Channel,
     Project,
     GithubConfig,
-    OidcConfig
+    OidcConfig,
+    ConnectorConnection,
+    ConnectorCheckResult,
+    ConnectorSyncRun
   } from '$lib/types';
 
   let channels = $state<Channel[] | null>(null);
@@ -22,6 +25,7 @@
   let error = $state<string | null>(null);
   let type = $state('log');
   let url = $state('');
+  let automationSigningSecret = $state('');
   let emailTo = $state('');
   let slackUrl = $state('');
   let busy = $state(false);
@@ -39,6 +43,15 @@
   let ghRepo = $state('');
   let ghToken = $state('');
   let ghBusy = $state(false);
+  let connectorConnections = $state<ConnectorConnection[] | null>(null);
+  let connectorProvider = $state('hubspot');
+  let connectorInstallationId = $state('');
+  let connectorInstallationName = $state('');
+  let connectorScopes = $state('crm.objects.contacts.read');
+  let connectorSecret = $state('');
+  let connectorBusy = $state(false);
+  let connectorChecks = $state<Record<string, ConnectorCheckResult | 'busy'>>({});
+  let connectorRuns = $state<Record<string, ConnectorSyncRun | 'busy'>>({});
   const isAdmin = $derived(session.user?.role === 'admin' || session.user?.role === 'owner');
   const isOwner = $derived(session.user?.role === 'owner');
 
@@ -174,6 +187,7 @@
         aiEnabled = ai.enabled;
         aiAutoTriage = ai.auto_triage;
         aiBudget = ai.triage_daily_budget;
+        connectorConnections = await api.connectorConnections();
       }
     } catch (err) {
       error = err instanceof ApiError ? err.message : 'Failed to load settings';
@@ -337,6 +351,71 @@
     }
   }
 
+  async function connectConnector(e: SubmitEvent) {
+    e.preventDefault();
+    const provider = connectorProvider.trim();
+    const installationId = connectorInstallationId.trim();
+    const secret = connectorSecret.trim();
+    if (!provider || !installationId || !secret) {
+      error = 'Provider, installation ID, and credential are required.';
+      return;
+    }
+    connectorBusy = true;
+    error = null;
+    try {
+      const connection = await api.createConnectorConnection({
+        provider,
+        installation_id: installationId,
+        installation_name: connectorInstallationName.trim() || undefined,
+        status: 'active',
+        scopes: connectorScopes
+          .split(',')
+          .map((scope) => scope.trim())
+          .filter(Boolean),
+        secret
+      });
+      connectorConnections = [connection, ...(connectorConnections ?? [])];
+      connectorInstallationId = '';
+      connectorInstallationName = '';
+      connectorSecret = '';
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Failed to connect provider';
+    } finally {
+      connectorBusy = false;
+    }
+  }
+
+  async function checkConnector(connection: ConnectorConnection) {
+    connectorChecks[connection.id] = 'busy';
+    try {
+      connectorChecks[connection.id] = await api.checkConnectorConnection(connection.id);
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Provider check failed';
+      delete connectorChecks[connection.id];
+    }
+  }
+
+  async function syncConnector(connection: ConnectorConnection) {
+    connectorRuns[connection.id] = 'busy';
+    try {
+      connectorRuns[connection.id] = await api.runConnectorSync(connection.id);
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Connector sync failed';
+      delete connectorRuns[connection.id];
+    }
+  }
+
+  async function disconnectConnector(connection: ConnectorConnection) {
+    if (!confirm(`Disconnect ${connection.provider} installation ${connection.installation_name || connection.installation_id}?`)) return;
+    try {
+      await api.deleteConnectorConnection(connection.id);
+      connectorConnections = (connectorConnections ?? []).filter((item) => item.id !== connection.id);
+      delete connectorChecks[connection.id];
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Failed to disconnect provider';
+    }
+  }
+
   async function createKey(e: SubmitEvent) {
     e.preventDefault();
     keyBusy = true;
@@ -371,7 +450,9 @@
     error = null;
     try {
       const config =
-        type === 'webhook'
+        type === 'automation_webhook'
+          ? { url, signing_secret: automationSigningSecret }
+          : type === 'webhook'
           ? { url }
           : type === 'email'
             ? { to: emailTo }
@@ -381,6 +462,7 @@
       const ch = await api.createChannel(type, config);
       channels = [ch, ...(channels ?? [])];
       url = '';
+      automationSigningSecret = '';
       emailTo = '';
       slackUrl = '';
     } catch (err) {
@@ -447,6 +529,7 @@
       <option value="email">Email</option>
       <option value="slack">Slack</option>
       <option value="webhook">Webhook</option>
+      <option value="automation_webhook">Automation webhook</option>
     </select>
   </div>
   {#if type === 'slack'}
@@ -459,6 +542,26 @@
         class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
       />
       <span class="text-xs text-zinc-600">Create one under Slack apps &rarr; Incoming Webhooks.</span>
+    </div>
+  {:else if type === 'automation_webhook'}
+    <div class="flex flex-1 flex-col gap-1.5">
+      <label for="automationurl" class="text-xs font-medium text-zinc-400">Worker webhook URL</label>
+      <input
+        id="automationurl"
+        bind:value={url}
+        placeholder="https://worker.example.com/flare"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+      <label for="automationsigningsecret" class="mt-1 text-xs font-medium text-zinc-400">Signing secret</label>
+      <input
+        id="automationsigningsecret"
+        type="password"
+        autocomplete="new-password"
+        bind:value={automationSigningSecret}
+        placeholder="16–256 printable characters"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+      <span class="text-xs text-zinc-600">Receives signed, payload-free notices. The worker fetches evidence and keeps approval and execution in its own guarded workflow.</span>
     </div>
   {:else if type === 'webhook'}
     <div class="flex flex-1 flex-col gap-1.5">
@@ -515,7 +618,7 @@
       {@const res = testResult[ch.id]}
       <li class="flex flex-wrap items-center gap-3 py-3">
         <span class="inline-block h-1.5 w-1.5 rounded-full {health.color}" title={health.label}></span>
-        <span class="text-sm font-medium capitalize text-zinc-200">{ch.type}</span>
+        <span class="text-sm font-medium capitalize text-zinc-200">{ch.type === 'automation_webhook' ? 'Automation webhook' : ch.type}</span>
         {#if ch.config?.url}<span class="truncate font-mono text-xs text-zinc-500">{String(ch.config.url)}</span>{/if}
         {#if ch.config?.to}<span class="truncate font-mono text-xs text-zinc-500">{String(ch.config.to)}</span>{/if}
         {#if ch.config?.webhook_url}<span class="truncate font-mono text-xs text-zinc-500">{String(ch.config.webhook_url)}</span>{/if}
@@ -782,6 +885,108 @@
       {ghBusy ? 'Saving...' : github?.configured ? 'Update' : 'Connect'}
     </button>
   </form>
+
+  <h2 class="mt-14 text-xl font-semibold tracking-tight">SaaS connectors</h2>
+  <p class="mt-1 mb-6 max-w-2xl text-sm text-zinc-500">
+    Register a provider installation for bounded health checks. Credentials are write-only and encrypted at rest;
+    Flare stores only connection metadata and payload-free health receipts. Supported checks are HubSpot account health,
+    GitHub <code>user</code>, Slack <code>auth.test</code>, and OpenAI <code>models</code>; synchronization remains HubSpot-only.
+  </p>
+
+  <form onsubmit={connectConnector} class="mb-6 flex flex-wrap items-end gap-3 border-b border-zinc-800/80 pb-8">
+    <div class="flex flex-col gap-1.5">
+      <label for="connector-provider" class="text-xs font-medium text-zinc-400">Provider</label>
+      <input
+        id="connector-provider"
+        bind:value={connectorProvider}
+        placeholder="hubspot, github, slack, or openai"
+        class="w-32 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+    </div>
+    <div class="flex flex-1 flex-col gap-1.5">
+      <label for="connector-installation" class="text-xs font-medium text-zinc-400">Installation ID</label>
+      <input
+        id="connector-installation"
+        bind:value={connectorInstallationId}
+        placeholder="production"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+    </div>
+    <div class="flex flex-1 flex-col gap-1.5">
+      <label for="connector-name" class="text-xs font-medium text-zinc-400">Display name</label>
+      <input
+        id="connector-name"
+        bind:value={connectorInstallationName}
+        placeholder="Production provider"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+    </div>
+    <div class="flex flex-1 flex-col gap-1.5">
+      <label for="connector-scopes" class="text-xs font-medium text-zinc-400">Scopes</label>
+      <input
+        id="connector-scopes"
+        bind:value={connectorScopes}
+        placeholder="crm.objects.contacts.read"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+    </div>
+    <div class="flex flex-1 flex-col gap-1.5">
+      <label for="connector-secret" class="text-xs font-medium text-zinc-400">Credential</label>
+      <input
+        id="connector-secret"
+        type="password"
+        autocomplete="new-password"
+        bind:value={connectorSecret}
+        placeholder="write-only"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      />
+    </div>
+    <button
+      type="submit"
+      disabled={connectorBusy}
+      class="rounded-md bg-amber-400 px-3.5 py-2 text-sm font-medium text-zinc-950 transition-colors hover:bg-amber-300 active:translate-y-px disabled:opacity-60"
+    >
+      {connectorBusy ? 'Connecting...' : 'Connect'}
+    </button>
+  </form>
+
+  {#if connectorConnections?.length}
+    <ul class="divide-y divide-zinc-800/60">
+      {#each connectorConnections as connection (connection.id)}
+        {@const check = connectorChecks[connection.id]}
+        {@const run = connectorRuns[connection.id]}
+        <li class="flex flex-wrap items-center gap-3 py-3">
+          <span class="inline-block h-1.5 w-1.5 rounded-full {connection.status === 'active' ? 'bg-emerald-400' : 'bg-zinc-500'}"></span>
+          <span class="text-sm font-medium text-zinc-200">{connection.installation_name || connection.installation_id}</span>
+          <span class="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">{connection.provider}</span>
+          <span class="text-xs text-zinc-600">{connection.credential_configured ? 'credential configured' : 'missing credential'}</span>
+          <div class="ml-auto flex items-center gap-3">
+            {#if check === 'busy'}
+              <span class="text-xs text-zinc-500">Checking...</span>
+            {:else if check}
+              <span class="text-xs {check.outcome === 'ok' ? 'text-emerald-400' : 'text-rose-400'}">
+                {check.outcome === 'ok' ? 'Healthy' : `Failed${check.error_code ? `: ${check.error_code}` : ''}`}
+              </span>
+            {/if}
+            <button onclick={() => checkConnector(connection)} disabled={check === 'busy'} class="text-xs text-zinc-500 transition-colors hover:text-amber-400 disabled:opacity-50">Check</button>
+            {#if run === 'busy'}
+              <span class="text-xs text-zinc-500">Syncing...</span>
+            {:else if run?.skipped}
+              <span class="text-xs text-zinc-500">{run.skip_reason === 'lease_busy' ? 'Busy' : 'Skipped'}</span>
+            {:else if run}
+              <span class="text-xs {run.outcome === 'ok' ? 'text-emerald-400' : 'text-rose-400'}">{run.outcome === 'ok' ? 'Synced' : `Sync failed${run.error_code ? `: ${run.error_code}` : ''}`}</span>
+            {/if}
+            {#if connection.provider === 'hubspot'}
+              <button onclick={() => syncConnector(connection)} disabled={run === 'busy' || connection.status !== 'active'} class="text-xs text-zinc-500 transition-colors hover:text-amber-400 disabled:opacity-50">Sync</button>
+            {/if}
+            <button onclick={() => disconnectConnector(connection)} class="text-xs text-zinc-600 transition-colors hover:text-rose-400">Disconnect</button>
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {:else if connectorConnections}
+    <p class="text-sm text-zinc-500">No SaaS connectors yet.</p>
+  {/if}
 
   <h2 class="mt-14 text-xl font-semibold tracking-tight">Single sign-on (OIDC)</h2>
   <p class="mt-1 mb-4 text-sm text-zinc-500">

@@ -15,6 +15,7 @@ import (
 
 	"github.com/bright-interaction/flare/internal/ai"
 	"github.com/bright-interaction/flare/internal/db/generated"
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/netguard"
 	"github.com/bright-interaction/flare/internal/telemetry"
 )
@@ -166,7 +167,7 @@ func (s *Server) handleTriageIssue(w http.ResponseWriter, r *http.Request) {
 	org := orgIDFrom(ctx)
 	issueID := chi.URLParam(r, "id")
 
-	text, cached, err := s.triageIssue(ctx, org, issueID, r.URL.Query().Get("refresh") == "true")
+	text, cached, evidenceDigest, err := s.triageIssue(ctx, org, issueID, r.URL.Query().Get("refresh") == "true")
 	if err != nil {
 		var nf telemetry.ErrNotFound
 		switch {
@@ -178,33 +179,75 @@ func (s *Server) handleTriageIssue(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, errTriageEndpoint.Error())
 		case errors.Is(err, errTriageBudget):
 			writeErr(w, http.StatusTooManyRequests, errTriageBudget.Error())
+		case errors.Is(err, errAIActionReceiptUnavailable):
+			writeErr(w, http.StatusServiceUnavailable, errAIActionReceiptUnavailable.Error())
 		default:
 			slogError(w, "ai triage", err)
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"triage": text, "cached": cached})
+	writeJSON(w, http.StatusOK, triageResponse(text, cached, evidenceDigest))
+}
+
+func triageResponse(text string, cached bool, evidenceDigest string) map[string]any {
+	response := map[string]any{"triage": text, "cached": cached}
+	if evidenceDigest != "" {
+		// A fresh triage receipt is the provenance handle an external coding
+		// worker needs when it submits the human-gated patch receipt. Cached
+		// triage deliberately has no digest and cannot authorize a patch.
+		response["evidence_digest"] = evidenceDigest
+	}
+	return response
 }
 
 // triageIssue runs (or returns cached) AI triage for one issue. Shared by the
-// REST handler and the MCP tool. Returns the triage text, whether it was
-// served from cache, and a typed error (errTriageNotConfigured /
+// REST handler and the MCP tool. A fresh run returns the exact evidence digest
+// stored in its durable receipt; cached reads return an empty digest and cannot
+// authorize a patch. The final value is a typed error (errTriageNotConfigured /
 // errTriageEndpoint / telemetry.ErrNotFound / raw DB error).
-func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh bool) (string, bool, error) {
+func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh bool) (text string, cached bool, evidenceDigest string, retErr error) {
 	issue, err := s.store.GetIssue(ctx, issueID, org)
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
+	receipt, receiptErr := s.requireAIActionReceipt(ctx, org, issue.ProjectID, issue.ID, "triage", "unknown")
+	if receiptErr != nil {
+		return "", false, "", receiptErr
+	}
+	defer func() {
+		s.finishAIActionReceipt(ctx, receipt, cached, retErr)
+		if receipt != nil {
+			evidenceDigest = receipt.evidenceDigest
+		}
+	}()
 	if issue.AITriage != "" && !refresh {
-		return issue.AITriage, true, nil
+		if receipt != nil {
+			receipt.provider = "cache"
+		}
+		// Rows created before output egress scrubbing may contain a provider
+		// echo of a credential or PII. Sanitize cached text before returning it
+		// through REST or MCP, and repair the durable row when possible so a
+		// later read cannot re-expose the old value.
+		sanitized := sanitizeTriageOutput(issue.AITriage)
+		if sanitized != issue.AITriage {
+			if err := s.q.SetIssueTriage(ctx, generated.SetIssueTriageParams{
+				ID: issue.ID, OrgID: org, AiTriage: sanitized,
+			}); err != nil {
+				slog.Warn("ai triage: unable to repair cached output", "issue", issue.ID, "org", org, "error", err)
+			}
+		}
+		return sanitized, true, "", nil
 	}
 
 	cfg, err := s.q.GetAIConfig(ctx, org)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !cfg.Enabled) {
-		return "", false, errTriageNotConfigured
+		return "", false, "", errTriageNotConfigured
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, "", err
+	}
+	if receipt != nil {
+		receipt.provider = canonicalAIActionProvider(cfg.Format)
 	}
 
 	// The BYOAI cost guard belongs HERE, not on the callers, because it kept
@@ -219,7 +262,7 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	// Claimed before the outbound call and only when a call is actually going
 	// to happen: a cached answer costs nothing and must not consume budget.
 	if err := s.claimTriageBudget(ctx, org, cfg.TriageDailyBudget); err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
 
 	// The report is written by whoever sent the event, not by us: a DSN public
@@ -230,7 +273,14 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	report := s.buildTriageContext(ctx, issue, org)
 	fenced, untrustedRule, err := ai.Fence(report)
 	if err != nil {
-		return "", false, fmt.Errorf("%w: %v", errTriageEndpoint, err)
+		return "", false, "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
+	}
+	// Keep only a deterministic digest of the bounded, scrubbed evidence in
+	// the receipt. The random fence delimiter is transport framing, so hashing
+	// report (the exact sanitized context inside it) keeps repeated reads of
+	// unchanged incident evidence comparable without retaining prompt content.
+	if receipt != nil {
+		receipt.evidenceDigest = aiEvidenceDigest(report)
 	}
 	system := "You are a senior software engineer triaging a production error from an observability tool. " +
 		"The stack trace has been de-minified to original source. Reply in concise GitHub-flavored markdown with three short sections: " +
@@ -245,26 +295,37 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	apiKey, err := s.secrets.Decrypt(cfg.ApiKey)
 	if err != nil {
 		slog.Error("ai triage: stored provider key cannot be decrypted; check FLARE_SECRET_KEY", "org", org, "error", err)
-		return "", false, errTriageNotConfigured
+		return "", false, "", errTriageNotConfigured
 	}
-	triage, err := s.ai.Complete(ctx, ai.Config{BaseURL: cfg.BaseUrl, APIKey: apiKey, Model: cfg.Model, Format: cfg.Format}, system, fenced)
+	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: issue.ProjectID})
+	triage, err := s.ai.Complete(connectorCtx, ai.Config{BaseURL: cfg.BaseUrl, APIKey: apiKey, Model: cfg.Model, Format: cfg.Format}, system, fenced)
 	if err != nil {
-		return "", false, fmt.Errorf("%w: %v", errTriageEndpoint, err)
+		return "", false, "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
 	}
 	// The reply is untrusted too, and for a second reason on top of the
 	// injected-telemetry one: base_url is org-configurable, so the endpoint
-	// answering is not necessarily a model at all. Strip control characters and
-	// cap the size before it is persisted and re-served.
-	triage = ai.Block(triage)
+	// answering is not necessarily a model at all. Scrub credentials and PII,
+	// then strip control characters and cap the size before the text is
+	// persisted and re-served through the dashboard and MCP.
+	triage = sanitizeTriageOutput(triage)
 	if err := s.q.SetIssueTriage(ctx, generated.SetIssueTriageParams{ID: issue.ID, OrgID: org, AiTriage: triage}); err != nil {
-		return "", false, err
+		return "", false, "", err
 	}
 	// Scrubbed and capped. Every other egress site scrubs; this one wrote the
 	// raw, unbounded issue title into audit_log, which handleListAuditLog then
 	// serves to admins, so a leaked secret in an exception title survived in a
 	// second place nobody was scrubbing.
 	s.audit(ctx, "ai.triage", ai.Line(ai.Scrub(issue.Title)))
-	return triage, false, nil
+	return triage, false, "", nil
+}
+
+// sanitizeTriageOutput applies the same egress scrubber used for telemetry
+// before model output is persisted. A provider can echo a secret from the
+// evidence or return arbitrary text (the endpoint is tenant-configurable), so
+// Block alone is insufficient: it caps and flattens control characters but
+// deliberately does not redact credentials or personal data.
+func sanitizeTriageOutput(value string) string {
+	return ai.Block(ai.Scrub(value))
 }
 
 // errTriageBudget is returned when the org has spent its BYOAI budget for the
@@ -303,7 +364,7 @@ func (s *Server) maybeAutoTriage(org, issueID string) {
 		}
 		// The claim lives inside triageIssue now, so this path no longer takes
 		// its own. Claiming here as well would spend two units per new issue.
-		if _, _, err := s.triageIssue(ctx, org, issueID, false); err != nil {
+		if _, _, _, err := s.triageIssue(ctx, org, issueID, false); err != nil {
 			switch {
 			case errors.Is(err, errTriageBudget):
 				slog.Info("auto-triage skipped: daily budget reached", "org", org, "budget", cfg.TriageDailyBudget)
@@ -345,6 +406,12 @@ func (s *Server) buildTriageContext(ctx context.Context, issue telemetry.Issue, 
 		stack := e.Stacktrace
 		if maps := s.releaseSourceMaps(ctx, issue.ID, org, events)[e.Release]; len(maps) > 0 {
 			stack = s.symbolicator.Symbolicate(stack, maps)
+		}
+		if status := s.releaseNativeSymbolStatuses(ctx, issue.ID, org, events)[e.Release]; status != "" {
+			// This is an evidence boundary, not a claim that the model can read
+			// native frames. Keep the unresolved state in the prompt so a triage
+			// answer does not describe a Dart/native frame as source-resolved.
+			fmt.Fprintf(&b, "Native symbols: %s (native frame rewriting is not enabled)\n", ai.Line(status))
 		}
 		var st struct {
 			Frames []triageFrame `json:"frames"`

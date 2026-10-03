@@ -1,5 +1,6 @@
 import type {
   AlertRule,
+  CreateAlertRuleInput,
   ApiKey,
   ApiKeyCreated,
   ApiKeyRole,
@@ -13,6 +14,15 @@ import type {
   Member,
   OidcConfig,
   Release,
+  ReleaseFreshness,
+  ClientHealth,
+  ConnectorConnection,
+  ConnectorCheckResult,
+  ConnectorSyncRun,
+  CreateConnectorConnectionInput,
+  UpdateConnectorConnectionInput,
+  ConnectorQuotaHealth,
+  ConnectorSyncHealth,
   Issue,
   IssueEvent,
   LogRow,
@@ -126,7 +136,7 @@ export const api = {
   }) => req<AiConfig>('PUT', '/integrations/ai', cfg),
   deleteAiConfig: () => req<void>('DELETE', '/integrations/ai'),
   triageIssue: (issueId: string, refresh = false) =>
-    req<{ triage: string; cached: boolean }>('POST', `/issues/${issueId}/triage${refresh ? '?refresh=true' : ''}`),
+    req<{ triage: string; cached: boolean; evidence_digest?: string }>('POST', `/issues/${issueId}/triage${refresh ? '?refresh=true' : ''}`),
 
   oidcConfig: () => req<OidcConfig>('GET', '/integrations/oidc'),
   setOidcConfig: (cfg: {
@@ -219,6 +229,27 @@ export const api = {
     req<LogVolumeBucket[]>('GET', `/projects/${pid}/analytics/log-volume?hours=${hours}`),
 
   releases: (pid: string) => req<Release[]>('GET', `/projects/${pid}/releases`),
+  releaseFreshness: (pid: string, hours = 24, limit = 100) =>
+    req<ReleaseFreshness[]>('GET', `/projects/${pid}/release-freshness?hours=${hours}&limit=${limit}`),
+  clientHealth: (pid: string, hours = 24, limit = 100) =>
+    req<ClientHealth[]>('GET', `/projects/${pid}/client-health?hours=${hours}&limit=${limit}`),
+  connectorSyncHealth: (limit = 100) =>
+    req<ConnectorSyncHealth[]>('GET', `/connector-sync-health?limit=${limit}`),
+  connectorQuotaHealth: (hours = 24, limit = 100) =>
+    req<ConnectorQuotaHealth[]>('GET', `/connector-quota-health?hours=${hours}&limit=${limit}`),
+  projectConnectorQuotaHealth: (pid: string, hours = 24, limit = 100) =>
+    req<ConnectorQuotaHealth[]>('GET', `/projects/${pid}/connector-quota-health?hours=${hours}&limit=${limit}`),
+  connectorConnections: () => req<ConnectorConnection[]>('GET', '/connector-connections'),
+  connectorConnection: (id: string) => req<ConnectorConnection>('GET', `/connector-connections/${id}`),
+  createConnectorConnection: (input: CreateConnectorConnectionInput) =>
+    req<ConnectorConnection>('POST', '/connector-connections', input),
+  updateConnectorConnection: (id: string, input: UpdateConnectorConnectionInput) =>
+    req<ConnectorConnection>('PATCH', `/connector-connections/${id}`, input),
+  deleteConnectorConnection: (id: string) => req<void>('DELETE', `/connector-connections/${id}`),
+  checkConnectorConnection: (id: string) =>
+    req<ConnectorCheckResult>('POST', `/connector-connections/${id}/check`),
+  runConnectorSync: (id: string) =>
+    req<ConnectorSyncRun>('POST', `/connector-connections/${id}/sync`),
   createRelease: (pid: string, version: string) =>
     req<Release>('POST', `/projects/${pid}/releases`, { version }),
 
@@ -241,10 +272,8 @@ export const api = {
     req<{ status: string }>('PATCH', `/channels/${id}`, patch),
 
   alertRules: (pid: string) => req<AlertRule[]>('GET', `/projects/${pid}/alert-rules`),
-  createAlertRule: (
-    pid: string,
-    rule: { name: string; type: string; threshold?: number; window_minutes?: number }
-  ) => req<AlertRule>('POST', `/projects/${pid}/alert-rules`, rule),
+  createAlertRule: (pid: string, rule: CreateAlertRuleInput) =>
+    req<AlertRule>('POST', `/projects/${pid}/alert-rules`, rule),
   deleteAlertRule: (pid: string, ruleId: string) =>
     req<void>('DELETE', `/projects/${pid}/alert-rules/${ruleId}`),
 

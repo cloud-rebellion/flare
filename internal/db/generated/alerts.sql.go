@@ -50,20 +50,46 @@ func (q *Queries) CountEnabledNotificationChannelsByOrg(ctx context.Context, org
 }
 
 const createAlertRule = `-- name: CreateAlertRule :one
-INSERT INTO alert_rules (id, project_id, org_id, name, type, threshold, window_minutes, enabled)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at
+INSERT INTO alert_rules (
+    id, project_id, org_id, name, type, threshold, window_minutes, enabled,
+    metric_name, comparison, threshold_value, span_name, percentile,
+    connector_provider, connector_operation, connector_channel, connector_error_code, connector_connection_id, connector_sync_mode, release_version, service_name, log_severity,
+    connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, ai_triage_mode, metric_labels
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+RETURNING id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode
 `
 
 type CreateAlertRuleParams struct {
-	ID            string `json:"id"`
-	ProjectID     string `json:"project_id"`
-	OrgID         string `json:"org_id"`
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	Threshold     int32  `json:"threshold"`
-	WindowMinutes int32  `json:"window_minutes"`
-	Enabled       bool   `json:"enabled"`
+	ID                    string          `json:"id"`
+	ProjectID             string          `json:"project_id"`
+	OrgID                 string          `json:"org_id"`
+	Name                  string          `json:"name"`
+	Type                  string          `json:"type"`
+	Threshold             int32           `json:"threshold"`
+	WindowMinutes         int32           `json:"window_minutes"`
+	Enabled               bool            `json:"enabled"`
+	MetricName            string          `json:"metric_name"`
+	Comparison            string          `json:"comparison"`
+	ThresholdValue        float64         `json:"threshold_value"`
+	SpanName              string          `json:"span_name"`
+	Percentile            int32           `json:"percentile"`
+	ConnectorProvider     string          `json:"connector_provider"`
+	ConnectorOperation    string          `json:"connector_operation"`
+	ConnectorChannel      string          `json:"connector_channel"`
+	ConnectorErrorCode    string          `json:"connector_error_code"`
+	ConnectorConnectionID string          `json:"connector_connection_id"`
+	ConnectorSyncMode     string          `json:"connector_sync_mode"`
+	ReleaseVersion        string          `json:"release_version"`
+	ServiceName           string          `json:"service_name"`
+	LogSeverity           string          `json:"log_severity"`
+	ConnectorQuotaMetric  string          `json:"connector_quota_metric"`
+	UsageSurface          string          `json:"usage_surface"`
+	UsageOperation        string          `json:"usage_operation"`
+	UsageMeasure          string          `json:"usage_measure"`
+	ApiKeyHygieneMode     string          `json:"api_key_hygiene_mode"`
+	AiTriageMode          string          `json:"ai_triage_mode"`
+	MetricLabels          json.RawMessage `json:"metric_labels"`
 }
 
 func (q *Queries) CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams) (*AlertRule, error) {
@@ -76,6 +102,27 @@ func (q *Queries) CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams
 		arg.Threshold,
 		arg.WindowMinutes,
 		arg.Enabled,
+		arg.MetricName,
+		arg.Comparison,
+		arg.ThresholdValue,
+		arg.SpanName,
+		arg.Percentile,
+		arg.ConnectorProvider,
+		arg.ConnectorOperation,
+		arg.ConnectorChannel,
+		arg.ConnectorErrorCode,
+		arg.ConnectorConnectionID,
+		arg.ConnectorSyncMode,
+		arg.ReleaseVersion,
+		arg.ServiceName,
+		arg.LogSeverity,
+		arg.ConnectorQuotaMetric,
+		arg.UsageSurface,
+		arg.UsageOperation,
+		arg.UsageMeasure,
+		arg.ApiKeyHygieneMode,
+		arg.AiTriageMode,
+		arg.MetricLabels,
 	)
 	var i AlertRule
 	err := row.Scan(
@@ -89,6 +136,29 @@ func (q *Queries) CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams
 		&i.CreatedAt,
 		&i.WindowMinutes,
 		&i.LastFiredAt,
+		&i.MetricName,
+		&i.Comparison,
+		&i.ThresholdValue,
+		&i.ConnectorProvider,
+		&i.ConnectorOperation,
+		&i.ConnectorChannel,
+		&i.SpanName,
+		&i.Percentile,
+		&i.ReleaseVersion,
+		&i.LogSeverity,
+		&i.ConnectorQuotaMetric,
+		&i.UsageSurface,
+		&i.UsageOperation,
+		&i.UsageMeasure,
+		&i.ApiKeyHygieneMode,
+		&i.ConnectorErrorCode,
+		&i.ConnectorFreshnessBaselineAt,
+		&i.AiTriageMode,
+		&i.ServiceName,
+		&i.ServiceFreshnessBaselineAt,
+		&i.MetricLabels,
+		&i.ConnectorConnectionID,
+		&i.ConnectorSyncMode,
 	)
 	return &i, err
 }
@@ -192,7 +262,7 @@ func (q *Queries) GetNotificationChannel(ctx context.Context, arg GetNotificatio
 }
 
 const listAlertRulesByProject = `-- name: ListAlertRulesByProject :many
-SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at FROM alert_rules WHERE project_id = $1 AND org_id = $2 ORDER BY created_at DESC
+SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode FROM alert_rules WHERE project_id = $1 AND org_id = $2 ORDER BY created_at DESC
 `
 
 type ListAlertRulesByProjectParams struct {
@@ -220,6 +290,29 @@ func (q *Queries) ListAlertRulesByProject(ctx context.Context, arg ListAlertRule
 			&i.CreatedAt,
 			&i.WindowMinutes,
 			&i.LastFiredAt,
+			&i.MetricName,
+			&i.Comparison,
+			&i.ThresholdValue,
+			&i.ConnectorProvider,
+			&i.ConnectorOperation,
+			&i.ConnectorChannel,
+			&i.SpanName,
+			&i.Percentile,
+			&i.ReleaseVersion,
+			&i.LogSeverity,
+			&i.ConnectorQuotaMetric,
+			&i.UsageSurface,
+			&i.UsageOperation,
+			&i.UsageMeasure,
+			&i.ApiKeyHygieneMode,
+			&i.ConnectorErrorCode,
+			&i.ConnectorFreshnessBaselineAt,
+			&i.AiTriageMode,
+			&i.ServiceName,
+			&i.ServiceFreshnessBaselineAt,
+			&i.MetricLabels,
+			&i.ConnectorConnectionID,
+			&i.ConnectorSyncMode,
 		); err != nil {
 			return nil, err
 		}
@@ -257,7 +350,7 @@ func (q *Queries) ListChannelProjects(ctx context.Context, channelID string) ([]
 }
 
 const listEnabledAlertRulesByProject = `-- name: ListEnabledAlertRulesByProject :many
-SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at FROM alert_rules WHERE project_id = $1 AND org_id = $2 AND enabled = true
+SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode FROM alert_rules WHERE project_id = $1 AND org_id = $2 AND enabled = true
 `
 
 type ListEnabledAlertRulesByProjectParams struct {
@@ -285,6 +378,29 @@ func (q *Queries) ListEnabledAlertRulesByProject(ctx context.Context, arg ListEn
 			&i.CreatedAt,
 			&i.WindowMinutes,
 			&i.LastFiredAt,
+			&i.MetricName,
+			&i.Comparison,
+			&i.ThresholdValue,
+			&i.ConnectorProvider,
+			&i.ConnectorOperation,
+			&i.ConnectorChannel,
+			&i.SpanName,
+			&i.Percentile,
+			&i.ReleaseVersion,
+			&i.LogSeverity,
+			&i.ConnectorQuotaMetric,
+			&i.UsageSurface,
+			&i.UsageOperation,
+			&i.UsageMeasure,
+			&i.ApiKeyHygieneMode,
+			&i.ConnectorErrorCode,
+			&i.ConnectorFreshnessBaselineAt,
+			&i.AiTriageMode,
+			&i.ServiceName,
+			&i.ServiceFreshnessBaselineAt,
+			&i.MetricLabels,
+			&i.ConnectorConnectionID,
+			&i.ConnectorSyncMode,
 		); err != nil {
 			return nil, err
 		}

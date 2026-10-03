@@ -2,11 +2,16 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/alerts"
 	"github.com/bright-interaction/flare/internal/db/generated"
@@ -43,33 +48,57 @@ func (s *Server) toChannelResponse(c *generated.NotificationChannel) channelResp
 	}
 }
 
-// channelSecretField returns the config key holding a bearer secret (a Slack
-// incoming-webhook URL or a generic webhook URL - whoever holds it can post into
-// the org's channel), or "" for channel types with no secret.
+// channelSecretField returns the primary config key holding a bearer secret (a
+// Slack incoming-webhook URL or a generic webhook URL - whoever holds it can
+// post into the org's channel), or "" for channel types with no URL secret.
+// automation_webhook has a second signing_secret key; channelSecretFields
+// includes both values for encryption and redaction.
 func channelSecretField(chType string) string {
 	switch chType {
 	case "webhook":
 		return "url"
 	case "slack":
 		return "webhook_url"
+	case "automation_webhook":
+		return "url"
 	}
 	return ""
+}
+
+func channelSecretFields(chType string) []string {
+	if chType == "automation_webhook" {
+		return []string{"url", "signing_secret"}
+	}
+	if field := channelSecretField(chType); field != "" {
+		return []string{field}
+	}
+	return nil
 }
 
 // mapChannelSecret applies fn to the secret-bearing field of a channel config
 // and returns the rewritten JSON. On any parse error it returns the input
 // unchanged so a malformed row never breaks dispatch.
-func mapChannelSecret(chType string, cfg json.RawMessage, fn func(string) string) json.RawMessage {
-	field := channelSecretField(chType)
-	if field == "" {
+func mapChannelSecret(chType string, cfg json.RawMessage, fn func(string) string, redactSigningSecret bool) json.RawMessage {
+	fields := channelSecretFields(chType)
+	if len(fields) == 0 {
 		return cfg
 	}
 	var m map[string]any
 	if json.Unmarshal(cfg, &m) != nil {
 		return cfg
 	}
-	if v, ok := m[field].(string); ok && v != "" {
-		m[field] = fn(v)
+	for _, field := range fields {
+		if v, ok := m[field].(string); ok && v != "" {
+			// A signing secret is not a URL. Revealing even its suffix in a
+			// viewer-facing channel projection would give an attacker a useful
+			// comparison oracle, so redact it completely while preserving the
+			// generic URL masking for the destination itself.
+			if redactSigningSecret && chType == "automation_webhook" && field == "signing_secret" {
+				m[field] = "[REDACTED]"
+				continue
+			}
+			m[field] = fn(v)
+		}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -82,7 +111,7 @@ func mapChannelSecret(chType string, cfg json.RawMessage, fn func(string) string
 // so a DB dump does not expose it; decryption happens only at the dispatch
 // boundary just before the alert is sent.
 func (s *Server) encryptChannelConfig(chType string, cfg json.RawMessage) json.RawMessage {
-	return mapChannelSecret(chType, cfg, s.secrets.Encrypt)
+	return mapChannelSecret(chType, cfg, s.secrets.Encrypt, false)
 }
 
 // decryptChannelConfig opens the stored webhook secret at the dispatch
@@ -98,7 +127,7 @@ func (s *Server) decryptChannelConfig(chType string, cfg json.RawMessage) json.R
 			return ""
 		}
 		return out
-	})
+	}, false)
 }
 
 // redactChannelConfig decrypts then masks the webhook secret before it is
@@ -112,7 +141,7 @@ func (s *Server) redactChannelConfig(chType string, cfg json.RawMessage) json.Ra
 			return "(unreadable: check FLARE_SECRET_KEY)"
 		}
 		return maskURL(out)
-	})
+	}, true)
 }
 
 // maskURL keeps scheme://host and a 4-char suffix, dropping the secret path so
@@ -175,6 +204,23 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "slack config.webhook_url "+err.Error())
 			return
 		}
+	case "automation_webhook":
+		var cfg struct {
+			URL           string `json:"url"`
+			SigningSecret string `json:"signing_secret"`
+		}
+		if json.Unmarshal(req.Config, &cfg) != nil || strings.TrimSpace(cfg.URL) == "" || strings.TrimSpace(cfg.SigningSecret) == "" {
+			writeErr(w, http.StatusBadRequest, "automation_webhook requires config.url and config.signing_secret")
+			return
+		}
+		if err := netguard.ValidatePublicURL(strings.TrimSpace(cfg.URL)); err != nil {
+			writeErr(w, http.StatusBadRequest, "automation_webhook config.url "+err.Error())
+			return
+		}
+		if len([]byte(cfg.SigningSecret)) < 16 || len([]byte(cfg.SigningSecret)) > 256 || strings.IndexFunc(cfg.SigningSecret, unicode.IsControl) >= 0 {
+			writeErr(w, http.StatusBadRequest, "automation_webhook config.signing_secret must be 16-256 printable bytes")
+			return
+		}
 	case "email":
 		var cfg struct {
 			To string `json:"to"`
@@ -188,7 +234,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		writeErr(w, http.StatusBadRequest, "type must be email, slack, webhook, or log")
+		writeErr(w, http.StatusBadRequest, "type must be email, slack, webhook, automation_webhook, or log")
 		return
 	}
 
@@ -290,20 +336,590 @@ func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 type alertRuleResponse struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	Threshold     int32  `json:"threshold"`
-	WindowMinutes int32  `json:"window_minutes"`
-	Enabled       bool   `json:"enabled"`
+	ID                    string          `json:"id"`
+	Name                  string          `json:"name"`
+	Type                  string          `json:"type"`
+	Threshold             int32           `json:"threshold"`
+	WindowMinutes         int32           `json:"window_minutes"`
+	MetricName            string          `json:"metric_name,omitempty"`
+	MetricLabels          json.RawMessage `json:"metric_labels,omitempty"`
+	Comparison            string          `json:"comparison,omitempty"`
+	ThresholdValue        float64         `json:"threshold_value"`
+	SpanName              string          `json:"span_name,omitempty"`
+	Percentile            int32           `json:"percentile,omitempty"`
+	ConnectorProvider     string          `json:"connector_provider,omitempty"`
+	ConnectorOperation    string          `json:"connector_operation,omitempty"`
+	ConnectorChannel      string          `json:"connector_channel,omitempty"`
+	ConnectorErrorCode    string          `json:"connector_error_code,omitempty"`
+	ConnectorConnectionID string          `json:"connector_connection_id,omitempty"`
+	ConnectorSyncMode     string          `json:"connector_sync_mode,omitempty"`
+	ConnectorQuotaMetric  string          `json:"connector_quota_metric,omitempty"`
+	ReleaseVersion        string          `json:"release_version,omitempty"`
+	ServiceName           string          `json:"service_name,omitempty"`
+	LogSeverity           string          `json:"log_severity,omitempty"`
+	UsageSurface          string          `json:"usage_surface,omitempty"`
+	UsageOperation        string          `json:"usage_operation,omitempty"`
+	UsageMeasure          string          `json:"usage_measure,omitempty"`
+	APIKeyHygieneMode     string          `json:"api_key_hygiene_mode,omitempty"`
+	AITriageMode          string          `json:"ai_triage_mode,omitempty"`
+	Enabled               bool            `json:"enabled"`
+}
+
+func toAlertRuleResponse(rule *generated.AlertRule) alertRuleResponse {
+	if rule == nil {
+		return alertRuleResponse{}
+	}
+	out := alertRuleResponse{
+		ID: rule.ID, Name: rule.Name, Type: rule.Type, Threshold: rule.Threshold, WindowMinutes: rule.WindowMinutes,
+		MetricName: rule.MetricName, MetricLabels: rule.MetricLabels, Comparison: rule.Comparison, ThresholdValue: rule.ThresholdValue,
+		SpanName: rule.SpanName, Percentile: rule.Percentile,
+		ConnectorProvider: rule.ConnectorProvider, ConnectorOperation: rule.ConnectorOperation, ConnectorChannel: rule.ConnectorChannel, ConnectorErrorCode: rule.ConnectorErrorCode, ConnectorConnectionID: rule.ConnectorConnectionID, ConnectorSyncMode: rule.ConnectorSyncMode, ConnectorQuotaMetric: rule.ConnectorQuotaMetric,
+		ReleaseVersion: rule.ReleaseVersion, ServiceName: rule.ServiceName, LogSeverity: rule.LogSeverity, APIKeyHygieneMode: rule.ApiKeyHygieneMode, AITriageMode: rule.AiTriageMode, Enabled: rule.Enabled,
+	}
+	if rule.Type == "usage_threshold" {
+		out.UsageSurface, out.UsageOperation, out.UsageMeasure = rule.UsageSurface, rule.UsageOperation, rule.UsageMeasure
+	}
+	return out
+}
+
+func validMetricComparison(comparison string) bool {
+	switch comparison {
+	case "gt", "gte", "lt", "lte":
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeMetricThreshold validates and canonicalizes the user-controlled
+// fields of a metric threshold rule before they reach storage. Keeping this
+// pure makes the bounds easy to test without a live database or authenticated
+// HTTP request.
+func normalizeMetricThreshold(metricName, comparison string, threshold *float64, windowMinutes int32) (string, string, float64, error) {
+	metricName = strings.TrimSpace(metricName)
+	if metricName == "" || len(metricName) > 128 || strings.ContainsRune(metricName, '\x00') {
+		return "", "", 0, errors.New("metric_name is required and must be at most 128 bytes")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", 0, errors.New("metric threshold windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) {
+		return "", "", 0, errors.New("threshold_value must be a finite number")
+	}
+	return metricName, comparison, *threshold, nil
+}
+
+const (
+	maxMetricSelectorLabels = 5
+	maxMetricSelectorValue  = 128
+)
+
+// normalizeMetricLabels keeps metric alert selectors aligned with the labels
+// emitted by Flare's browser and mobile bridges. Arbitrary JSON selectors would
+// turn a rule into an unbounded query surface, so only the low-cardinality
+// dimensions with a documented meaning are accepted.
+func normalizeMetricLabels(raw map[string]string) (json.RawMessage, error) {
+	if len(raw) > maxMetricSelectorLabels {
+		return nil, errors.New("metric_labels may contain at most 5 selectors")
+	}
+	out := make(map[string]string, len(raw))
+	for key, value := range raw {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > maxMetricSelectorValue || strings.ContainsRune(value, '\x00') {
+			return nil, fmt.Errorf("metric_labels.%s must be a non-empty value of at most 128 bytes", key)
+		}
+		switch key {
+		case "environment", "release":
+			if !safeMetricSelectorToken(value) {
+				return nil, fmt.Errorf("metric_labels.%s contains unsupported characters", key)
+			}
+		case "method":
+			if !isUpperToken(value, 12) {
+				return nil, errors.New("metric_labels.method must contain only uppercase letters")
+			}
+		case "status_class":
+			if len(value) != 3 || value[1:] != "xx" || value[0] < '1' || value[0] > '5' {
+				return nil, errors.New("metric_labels.status_class must be an HTTP status class")
+			}
+		case "route":
+			if !safeMetricSelectorToken(value) {
+				return nil, errors.New("metric_labels.route contains unsupported characters")
+			}
+		default:
+			return nil, fmt.Errorf("metric_labels.%s is not an allowed selector", key)
+		}
+		out[key] = value
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, errors.New("metric_labels could not be encoded")
+	}
+	if len(encoded) > 1024 {
+		return nil, errors.New("metric_labels is too large")
+	}
+	return json.RawMessage(encoded), nil
+}
+
+func safeMetricSelectorToken(value string) bool {
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("._:@/-", r) {
+			continue
+		}
+		return false
+	}
+	return value != ""
+}
+
+func isUpperToken(value string, max int) bool {
+	if value == "" || len(value) > max {
+		return false
+	}
+	for _, r := range value {
+		if r < 'A' || r > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeTracePercentile validates one span-operation percentile rule. The
+// percentile set is intentionally small and explicit: these are the common
+// SLO views, and bounding it prevents accidental high-cardinality rule
+// configurations while keeping the watchdog query predictable.
+func normalizeTracePercentile(spanName, comparison string, percentile int32, threshold *float64, windowMinutes int32) (string, string, int32, float64, error) {
+	spanName = strings.TrimSpace(spanName)
+	if spanName == "" || len(spanName) > 128 || strings.ContainsRune(spanName, '\x00') {
+		return "", "", 0, 0, errors.New("span_name is required and must be at most 128 bytes")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", 0, 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if percentile == 0 {
+		percentile = 95
+	}
+	switch percentile {
+	case 50, 75, 90, 95, 99:
+	default:
+		return "", "", 0, 0, errors.New("percentile must be one of 50, 75, 90, 95 or 99")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", 0, 0, errors.New("trace percentile windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) || *threshold < 0 || *threshold > 24*60*60*1000 {
+		return "", "", 0, 0, errors.New("threshold_value must be a finite latency in milliseconds between 0 and 86400000")
+	}
+	return spanName, comparison, percentile, *threshold, nil
+}
+
+// normalizeServiceLevel validates one availability/error-budget rule over an
+// exact span operation.  Service-level rules reuse the existing bounded alert
+// columns: threshold is the latency objective in milliseconds and
+// threshold_value is the minimum target availability (for example 0.999).
+// Keeping the target decimal separate from the latency objective avoids
+// silently treating a percentile latency threshold as an availability SLO.
+func normalizeServiceLevel(spanName string, target *float64, latencyMS, windowMinutes int32) (string, float64, int32, int32, error) {
+	spanName = strings.TrimSpace(spanName)
+	if spanName == "" || len(spanName) > 128 || strings.ContainsRune(spanName, '\x00') {
+		return "", 0, 0, 0, errors.New("span_name is required and must be at most 128 bytes")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", 0, 0, 0, errors.New("service-level windows must be between 1 and 720 minutes")
+	}
+	if latencyMS == 0 {
+		latencyMS = 1000
+	}
+	if latencyMS < 1 || latencyMS > 24*60*60*1000 {
+		return "", 0, 0, 0, errors.New("threshold must be a latency objective between 1 and 86400000 milliseconds")
+	}
+	if target == nil {
+		defaultTarget := 0.999
+		target = &defaultTarget
+	}
+	if math.IsNaN(*target) || math.IsInf(*target, 0) || *target <= 0 || *target >= 1 {
+		return "", 0, 0, 0, errors.New("threshold_value must be a finite availability target greater than 0 and less than 1")
+	}
+	return spanName, *target, latencyMS, windowMinutes, nil
+}
+
+// normalizeConnectorErrorRate bounds a project-scoped connector selector and
+// keeps the error-rate rule meaningful. Provider is required; empty operation
+// and channel selectors intentionally match every operation/channel for that
+// provider. Selectors are labels only and never carry URLs or response text.
+func normalizeConnectorErrorRate(provider, operation, channel, errorCode, comparison string, threshold *float64, windowMinutes int32) (string, string, string, string, string, float64, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	errorCode = strings.ToLower(strings.TrimSpace(errorCode))
+	if provider == "" || len(provider) > 32 || strings.ContainsRune(provider, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_provider is required and must be at most 32 bytes")
+	}
+	if len(operation) > 64 || strings.ContainsRune(operation, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_operation must be at most 64 bytes")
+	}
+	if len(channel) > 32 || strings.ContainsRune(channel, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_channel must be at most 32 bytes")
+	}
+	if errorCode != "" && !connectorErrorCodeToken.MatchString(errorCode) {
+		return "", "", "", "", "", 0, errors.New("connector_error_code must be a safe bounded token")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", "", "", "", 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", "", "", "", 0, errors.New("connector error-rate windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) || *threshold < 0 || *threshold > 1 {
+		return "", "", "", "", "", 0, errors.New("threshold_value must be a finite number between 0 and 1")
+	}
+	return provider, operation, channel, errorCode, comparison, *threshold, nil
+}
+
+// normalizeConnectorQuota validates a latest-observation rule for one bounded
+// connector series. The metric is explicit because quota_remaining,
+// retry_after_ms, and sync_lag_ms have different operational meanings and
+// units. Empty
+// operation/channel selectors match all values for the provider.
+func normalizeConnectorQuota(provider, operation, channel, metric, comparison string, threshold *float64, windowMinutes int32) (string, string, string, string, string, float64, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if provider == "" || len(provider) > 32 || strings.ContainsRune(provider, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_provider is required and must be at most 32 bytes")
+	}
+	if len(operation) > 64 || strings.ContainsRune(operation, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_operation must be at most 64 bytes")
+	}
+	if len(channel) > 32 || strings.ContainsRune(channel, '\x00') {
+		return "", "", "", "", "", 0, errors.New("connector_channel must be at most 32 bytes")
+	}
+	metric = strings.ToLower(strings.TrimSpace(metric))
+	if metric == "" {
+		metric = "quota_remaining"
+	}
+	if metric != "quota_remaining" && metric != "retry_after_ms" && metric != "sync_lag_ms" {
+		return "", "", "", "", "", 0, errors.New("connector_quota_metric must be quota_remaining, retry_after_ms or sync_lag_ms")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "lte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", "", "", "", 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", "", "", "", 0, errors.New("connector quota windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) || *threshold < 0 {
+		return "", "", "", "", "", 0, errors.New("threshold_value must be a finite non-negative number")
+	}
+	max := float64(maxConnectorQuotaRemaining)
+	if metric == "retry_after_ms" {
+		max = float64(maxConnectorRetryAfterMS)
+	} else if metric == "sync_lag_ms" {
+		max = float64(maxConnectorSyncLagMS)
+	}
+	if *threshold > max {
+		return "", "", "", "", "", 0, errors.New("threshold_value is outside the selected connector quota metric range")
+	}
+	return provider, operation, channel, metric, comparison, *threshold, nil
+}
+
+// normalizeConnectorFreshness validates the bounded connector series whose
+// completed-at cadence is monitored. Empty operation and channel selectors
+// intentionally match every series for the provider; the watchdog still
+// scopes every read to the owning project and organization.
+func normalizeConnectorFreshness(provider, operation, channel string, windowMinutes int32) (string, string, string, int32, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	if provider == "" || len(provider) > 32 || strings.ContainsRune(provider, '\x00') {
+		return "", "", "", 0, errors.New("connector_provider is required and must be at most 32 bytes")
+	}
+	if len(operation) > 64 || strings.ContainsRune(operation, '\x00') {
+		return "", "", "", 0, errors.New("connector_operation must be at most 64 bytes")
+	}
+	if len(channel) > 32 || strings.ContainsRune(channel, '\x00') {
+		return "", "", "", 0, errors.New("connector_channel must be at most 32 bytes")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", "", 0, errors.New("connector freshness windows must be between 1 and 720 minutes")
+	}
+	return provider, operation, channel, windowMinutes, nil
+}
+
+// normalizeLogSeverity validates one canonical log severity selector. The
+// aliases keep SDKs that use the common "warning" and "critical" names
+// interoperable while storage and watchdog queries stay on one bounded set.
+func normalizeLogSeverity(severity string, threshold, windowMinutes int32) (string, int32, int32, error) {
+	severity = strings.ToLower(strings.TrimSpace(severity))
+	switch severity {
+	case "warning":
+		severity = "warn"
+	case "critical":
+		severity = "fatal"
+	}
+	switch severity {
+	case "trace", "debug", "info", "warn", "error", "fatal":
+	default:
+		return "", 0, 0, errors.New("log_severity must be one of trace, debug, info, warn, error or fatal")
+	}
+	if len(severity) > 8 || strings.ContainsRune(severity, '\x00') {
+		return "", 0, 0, errors.New("log_severity must be at most 8 bytes")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", 0, 0, errors.New("log severity windows must be between 1 and 720 minutes")
+	}
+	if threshold < 1 || threshold > 1_000_000 {
+		return "", 0, 0, errors.New("log severity threshold must be between 1 and 1000000 records")
+	}
+	return severity, threshold, windowMinutes, nil
+}
+
+// normalizeReleaseErrorRate validates the optional release selector. An empty
+// selector means "latest recent release"; a non-empty selector is resolved by
+// the tenant/project-scoped watchdog query and is never treated as a global
+// release name.
+func normalizeReleaseErrorRate(version, comparison string, threshold *float64, windowMinutes int32) (string, string, float64, error) {
+	version = strings.TrimSpace(version)
+	if len(version) > 128 || strings.ContainsRune(version, '\x00') {
+		return "", "", 0, errors.New("release_version must be at most 128 bytes")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", 0, errors.New("release error-rate windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) || *threshold < 0 || *threshold > 1 {
+		return "", "", 0, errors.New("threshold_value must be a finite number between 0 and 1")
+	}
+	return version, comparison, *threshold, nil
+}
+
+// normalizeReleaseFreshness requires an explicit release selector. A
+// freshness rule without one would silently follow whichever release happens
+// to be newest, and a release row may have been created by old event traffic
+// rather than a deploy. The deploy marker and heartbeat checks happen in the
+// watchdog query, but the selector is required at rule creation time.
+func normalizeReleaseFreshness(version string, windowMinutes int32) (string, int32, error) {
+	version = strings.TrimSpace(version)
+	if version == "" || len(version) > 128 || strings.ContainsRune(version, '\x00') {
+		return "", 0, errors.New("release_version is required and must be at most 128 bytes")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", 0, errors.New("release freshness windows must be between 1 and 720 minutes")
+	}
+	return version, windowMinutes, nil
+}
+
+// normalizeServiceFreshness validates one exact canonical service-up
+// heartbeat dimension. The service label is kept case-sensitive because the
+// heartbeat message is an exact string; control characters and oversized
+// values are rejected before they reach the watchdog query.
+func normalizeServiceFreshness(service, release string, windowMinutes int32) (string, string, int32, error) {
+	service = strings.TrimSpace(service)
+	release = strings.TrimSpace(release)
+	if service == "" || len(service) > 64 || strings.ContainsRune(service, '\x00') || strings.IndexFunc(service, unicode.IsControl) >= 0 {
+		return "", "", 0, errors.New("service_name is required and must be at most 64 bytes")
+	}
+	if release == "" || len(release) > 128 || strings.ContainsRune(release, '\x00') {
+		return "", "", 0, errors.New("release_version is required and must be at most 128 bytes")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", 0, errors.New("service freshness windows must be between 1 and 720 minutes")
+	}
+	return service, release, windowMinutes, nil
+}
+
+var usageThresholdOperations = map[string]map[string]struct{}{
+	"dsn": {
+		"envelope": {}, "event": {}, "logs": {}, "metrics": {}, "traces": {},
+		"connector_attempts": {}, "checkins": {}, "symbols": {},
+		"otlp_logs": {}, "otlp_traces": {}, "otlp_metrics": {},
+	},
+	"api_key": {"read": {}, "write": {}, "mcp": {}},
+	"mcp": {
+		"initialize": {}, "ping": {}, "tools_list": {}, "tools_call": {},
+		"tool_overview": {}, "tool_list_projects": {}, "tool_list_issues": {},
+		"tool_get_issue": {}, "tool_search_logs": {}, "tool_get_trace": {},
+		"tool_query_metrics": {}, "tool_update_issue_status": {}, "tool_triage_issue": {},
+	},
+}
+
+func normalizeUsageThreshold(surface, operation, measure, comparison string, threshold, windowMinutes int32) (string, string, string, string, int32, int32, error) {
+	surface = strings.ToLower(strings.TrimSpace(surface))
+	operations, ok := usageThresholdOperations[surface]
+	if !ok {
+		return "", "", "", "", 0, 0, errors.New("usage_surface must be dsn, api_key or mcp")
+	}
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if _, ok := operations[operation]; !ok {
+		return "", "", "", "", 0, 0, errors.New("usage_operation is not supported for this usage surface")
+	}
+	measure = strings.ToLower(strings.TrimSpace(measure))
+	if measure == "" {
+		measure = "requests"
+	}
+	switch measure {
+	case "requests", "errors", "denied":
+	default:
+		return "", "", "", "", 0, 0, errors.New("usage_measure must be requests, errors or denied")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if !validMetricComparison(comparison) {
+		return "", "", "", "", 0, 0, errors.New("comparison must be gt, gte, lt or lte")
+	}
+	if threshold < 1 || threshold > 1_000_000_000 {
+		return "", "", "", "", 0, 0, errors.New("usage threshold must be between 1 and 1000000000")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", "", "", 0, 0, errors.New("usage threshold windows must be between 1 and 720 minutes")
+	}
+	return surface, operation, measure, comparison, threshold, windowMinutes, nil
+}
+
+const maxAPIKeyHygieneWindowMinutes = 90 * 24 * 60
+
+// normalizeAPIKeyHygiene validates the fixed credential-health modes. The
+// horizon is a key-age/expiry horizon in minutes, rather than an event
+// window: unused counts credentials older than it, while expiring counts
+// credentials whose expiry is within it. Keeping one bounded integer makes the
+// watchdog query predictable and avoids arbitrary key metadata selectors.
+func normalizeAPIKeyHygiene(mode string, threshold, windowMinutes int32) (string, int32, int32, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "unused", "expiring":
+	default:
+		return "", 0, 0, errors.New("api_key_hygiene_mode must be unused or expiring")
+	}
+	if windowMinutes < 1 || windowMinutes > maxAPIKeyHygieneWindowMinutes {
+		return "", 0, 0, fmt.Errorf("api key hygiene horizons must be between 1 and %d minutes", maxAPIKeyHygieneWindowMinutes)
+	}
+	if threshold < 1 || threshold > 1_000_000 {
+		return "", 0, 0, errors.New("api key hygiene thresholds must be between 1 and 1000000")
+	}
+	return mode, threshold, windowMinutes, nil
+}
+
+const maxAITriageWindowMinutes = 720
+
+// normalizeAITriage validates the fixed AI receipt health modes. A failed rule
+// counts terminal failed triage receipts in the rolling window; a stuck rule
+// counts started receipts that have exceeded the same bounded age horizon.
+// Keeping the selector fixed prevents the public alert API from becoming an
+// arbitrary receipt query.
+func normalizeAITriage(mode string, threshold, windowMinutes int32) (string, int32, int32, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "failed", "stuck":
+	default:
+		return "", 0, 0, errors.New("ai_triage_mode must be failed or stuck")
+	}
+	if windowMinutes < 1 || windowMinutes > maxAITriageWindowMinutes {
+		return "", 0, 0, errors.New("AI triage windows must be between 1 and 720 minutes")
+	}
+	if threshold < 1 || threshold > 1_000_000 {
+		return "", 0, 0, errors.New("AI triage thresholds must be between 1 and 1000000")
+	}
+	return mode, threshold, windowMinutes, nil
+}
+
+const maxIngestAcceptanceWindowMinutes = 720
+
+// normalizeIngestAcceptance validates the fixed request-receipt health rule.
+// The threshold is the number of incomplete receipts and the window is the
+// maximum age they may remain in_progress. No caller-controlled SQL selector
+// is needed, keeping the watchdog aggregate bounded to one project/org.
+func normalizeIngestAcceptance(threshold, windowMinutes int32) (int32, int32, error) {
+	if windowMinutes < 1 || windowMinutes > maxIngestAcceptanceWindowMinutes {
+		return 0, 0, errors.New("ingest acceptance windows must be between 1 and 720 minutes")
+	}
+	if threshold < 1 || threshold > 1_000_000 {
+		return 0, 0, errors.New("ingest acceptance thresholds must be between 1 and 1000000")
+	}
+	return threshold, windowMinutes, nil
+}
+
+// normalizeConnectorSyncHealth validates one durable sync-state health rule.
+// Sync state belongs to the organization-owned connector registry, so an
+// exact registered connection and operation are required. `failed` counts
+// recent terminal failures; `overdue` uses the same bounded window as the
+// grace period for a missed schedule or expired lease.
+func normalizeConnectorSyncHealth(provider, operation, mode string, threshold, windowMinutes int32) (string, string, string, int32, int32, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if provider == "" || len(provider) > 32 || strings.ContainsRune(provider, '\x00') {
+		return "", "", "", 0, 0, errors.New("connector_provider is required and must be at most 32 bytes")
+	}
+	if operation == "" || len(operation) > 64 || strings.ContainsRune(operation, '\x00') {
+		return "", "", "", 0, 0, errors.New("connector_operation is required and must be at most 64 bytes")
+	}
+	if mode == "" {
+		mode = "overdue"
+	}
+	if mode != "failed" && mode != "overdue" {
+		return "", "", "", 0, 0, errors.New("connector_sync_mode must be failed or overdue")
+	}
+	if threshold < 1 || threshold > 1_000_000 {
+		return "", "", "", 0, 0, errors.New("connector sync health thresholds must be between 1 and 1000000")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", "", 0, 0, errors.New("connector sync health windows must be between 1 and 720 minutes")
+	}
+	return provider, operation, mode, threshold, windowMinutes, nil
 }
 
 func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		Type          string `json:"type"`
-		Threshold     int32  `json:"threshold"`
-		WindowMinutes int32  `json:"window_minutes"`
+		Name                  string            `json:"name"`
+		Type                  string            `json:"type"`
+		Threshold             int32             `json:"threshold"`
+		WindowMinutes         int32             `json:"window_minutes"`
+		MetricName            string            `json:"metric_name"`
+		MetricLabels          map[string]string `json:"metric_labels"`
+		SpanName              string            `json:"span_name"`
+		Percentile            int32             `json:"percentile"`
+		Comparison            string            `json:"comparison"`
+		ConnectorProvider     string            `json:"connector_provider"`
+		ConnectorOperation    string            `json:"connector_operation"`
+		ConnectorChannel      string            `json:"connector_channel"`
+		ConnectorErrorCode    string            `json:"connector_error_code"`
+		ConnectorConnectionID string            `json:"connector_connection_id"`
+		ConnectorSyncMode     string            `json:"connector_sync_mode"`
+		ConnectorQuotaMetric  string            `json:"connector_quota_metric"`
+		ReleaseVersion        string            `json:"release_version"`
+		ServiceName           string            `json:"service_name"`
+		LogSeverity           string            `json:"log_severity"`
+		UsageSurface          string            `json:"usage_surface"`
+		UsageOperation        string            `json:"usage_operation"`
+		UsageMeasure          string            `json:"usage_measure"`
+		APIKeyHygieneMode     string            `json:"api_key_hygiene_mode"`
+		AITriageMode          string            `json:"ai_triage_mode"`
+		// Pointer distinguishes an omitted decimal threshold from an explicit 0.
+		ThresholdValue *float64 `json:"threshold_value"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -316,6 +932,20 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = "new_issue"
 	}
+	metricName := ""
+	metricLabels := json.RawMessage(`{}`)
+	spanName := ""
+	percentile := int32(95)
+	comparison := "gte"
+	thresholdValue := float64(0)
+	connectorProvider, connectorOperation, connectorChannel, connectorErrorCode, connectorConnectionID, connectorSyncMode := "", "", "", "", "", ""
+	connectorQuotaMetric := ""
+	releaseVersion := ""
+	serviceName := ""
+	logSeverity := ""
+	usageSurface, usageOperation, usageMeasure := "", "", ""
+	apiKeyHygieneMode := ""
+	aiTriageMode := ""
 	switch req.Type {
 	case "new_issue", "regression":
 		req.Threshold, req.WindowMinutes = 0, 0
@@ -346,8 +976,181 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		if req.Threshold < 1 {
 			req.Threshold = 20
 		}
+	case "metric_threshold":
+		var validationErr error
+		metricName, comparison, thresholdValue, validationErr = normalizeMetricThreshold(
+			req.MetricName, req.Comparison, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+		metricLabels, validationErr = normalizeMetricLabels(req.MetricLabels)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "trace_percentile":
+		var validationErr error
+		spanName, comparison, percentile, thresholdValue, validationErr = normalizeTracePercentile(
+			req.SpanName, req.Comparison, req.Percentile, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "service_level":
+		var validationErr error
+		spanName, thresholdValue, req.Threshold, req.WindowMinutes, validationErr = normalizeServiceLevel(
+			req.SpanName, req.ThresholdValue, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+		// The watchdog compares observed availability directly to the target;
+		// keep the stored comparison explicit for API consumers and old clients.
+		comparison = "lt"
+	case "connector_error_rate":
+		var validationErr error
+		connectorProvider, connectorOperation, connectorChannel, connectorErrorCode, comparison, thresholdValue, validationErr = normalizeConnectorErrorRate(
+			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.ConnectorErrorCode, req.Comparison, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "connector_quota":
+		var validationErr error
+		connectorProvider, connectorOperation, connectorChannel, connectorQuotaMetric, comparison, thresholdValue, validationErr = normalizeConnectorQuota(
+			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.ConnectorQuotaMetric, req.Comparison, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "connector_freshness":
+		var validationErr error
+		connectorProvider, connectorOperation, connectorChannel, req.WindowMinutes, validationErr = normalizeConnectorFreshness(
+			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "connector_sync_health":
+		var validationErr error
+		connectorProvider, connectorOperation, connectorSyncMode, req.Threshold, req.WindowMinutes, validationErr = normalizeConnectorSyncHealth(
+			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorSyncMode, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "log_severity":
+		var validationErr error
+		logSeverity, req.Threshold, req.WindowMinutes, validationErr = normalizeLogSeverity(
+			req.LogSeverity, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "release_error_rate":
+		var validationErr error
+		releaseVersion, comparison, thresholdValue, validationErr = normalizeReleaseErrorRate(
+			req.ReleaseVersion, req.Comparison, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "release_freshness":
+		var validationErr error
+		releaseVersion, req.WindowMinutes, validationErr = normalizeReleaseFreshness(req.ReleaseVersion, req.WindowMinutes)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "service_freshness":
+		var validationErr error
+		serviceName, releaseVersion, req.WindowMinutes, validationErr = normalizeServiceFreshness(req.ServiceName, req.ReleaseVersion, req.WindowMinutes)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "usage_threshold":
+		var validationErr error
+		usageSurface, usageOperation, usageMeasure, comparison, req.Threshold, req.WindowMinutes, validationErr = normalizeUsageThreshold(
+			req.UsageSurface, req.UsageOperation, req.UsageMeasure, req.Comparison, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "deploy_failure":
+		if req.WindowMinutes < 1 || req.WindowMinutes > 720 {
+			writeErr(w, http.StatusBadRequest, "deploy failure rules need a window (minutes) between 1 and 720")
+			return
+		}
+		if req.Threshold < 1 {
+			req.Threshold = 1
+		}
+		if req.Threshold > 1_000_000 {
+			writeErr(w, http.StatusBadRequest, "deploy failure thresholds must be between 1 and 1000000")
+			return
+		}
+	case "deploy_acceptance":
+		if req.WindowMinutes < 1 || req.WindowMinutes > 720 {
+			writeErr(w, http.StatusBadRequest, "deploy acceptance rules need a grace window (minutes) between 1 and 720")
+			return
+		}
+		if req.Threshold < 1 {
+			req.Threshold = 1
+		}
+		if req.Threshold > 1_000_000 {
+			writeErr(w, http.StatusBadRequest, "deploy acceptance thresholds must be between 1 and 1000000")
+			return
+		}
+	case "rollback":
+		if req.WindowMinutes < 1 || req.WindowMinutes > 720 {
+			writeErr(w, http.StatusBadRequest, "rollback rules need a window (minutes) between 1 and 720")
+			return
+		}
+		if req.Threshold < 1 {
+			req.Threshold = 1
+		}
+		if req.Threshold > 1_000_000 {
+			writeErr(w, http.StatusBadRequest, "rollback thresholds must be between 1 and 1000000")
+			return
+		}
+	case "api_key_hygiene":
+		var validationErr error
+		apiKeyHygieneMode, req.Threshold, req.WindowMinutes, validationErr = normalizeAPIKeyHygiene(
+			req.APIKeyHygieneMode, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "ai_triage":
+		var validationErr error
+		aiTriageMode, req.Threshold, req.WindowMinutes, validationErr = normalizeAITriage(
+			req.AITriageMode, req.Threshold, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
+	case "ingest_acceptance":
+		var validationErr error
+		req.Threshold, req.WindowMinutes, validationErr = normalizeIngestAcceptance(req.Threshold, req.WindowMinutes)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
 	default:
-		writeErr(w, http.StatusBadRequest, "type must be new_issue, regression, spike, anomaly or silence")
+		writeErr(w, http.StatusBadRequest, "type must be new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage or ingest_acceptance")
 		return
 	}
 
@@ -363,25 +1166,78 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project not found")
 		return
 	}
+	// A connection selector is meaningful only for connector rules. Resolve it
+	// through the caller's organization before persisting the rule, and require
+	// the selected installation's provider to match the normalized provider.
+	// This keeps a guessed ID from becoming a cross-tenant selector and prevents
+	// a rule from silently watching a different provider than its label says.
+	if strings.TrimSpace(req.ConnectorConnectionID) != "" {
+		if req.Type != "connector_error_rate" && req.Type != "connector_quota" && req.Type != "connector_freshness" && req.Type != "connector_sync_health" {
+			writeErr(w, http.StatusBadRequest, "connector_connection_id is only valid for connector rules")
+			return
+		}
+		connectorConnectionID = strings.TrimSpace(req.ConnectorConnectionID)
+		if len([]byte(connectorConnectionID)) > 128 || !connectorProviderToken.MatchString(connectorConnectionID) {
+			writeErr(w, http.StatusBadRequest, "connector_connection_id must be a safe bounded identifier")
+			return
+		}
+		connection, connectionErr := s.q.GetConnectorConnectionByID(r.Context(), generated.GetConnectorConnectionByIDParams{
+			ID: connectorConnectionID, OrgID: proj.OrgID,
+		})
+		if errors.Is(connectionErr, pgx.ErrNoRows) {
+			writeErr(w, http.StatusBadRequest, "connector_connection_id is not registered in this workspace")
+			return
+		}
+		if connectionErr != nil {
+			slogError(w, "get connector connection for alert rule", connectionErr)
+			return
+		}
+		if !strings.EqualFold(connection.Provider, connectorProvider) {
+			writeErr(w, http.StatusBadRequest, "connector_connection_id provider does not match connector_provider")
+			return
+		}
+	} else if req.Type == "connector_sync_health" {
+		writeErr(w, http.StatusBadRequest, "connector_sync_health requires a registered connector_connection_id")
+		return
+	}
 
 	rule, err := s.q.CreateAlertRule(r.Context(), generated.CreateAlertRuleParams{
-		ID:            id.New(),
-		ProjectID:     proj.ID,
-		OrgID:         proj.OrgID,
-		Name:          req.Name,
-		Type:          req.Type,
-		Threshold:     req.Threshold,
-		WindowMinutes: req.WindowMinutes,
-		Enabled:       true,
+		ID:                    id.New(),
+		ProjectID:             proj.ID,
+		OrgID:                 proj.OrgID,
+		Name:                  req.Name,
+		Type:                  req.Type,
+		Threshold:             req.Threshold,
+		WindowMinutes:         req.WindowMinutes,
+		MetricName:            metricName,
+		MetricLabels:          metricLabels,
+		Comparison:            comparison,
+		ThresholdValue:        thresholdValue,
+		SpanName:              spanName,
+		Percentile:            percentile,
+		ConnectorProvider:     connectorProvider,
+		ConnectorOperation:    connectorOperation,
+		ConnectorChannel:      connectorChannel,
+		ConnectorErrorCode:    connectorErrorCode,
+		ConnectorConnectionID: connectorConnectionID,
+		ConnectorSyncMode:     connectorSyncMode,
+		ConnectorQuotaMetric:  connectorQuotaMetric,
+		ReleaseVersion:        releaseVersion,
+		ServiceName:           serviceName,
+		LogSeverity:           logSeverity,
+		UsageSurface:          usageSurface,
+		UsageOperation:        usageOperation,
+		UsageMeasure:          usageMeasure,
+		ApiKeyHygieneMode:     apiKeyHygieneMode,
+		AiTriageMode:          aiTriageMode,
+		Enabled:               true,
 	})
 	if err != nil {
 		slogError(w, "create alert rule", err)
 		return
 	}
 	s.audit(r.Context(), "alert_rule.create", rule.Type+" on "+proj.Slug)
-	writeJSON(w, http.StatusCreated, alertRuleResponse{
-		ID: rule.ID, Name: rule.Name, Type: rule.Type, Threshold: rule.Threshold, WindowMinutes: rule.WindowMinutes, Enabled: rule.Enabled,
-	})
+	writeJSON(w, http.StatusCreated, toAlertRuleResponse(rule))
 }
 
 func (s *Server) handleDeleteAlertRule(w http.ResponseWriter, r *http.Request) {
@@ -430,9 +1286,7 @@ func (s *Server) handleListAlertRules(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]alertRuleResponse, 0, len(rules))
 	for _, rule := range rules {
-		out = append(out, alertRuleResponse{
-			ID: rule.ID, Name: rule.Name, Type: rule.Type, Threshold: rule.Threshold, WindowMinutes: rule.WindowMinutes, Enabled: rule.Enabled,
-		})
+		out = append(out, toAlertRuleResponse(rule))
 	}
 	writeJSON(w, http.StatusOK, out)
 }

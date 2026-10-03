@@ -52,3 +52,21 @@ func TestChannelSecretEncryptionRoundTrip(t *testing.T) {
 		t.Fatalf("redaction of encrypted config wrong: %q", red)
 	}
 }
+
+func TestAutomationWebhookSecretsAreEncryptedAndRedacted(t *testing.T) {
+	s := &Server{secrets: secretbox.New("a-real-key")}
+	const url = "https://worker.example.test/hooks/automation"
+	const secret = "automation-signing-secret-1234"
+	stored := s.encryptChannelConfig("automation_webhook", json.RawMessage(`{"url":"`+url+`","signing_secret":"`+secret+`"}`))
+	if strings.Contains(string(stored), url) || strings.Contains(string(stored), secret) {
+		t.Fatalf("automation webhook credentials stored in cleartext: %q", stored)
+	}
+	opened := string(s.decryptChannelConfig("automation_webhook", stored))
+	if !strings.Contains(opened, url) || !strings.Contains(opened, secret) {
+		t.Fatalf("automation webhook credentials did not decrypt: %q", opened)
+	}
+	redacted := string(s.redactChannelConfig("automation_webhook", stored))
+	if strings.Contains(redacted, secret) || strings.Contains(redacted, url) || !strings.Contains(redacted, "worker.example.test") {
+		t.Fatalf("automation webhook redaction unsafe: %q", redacted)
+	}
+}

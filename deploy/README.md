@@ -71,6 +71,7 @@ You can also supply all secrets via a pre-created `Secret` (keys `session-key`,
 | DB password | `FLARE_DB_PASSWORD` | `postgres.password` | for the bundled Postgres |
 | External DB | `DATABASE_URL` | `postgres.externalUrl` (+ `bundled=false`) | point at your own Postgres |
 | Retention (days) | `FLARE_RETENTION_DAYS` | `retentionDays` | before export-to-Parquet + drop |
+| HubSpot scheduler | `FLARE_CONNECTOR_SYNC_ENABLED`, `FLARE_CONNECTOR_SYNC_INTERVAL` | n/a | optional; disabled by default, enables bounded due HubSpot account health passes (default interval `5m`) |
 | Prune without archiving | `FLARE_ALLOW_DROP_WITHOUT_EXPORT` | `allowDropWithoutExport` | default off. Retention only drops a partition after it is archived, so an unreachable cold tier pauses retention (partitions accumulate, logged as an error every cycle) instead of deleting unarchived telemetry. Set to `true` only if you run with no cold tier on purpose |
 | Email | `SMTP_*` | `smtp.*` | optional: alert emails + password reset |
 

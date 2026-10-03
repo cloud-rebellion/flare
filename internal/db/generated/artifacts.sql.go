@@ -58,6 +58,7 @@ SELECT name, content FROM (
            sum(octet_length(content)) OVER (ORDER BY created_at DESC, name) AS running_bytes
     FROM source_map_artifacts
     WHERE project_id = $1 AND org_id = $2 AND release = $3
+      AND parse_status IN ('unvalidated', 'valid')
 ) t
 WHERE running_bytes <= $4::bigint
 ORDER BY created_at DESC
@@ -114,7 +115,7 @@ func (q *Queries) GetSourceMapsForRelease(ctx context.Context, arg GetSourceMaps
 }
 
 const listSourceMapsByProject = `-- name: ListSourceMapsByProject :many
-SELECT id, release, name, length(content) AS size, created_at
+SELECT id, release, name, length(content) AS size, parse_status, created_at
 FROM source_map_artifacts
 WHERE project_id = $1 AND org_id = $2
 ORDER BY release DESC, name ASC
@@ -126,11 +127,12 @@ type ListSourceMapsByProjectParams struct {
 }
 
 type ListSourceMapsByProjectRow struct {
-	ID        string             `json:"id"`
-	Release   string             `json:"release"`
-	Name      string             `json:"name"`
-	Size      float64            `json:"size"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID          string             `json:"id"`
+	Release     string             `json:"release"`
+	Name        string             `json:"name"`
+	Size        float64            `json:"size"`
+	ParseStatus string             `json:"parse_status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) ListSourceMapsByProject(ctx context.Context, arg ListSourceMapsByProjectParams) ([]*ListSourceMapsByProjectRow, error) {
@@ -147,6 +149,7 @@ func (q *Queries) ListSourceMapsByProject(ctx context.Context, arg ListSourceMap
 			&i.Release,
 			&i.Name,
 			&i.Size,
+			&i.ParseStatus,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -160,30 +163,32 @@ func (q *Queries) ListSourceMapsByProject(ctx context.Context, arg ListSourceMap
 }
 
 const upsertSourceMap = `-- name: UpsertSourceMap :one
-INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content, parse_status)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (project_id, release, name) DO UPDATE
-  SET content = EXCLUDED.content, created_at = now()
-RETURNING id, project_id, org_id, release, name, length(content) AS size, created_at
+  SET content = EXCLUDED.content, parse_status = EXCLUDED.parse_status, created_at = now()
+RETURNING id, project_id, org_id, release, name, length(content) AS size, parse_status, created_at
 `
 
 type UpsertSourceMapParams struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	OrgID     string `json:"org_id"`
-	Release   string `json:"release"`
-	Name      string `json:"name"`
-	Content   string `json:"content"`
+	ID          string `json:"id"`
+	ProjectID   string `json:"project_id"`
+	OrgID       string `json:"org_id"`
+	Release     string `json:"release"`
+	Name        string `json:"name"`
+	Content     string `json:"content"`
+	ParseStatus string `json:"parse_status"`
 }
 
 type UpsertSourceMapRow struct {
-	ID        string             `json:"id"`
-	ProjectID string             `json:"project_id"`
-	OrgID     string             `json:"org_id"`
-	Release   string             `json:"release"`
-	Name      string             `json:"name"`
-	Size      float64            `json:"size"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID          string             `json:"id"`
+	ProjectID   string             `json:"project_id"`
+	OrgID       string             `json:"org_id"`
+	Release     string             `json:"release"`
+	Name        string             `json:"name"`
+	Size        float64            `json:"size"`
+	ParseStatus string             `json:"parse_status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) UpsertSourceMap(ctx context.Context, arg UpsertSourceMapParams) (*UpsertSourceMapRow, error) {
@@ -194,6 +199,7 @@ func (q *Queries) UpsertSourceMap(ctx context.Context, arg UpsertSourceMapParams
 		arg.Release,
 		arg.Name,
 		arg.Content,
+		arg.ParseStatus,
 	)
 	var i UpsertSourceMapRow
 	err := row.Scan(
@@ -203,6 +209,7 @@ func (q *Queries) UpsertSourceMap(ctx context.Context, arg UpsertSourceMapParams
 		&i.Release,
 		&i.Name,
 		&i.Size,
+		&i.ParseStatus,
 		&i.CreatedAt,
 	)
 	return &i, err

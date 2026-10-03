@@ -202,3 +202,30 @@ func TestHandleStoreErrorClass(t *testing.T) {
 		})
 	}
 }
+
+// TestHeartbeatMarkerFailureRollsBackEvent proves that the release freshness
+// marker and its heartbeat event share one database transaction. If the marker
+// cannot be updated, the caller receives a retryable response and the event is
+// not left behind to be duplicated by the retry.
+func TestHeartbeatMarkerFailureRollsBackEvent(t *testing.T) {
+	pool := newTestDB(t)
+	proj := seedProjectForIngest(t, pool)
+	s := serverForDB(pool)
+
+	// The event path can authenticate and resolve the project without this
+	// table. Dropping it makes TouchReleaseHeartbeat fail after InsertEvent has
+	// run inside the transaction.
+	if _, err := pool.Exec(context.Background(), "DROP TABLE releases"); err != nil {
+		t.Fatalf("drop releases: %v", err)
+	}
+
+	body := `{"level":"info","message":"service-up:web","release":"v1"}`
+	rec := storeEvent(s, proj.PublicKey, body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 when heartbeat marker cannot be persisted, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	s.bgWG.Wait()
+	if got := countEvents(t, pool, proj.ID); got != 0 {
+		t.Fatalf("heartbeat event remained after marker failure: got %d rows", got)
+	}
+}

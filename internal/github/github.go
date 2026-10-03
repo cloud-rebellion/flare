@@ -12,6 +12,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bright-interaction/flare/internal/integration"
+	"github.com/bright-interaction/flare/internal/metrics"
 )
 
 var httpClient = &http.Client{Timeout: 12 * time.Second}
@@ -23,7 +26,22 @@ func ValidRepo(repo string) bool {
 }
 
 // CreateIssue opens an issue in owner/name and returns its html_url.
-func CreateIssue(ctx context.Context, token, repo, title, body string) (string, error) {
+func CreateIssue(ctx context.Context, token, repo, title, body string) (htmlURL string, err error) {
+	startedAt := time.Now().UTC()
+	started := startedAt
+	defer func() {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+		}
+		metrics.RecordIntegration("github", "create_issue", "http", outcome, time.Since(started))
+		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
+		integration.Record(ctx, integration.Attempt{
+			Scope: integration.ScopeFrom(ctx), Provider: "github", Operation: "create_issue", Channel: "http",
+			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
+			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+		})
+	}()
 	payload, err := json.Marshal(map[string]string{"title": title, "body": body})
 	if err != nil {
 		return "", err

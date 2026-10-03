@@ -25,6 +25,13 @@ type Config struct {
 	// key), so a captured DSN cannot flood the write path.
 	IngestRatePerMin int
 
+	// ConnectorSyncEnabled opts the built-in provider scheduler in. It is off by
+	// default because enabling it makes outbound provider calls for every active
+	// installation with a stored credential. ConnectorSyncInterval controls the
+	// bounded poll cadence when enabled.
+	ConnectorSyncEnabled  bool
+	ConnectorSyncInterval time.Duration
+
 	// Cold-tier Parquet. Local dir by default (self-host friendly); S3/MinIO opt-in.
 	ParquetDir string
 
@@ -96,20 +103,22 @@ func (c Config) EmailEnabled() bool { return c.SMTPHost != "" && c.SMTPFrom != "
 
 func Load() (Config, error) {
 	c := Config{
-		Environment:      env("ENVIRONMENT", "development"),
-		Port:             env("PORT", "8080"),
-		BaseURL:          env("BASE_URL", "http://localhost:8080"),
-		DatabaseURL:      env("DATABASE_URL", ""),
-		DBMaxConns:       int32(envInt("DB_MAX_CONNS", 20)),
-		DBMinConns:       int32(envInt("DB_MIN_CONNS", 2)),
-		RetentionDays:    envInt("RETENTION_DAYS", 30),
-		IngestRatePerMin: envInt("INGEST_RATE_PER_MIN", 1200),
-		ParquetDir:       env("FLARE_PARQUET_DIR", "data/parquet"),
-		S3Endpoint:       env("FLARE_PARQUET_S3_ENDPOINT", ""),
-		S3Bucket:         env("FLARE_PARQUET_S3_BUCKET", "flare"),
-		S3AccessKey:      env("FLARE_PARQUET_S3_ACCESS_KEY", ""),
-		S3SecretKey:      env("FLARE_PARQUET_S3_SECRET_KEY", ""),
-		S3Region:         env("FLARE_PARQUET_S3_REGION", "us-east-1"),
+		Environment:           env("ENVIRONMENT", "development"),
+		Port:                  env("PORT", "8080"),
+		BaseURL:               env("BASE_URL", "http://localhost:8080"),
+		DatabaseURL:           env("DATABASE_URL", ""),
+		DBMaxConns:            int32(envInt("DB_MAX_CONNS", 20)),
+		DBMinConns:            int32(envInt("DB_MIN_CONNS", 2)),
+		RetentionDays:         envInt("RETENTION_DAYS", 30),
+		IngestRatePerMin:      envInt("INGEST_RATE_PER_MIN", 1200),
+		ConnectorSyncEnabled:  isTrue(env("FLARE_CONNECTOR_SYNC_ENABLED", "")),
+		ConnectorSyncInterval: envDuration("FLARE_CONNECTOR_SYNC_INTERVAL", 5*time.Minute),
+		ParquetDir:            env("FLARE_PARQUET_DIR", "data/parquet"),
+		S3Endpoint:            env("FLARE_PARQUET_S3_ENDPOINT", ""),
+		S3Bucket:              env("FLARE_PARQUET_S3_BUCKET", "flare"),
+		S3AccessKey:           env("FLARE_PARQUET_S3_ACCESS_KEY", ""),
+		S3SecretKey:           env("FLARE_PARQUET_S3_SECRET_KEY", ""),
+		S3Region:              env("FLARE_PARQUET_S3_REGION", "us-east-1"),
 		// Fail CLOSED: any spelling other than an explicit false keeps TLS on.
 		// Comparing against "true" meant "TRUE", "1" or a typo silently sent
 		// object-storage credentials in the clear.
@@ -249,6 +258,15 @@ func envInt(key string, def int) int {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
 		}
 	}
 	return def

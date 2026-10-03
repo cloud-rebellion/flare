@@ -122,6 +122,12 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
     source, with context. Do it from CI with a <strong>member</strong> API key (create one in Settings; viewer keys are read-only):
   </p>
   <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{sourcemapSnippet}</pre>
+  <p class="mt-2 text-xs text-zinc-500">
+    Uploads stay durable for CI compatibility and return a bounded parser outcome in the artifact list:
+    <code class="font-mono text-zinc-400">valid</code>, <code class="font-mono text-zinc-400">invalid_json</code>,
+    <code class="font-mono text-zinc-400">invalid_mappings</code>, <code class="font-mono text-zinc-400">unsupported</code>,
+    or <code class="font-mono text-zinc-400">unvalidated</code>. Only valid maps are used for symbolication; map bytes and parser messages never appear in metadata.
+  </p>
 
   <h2 id="releases" class="mt-10 scroll-mt-20 text-lg font-semibold tracking-tight">Track releases</h2>
   <p class="mt-1 text-sm text-zinc-400">
@@ -129,10 +135,18 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
     deploy from CI so it shows with its time, and every issue records the version it was first seen in:
   </p>
   <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{releaseSnippet}</pre>
+  <p class="mt-2 text-xs text-zinc-500">
+    A deploy marker is distinct from an event-created release. The built-in
+    runtime heartbeat (<code class="font-mono text-zinc-400">service-up:&lt;service&gt;</code>) carries the same release;
+    query <code class="font-mono text-zinc-400">/api/projects/&lt;id&gt;/release-freshness</code> or add a
+    <code class="font-mono text-zinc-400">release_freshness</code> alert to page when that heartbeat is overdue.
+    For releases with multiple workers, use <code class="font-mono text-zinc-400">service_freshness</code> with the
+    exact service name and release so one healthy worker cannot hide another stopped worker.
+  </p>
 
   <h2 class="mt-10 text-lg font-semibold tracking-tight">Everything else</h2>
   <p class="mt-1 text-sm text-zinc-400">
-    Issues, alerts (Slack/email/webhook), GitHub issue creation, team roles, SSO and more are in the
+    Issues, alerts (Slack/email/webhook/automation webhook), GitHub issue creation, team roles, SSO and more are in the
     <a href="/docs/api" class="text-amber-400 hover:text-amber-300">API reference</a>. Self-hosting? See the
     <a href="https://github.com/bright-interaction/flare/tree/main/deploy" class="text-amber-400 hover:text-amber-300">deploy guide</a>
     (Docker Compose + Helm).

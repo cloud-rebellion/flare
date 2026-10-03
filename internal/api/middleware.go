@@ -189,6 +189,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, ctxUserID, user.ID)
 				ctx = context.WithValue(ctx, ctxOrgID, user.OrgID)
 				ctx = context.WithValue(ctx, ctxRole, user.Role)
+				ctx = context.WithValue(ctx, ctxAuthSource, "session")
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -210,6 +211,12 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 				_ = s.q.TouchAPIKey(ctx, ak.ID)
 				ctx = context.WithValue(ctx, ctxOrgID, ak.OrgID)
 				ctx = context.WithValue(ctx, ctxRole, apiKeyRole(ak.Role))
+				ctx = context.WithValue(ctx, ctxAuthSource, "api_key")
+				ctx = context.WithValue(ctx, ctxCredentialID, ak.ID)
+				s.recordUsage(ctx, usageDelta{
+					OrgID: ak.OrgID, CredentialID: ak.ID,
+					Surface: "api_key", Operation: apiKeyUsageOperation(r), Requests: 1,
+				})
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -240,6 +247,16 @@ func (s *Server) requireRole(min string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !roleAtLeast(roleFrom(r.Context()), min) {
+				// A known API key that reaches a role gate is a tenant-scoped,
+				// attributable denial. Count it without persisting the bearer
+				// value; MCP role refusals are accounted for inside mcpHandler,
+				// where the JSON-RPC operation is known.
+				if authSourceFrom(r.Context()) == "api_key" {
+					s.recordUsage(r.Context(), usageDelta{
+						OrgID: orgIDFrom(r.Context()), CredentialID: credentialIDFrom(r.Context()),
+						Surface: "api_key", Operation: apiKeyUsageOperation(r), Denied: 1,
+					})
+				}
 				writeErr(w, http.StatusForbidden, "insufficient permissions for this action")
 				return
 			}

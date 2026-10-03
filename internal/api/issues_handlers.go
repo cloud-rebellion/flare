@@ -14,6 +14,7 @@ import (
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/ingest"
+	"github.com/bright-interaction/flare/internal/native_symbols"
 	"github.com/bright-interaction/flare/internal/scan"
 	"github.com/bright-interaction/flare/internal/telemetry"
 )
@@ -83,18 +84,22 @@ func redactIfFlagged(v any, sensitive string) {
 }
 
 type eventResponse struct {
-	ID             string          `json:"id"`
-	Level          string          `json:"level"`
-	Message        string          `json:"message"`
-	ExceptionType  string          `json:"exception_type"`
-	ExceptionValue string          `json:"exception_value"`
-	Platform       string          `json:"platform"`
-	Environment    string          `json:"environment"`
-	Release        string          `json:"release"`
-	Stacktrace     json.RawMessage `json:"stacktrace"`
-	TraceID        string          `json:"trace_id"`
-	SpanID         string          `json:"span_id"`
-	ReceivedAt     time.Time       `json:"received_at"`
+	ID             string `json:"id"`
+	Level          string `json:"level"`
+	Message        string `json:"message"`
+	ExceptionType  string `json:"exception_type"`
+	ExceptionValue string `json:"exception_value"`
+	Platform       string `json:"platform"`
+	Environment    string `json:"environment"`
+	Release        string `json:"release"`
+	// NativeSymbolStatus is intentionally an explicit unresolved state. An
+	// uploaded Flutter/Dart artifact is retained and tenant-scoped, but native
+	// frame rewriting is not enabled by this read path yet.
+	NativeSymbolStatus string          `json:"native_symbol_status,omitempty"`
+	Stacktrace         json.RawMessage `json:"stacktrace"`
+	TraceID            string          `json:"trace_id"`
+	SpanID             string          `json:"span_id"`
+	ReceivedAt         time.Time       `json:"received_at"`
 }
 
 func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +185,7 @@ func (s *Server) handleListIssueEvents(w http.ResponseWriter, r *http.Request) {
 // and the MCP get_issue tool.
 func (s *Server) toEventResponses(ctx context.Context, issueID, org string, events []telemetry.Event, sensitive bool) []eventResponse {
 	releaseMaps := s.releaseSourceMaps(ctx, issueID, org, events)
+	nativeStatuses := s.releaseNativeSymbolStatuses(ctx, issueID, org, events)
 	out := make([]eventResponse, 0, len(events))
 	for _, e := range events {
 		stack := e.Stacktrace
@@ -190,11 +196,53 @@ func (s *Server) toEventResponses(ctx context.Context, issueID, org string, even
 			ID: e.ID, Level: e.Level, Message: e.Message,
 			ExceptionType: e.ExceptionType, ExceptionValue: e.ExceptionValue,
 			Platform: e.Platform, Environment: e.Environment, Release: e.Release,
-			Stacktrace: stack, TraceID: e.TraceID, SpanID: e.SpanID, ReceivedAt: e.ReceivedAt,
+			NativeSymbolStatus: nativeStatuses[e.Release],
+			Stacktrace:         stack, TraceID: e.TraceID, SpanID: e.SpanID, ReceivedAt: e.ReceivedAt,
 		})
 	}
 	if sensitive {
 		scan.Struct(out)
+	}
+	return out
+}
+
+// releaseNativeSymbolStatuses reports only what the metadata query proves: an
+// artifact exists for this tenant/project/release, while format-specific native
+// frame rewriting remains unresolved. It deliberately never selects artifact
+// bytes, and it fails closed to an empty status on a read error so issue detail
+// stays available without inventing symbolication.
+func (s *Server) releaseNativeSymbolStatuses(ctx context.Context, issueID, org string, events []telemetry.Event) map[string]string {
+	if s == nil || s.q == nil || s.store == nil || len(events) == 0 {
+		return nil
+	}
+	releases := make(map[string]struct{}, len(events))
+	for _, e := range events {
+		if e.Release != "" {
+			releases[e.Release] = struct{}{}
+		}
+	}
+	if len(releases) == 0 {
+		return nil
+	}
+	issue, err := s.store.GetIssue(ctx, issueID, org)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(releases))
+	for release := range releases {
+		rows, err := s.q.ListNativeSymbolArtifactMetadataForRelease(ctx, generated.ListNativeSymbolArtifactMetadataForReleaseParams{
+			ProjectID: issue.ProjectID,
+			OrgID:     org,
+			Release:   release,
+			RowLimit:  64,
+		})
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		// Keep this label honest for every currently retained format. A future
+		// resolver can replace it with a format-specific recognized state after
+		// validating bytes; today's metadata read must not imply that.
+		out[release] = string(native_symbols.StatusRetainedUnresolved)
 	}
 	return out
 }

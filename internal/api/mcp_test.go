@@ -119,6 +119,18 @@ func TestMCPWriteGateDeniesViewer(t *testing.T) {
 	}
 }
 
+func TestMCPWriteGateMarksTenantKnownDenial(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxRole, "viewer")
+	result, rpcErr := (&Server{}).mcpCall(ctx, "org1", json.RawMessage(`{"name":"update_issue_status","arguments":{}}`))
+	if rpcErr != nil {
+		t.Fatalf("role gate should return an application result: %+v", rpcErr)
+	}
+	got, ok := result.(mcpToolResult)
+	if !ok || !got.Denied {
+		t.Fatalf("role gate result did not carry the internal denial marker: %#v", result)
+	}
+}
+
 func TestMCPUnknownTool(t *testing.T) {
 	resp := callMCP(t, "org1", "member", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nope","arguments":{}}}`)
 	b, _ := json.Marshal(resp.Result)

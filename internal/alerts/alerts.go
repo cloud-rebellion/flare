@@ -1,26 +1,33 @@
 // Package alerts dispatches issue notifications to configured channels. Phase
-// 2 ships a log sink and an SSRF-guarded webhook; richer channel types
-// (Telegram, Slack, webhook routing) plug in behind the same Dispatch call.
+// 2 ships a log sink, SSRF-guarded webhook, and signed automation webhook;
+// richer channel types (Telegram, Slack, webhook routing) plug in behind the
+// same Dispatch call.
 package alerts
 
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/bright-interaction/flare/internal/netguard"
 	"html"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bright-interaction/flare/internal/email"
+	"github.com/bright-interaction/flare/internal/integration"
+	"github.com/bright-interaction/flare/internal/metrics"
+	"github.com/bright-interaction/flare/internal/netguard"
 )
 
 // Channel is a destination for notifications, mapped from a stored
@@ -37,6 +44,7 @@ type Channel struct {
 // Reason names what triggered it ("New issue", "Regression", "Spike: N events
 // in Mm") and drives the subject/headline.
 type Notification struct {
+	ProjectID   string `json:"-"`
 	ProjectName string `json:"project"`
 	IssueID     string `json:"issue_id"`
 	Title       string `json:"title"`
@@ -149,7 +157,32 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, ch Channel, n Notification
 // segment with no key to match on. Dropping everything after the host is what
 // makes this safe.
 func (d *Dispatcher) send(ctx context.Context, ch Channel, n Notification) error {
-	return redactDeliveryError(d.deliver(ctx, ch, n))
+	startedAt := time.Now().UTC()
+	started := startedAt
+	err := redactDeliveryError(d.deliver(ctx, ch, n))
+	elapsed := time.Since(started)
+	recordDeliveryMetric(ch, err, elapsed)
+	outcome, statusClass, errorCode := integration.ClassifyError(err)
+	integration.Record(ctx, integration.Attempt{
+		Scope:    integration.Scope{OrgID: ch.OrgID, ProjectID: n.ProjectID},
+		Provider: "alerts", Operation: "dispatch", Channel: ch.Type,
+		Outcome: outcome, StatusClass: statusClass, ErrorCode: errorCode,
+		Elapsed: elapsed, AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
+	})
+	return err
+}
+
+// recordDeliveryMetric is deliberately process-wide and low-cardinality. The
+// channel type is canonicalized before it becomes a label; destination URLs,
+// tenant IDs, channel IDs, and notification content never enter the metrics
+// registry. send is the shared boundary for Dispatch and DispatchOne, so each
+// delivery attempt is observed exactly once.
+func recordDeliveryMetric(ch Channel, err error, elapsed time.Duration) {
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	metrics.RecordIntegration("alerts", "dispatch", ch.Type, outcome, elapsed)
 }
 
 // redactDeliveryError rewrites any *url.Error in err's chain so only the method
@@ -179,6 +212,8 @@ func (d *Dispatcher) deliver(ctx context.Context, ch Channel, n Notification) er
 	switch ch.Type {
 	case "webhook":
 		return d.webhook(ctx, ch.Config, n)
+	case "automation_webhook":
+		return d.automationWebhook(ctx, ch.Config, n)
 	case "slack":
 		return d.slack(ctx, ch.Config, n)
 	case "email":
@@ -189,6 +224,115 @@ func (d *Dispatcher) deliver(ctx context.Context, ch Channel, n Notification) er
 	default:
 		return fmt.Errorf("unsupported channel type %q", ch.Type)
 	}
+}
+
+// automationWebhookPayload is the intentionally small contract sent to an
+// external coding-loop worker. It carries identifiers and bounded counters,
+// never issue text, stack traces, telemetry attributes, credentials, or model
+// output. The receiver can use event to decide whether to fetch fresh Flare
+// evidence before taking its own human-gated action.
+type automationWebhookPayload struct {
+	Schema    string `json:"schema"`
+	Event     string `json:"event"`
+	ProjectID string `json:"project_id"`
+	// IssueID is empty for project/service watchdog notifications that are not
+	// associated with a grouped issue. Keeping the field in the fixed schema
+	// lets receivers use one decoder for issue and non-issue alerts.
+	IssueID    string `json:"issue_id"`
+	EventCount int64  `json:"event_count"`
+	ObservedAt string `json:"observed_at"`
+}
+
+const (
+	automationWebhookSchema        = "flare.automation.v1"
+	maxAutomationWebhookEventCount = int64(1_000_000_000)
+	automationWebhookReplayWindow  = 5 * time.Minute
+)
+
+func automationWebhookEvent(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "new issue":
+		return "new_issue"
+	case "regression":
+		return "regression"
+	case "anomaly":
+		return "anomaly"
+	case "silence":
+		return "silence"
+	case "monitor missing":
+		return "monitor_missing"
+	case "deploy failure":
+		return "deploy_failure"
+	case "deploy acceptance":
+		return "deploy_acceptance"
+	case "rollback":
+		return "rollback"
+	}
+	lower := strings.ToLower(strings.TrimSpace(reason))
+	for prefix, event := range map[string]string{
+		"spike:": "spike", "connector ": "connector", "release ": "release",
+		"service ": "service", "log ": "log", "usage ": "usage", "ai ": "ai",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return event
+		}
+	}
+	return "alert"
+}
+
+func automationWebhookBody(n Notification, observedAt time.Time) ([]byte, error) {
+	if strings.TrimSpace(n.ProjectID) == "" {
+		return nil, errors.New("automation webhook requires a project identifier")
+	}
+	if n.EventCount < 0 || n.EventCount > maxAutomationWebhookEventCount {
+		return nil, fmt.Errorf("automation webhook event count must be between 0 and %d", maxAutomationWebhookEventCount)
+	}
+	return json.Marshal(automationWebhookPayload{
+		Schema: automationWebhookSchema, Event: automationWebhookEvent(n.Reason),
+		ProjectID: n.ProjectID, IssueID: n.IssueID, EventCount: n.EventCount,
+		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func automationWebhookSignature(secret, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessage, n Notification) error {
+	var cfg struct {
+		URL           string `json:"url"`
+		SigningSecret string `json:"signing_secret"`
+	}
+	if err := json.Unmarshal(cfgRaw, &cfg); err != nil || cfg.URL == "" || cfg.SigningSecret == "" {
+		return errors.New("automation webhook misconfigured (url and signing_secret are required)")
+	}
+	now := time.Now().UTC()
+	body, err := automationWebhookBody(n, now)
+	if err != nil {
+		return err
+	}
+	timestamp := strconv.FormatInt(now.Unix(), 10)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Flare-Automation-Timestamp", timestamp)
+	req.Header.Set("X-Flare-Automation-Signature", automationWebhookSignature(cfg.SigningSecret, timestamp, body))
+	req.Header.Set("X-Flare-Automation-Event", automationWebhookEvent(n.Reason))
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("automation webhook returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // record persists a delivery outcome when a recorder is wired and the channel

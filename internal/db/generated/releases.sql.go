@@ -11,6 +11,319 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const listReleaseFreshnessByProject = `-- name: ListReleaseFreshnessByProject :many
+SELECT r.version,
+       r.deploy_marked_at,
+       r.last_heartbeat_at,
+       EXTRACT(EPOCH FROM (now() - COALESCE(r.last_heartbeat_at, r.deploy_marked_at)))::double precision AS age_seconds
+FROM releases r
+WHERE r.project_id = $1
+  AND r.org_id = $2
+  AND r.deploy_marked_at IS NOT NULL
+  AND r.deploy_marked_at >= $3
+ORDER BY r.deploy_marked_at DESC, r.version DESC
+LIMIT $4
+`
+
+type ListReleaseFreshnessByProjectParams struct {
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	RowLimit  int32              `json:"row_limit"`
+}
+
+type ListReleaseFreshnessByProjectRow struct {
+	Version         string             `json:"version"`
+	DeployMarkedAt  pgtype.Timestamptz `json:"deploy_marked_at"`
+	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
+	AgeSeconds      float64            `json:"age_seconds"`
+}
+
+// Explicit deploy markers are the admission boundary. A release created only
+// by an old event is intentionally absent, so freshness never infers a current
+// deployment from arbitrary historical traffic.
+func (q *Queries) ListReleaseFreshnessByProject(ctx context.Context, arg ListReleaseFreshnessByProjectParams) ([]*ListReleaseFreshnessByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listReleaseFreshnessByProject,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Since,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ListReleaseFreshnessByProjectRow{}
+	for rows.Next() {
+		var i ListReleaseFreshnessByProjectRow
+		if err := rows.Scan(
+			&i.Version,
+			&i.DeployMarkedAt,
+			&i.LastHeartbeatAt,
+			&i.AgeSeconds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReleaseHealthByProject = `-- name: ListReleaseHealthByProject :many
+SELECT r.version,
+       r.created_at,
+       count(e.id)::bigint AS event_count,
+       count(e.id) FILTER (WHERE e.level NOT IN ('info', 'debug'))::bigint AS error_count,
+       count(DISTINCT e.issue_id) FILTER (
+         WHERE e.issue_id IS NOT NULL AND e.level NOT IN ('info', 'debug')
+       )::bigint AS affected_issue_count,
+       min(e.received_at)::timestamptz AS first_seen,
+       max(e.received_at)::timestamptz AS last_seen
+FROM releases r
+LEFT JOIN events e
+  ON e.project_id = r.project_id
+ AND e.org_id = r.org_id
+ AND e.release = r.version
+ AND e.received_at >= $1
+WHERE r.project_id = $2
+  AND r.org_id = $3
+  AND (
+    r.created_at >= $1
+    OR EXISTS (
+      SELECT 1
+      FROM events recent
+      WHERE recent.project_id = r.project_id
+        AND recent.org_id = r.org_id
+        AND recent.release = r.version
+        AND recent.received_at >= $1
+    )
+  )
+GROUP BY r.version, r.created_at
+ORDER BY coalesce(max(e.received_at), r.created_at) DESC, r.version DESC
+LIMIT $4
+`
+
+type ListReleaseHealthByProjectParams struct {
+	Since     pgtype.Timestamptz `json:"since"`
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	RowLimit  int32              `json:"row_limit"`
+}
+
+type ListReleaseHealthByProjectRow struct {
+	Version            string             `json:"version"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	EventCount         int64              `json:"event_count"`
+	ErrorCount         int64              `json:"error_count"`
+	AffectedIssueCount int64              `json:"affected_issue_count"`
+	FirstSeen          pgtype.Timestamptz `json:"first_seen"`
+	LastSeen           pgtype.Timestamptz `json:"last_seen"`
+}
+
+// Bounded release health for the authenticated project dashboard. Event counts
+// are scoped by both tenant and project and only include the requested hot-tier
+// window. A newly registered release with no events in the window is retained
+// when its deploy marker is recent, so a release that never received traffic
+// is visible as a zero-volume release. Raw event bodies are intentionally not
+// selected.
+func (q *Queries) ListReleaseHealthByProject(ctx context.Context, arg ListReleaseHealthByProjectParams) ([]*ListReleaseHealthByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listReleaseHealthByProject,
+		arg.Since,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ListReleaseHealthByProjectRow{}
+	for rows.Next() {
+		var i ListReleaseHealthByProjectRow
+		if err := rows.Scan(
+			&i.Version,
+			&i.CreatedAt,
+			&i.EventCount,
+			&i.ErrorCount,
+			&i.AffectedIssueCount,
+			&i.FirstSeen,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReleaseSymbolicationHealthByProject = `-- name: ListReleaseSymbolicationHealthByProject :many
+WITH scoped_releases AS (
+    SELECT r.version, r.created_at
+    FROM releases r
+    WHERE r.project_id = $2
+      AND r.org_id = $3
+      AND (
+        r.created_at >= $4
+        OR EXISTS (
+          SELECT 1
+          FROM events recent
+          WHERE recent.project_id = r.project_id
+            AND recent.org_id = r.org_id
+            AND recent.release = r.version
+            AND recent.received_at >= $4
+        )
+      )
+),
+release_events AS (
+    SELECT r.version,
+           r.created_at,
+           e.id AS event_id,
+           e.received_at,
+           e.stacktrace
+    FROM scoped_releases r
+    LEFT JOIN events e
+      ON e.project_id = $2
+     AND e.org_id = $3
+     AND e.release = r.version
+     AND e.received_at >= $4
+),
+frame_rollup AS (
+    SELECT re.version,
+           count(DISTINCT re.event_id)::bigint AS event_count,
+           count(DISTINCT re.event_id) FILTER (
+             WHERE jsonb_typeof(re.stacktrace -> 'frames') = 'array'
+           )::bigint AS stacktrace_event_count,
+           count(frame.value) FILTER (
+             WHERE jsonb_typeof(frame.value -> 'filename') = 'string'
+               AND frame.value ->> 'filename' <> ''
+               AND frame.value ->> 'lineno' ~ '^[1-9][0-9]*$'
+           )::bigint AS candidate_frame_count,
+           count(frame.value) FILTER (
+             WHERE jsonb_typeof(frame.value -> 'filename') = 'string'
+               AND frame.value ->> 'filename' <> ''
+               AND frame.value ->> 'lineno' ~ '^[1-9][0-9]*$'
+               AND EXISTS (
+                 SELECT 1
+                 FROM source_map_artifacts sm
+                 WHERE sm.project_id = $2
+                   AND sm.org_id = $3
+                   AND sm.release = re.version
+                   AND sm.parse_status IN ('unvalidated', 'valid')
+                   AND (
+                     sm.name = frame.value ->> 'filename'
+                     OR regexp_replace(sm.name, '^.*/', '') = regexp_replace(frame.value ->> 'filename', '^.*/', '')
+                   )
+               )
+           )::bigint AS mapped_frame_count,
+           min(re.received_at)::timestamptz AS first_seen,
+           max(re.received_at)::timestamptz AS last_seen
+    FROM release_events re
+    LEFT JOIN LATERAL jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(re.stacktrace -> 'frames') = 'array' THEN re.stacktrace -> 'frames'
+        ELSE '[]'::jsonb
+      END
+    ) AS frame(value) ON true
+    GROUP BY re.version
+),
+release_maps AS (
+    SELECT sm.release,
+           count(*)::bigint AS map_count,
+           coalesce(sum(octet_length(sm.content)), 0)::bigint AS map_bytes
+    FROM source_map_artifacts sm
+    WHERE sm.project_id = $2
+      AND sm.org_id = $3
+    GROUP BY sm.release
+)
+SELECT r.version,
+       r.created_at,
+       coalesce(m.map_count, 0)::bigint AS map_count,
+       coalesce(m.map_bytes, 0)::bigint AS map_bytes,
+       coalesce(f.event_count, 0)::bigint AS event_count,
+       coalesce(f.stacktrace_event_count, 0)::bigint AS stacktrace_event_count,
+       coalesce(f.candidate_frame_count, 0)::bigint AS candidate_frame_count,
+       coalesce(f.mapped_frame_count, 0)::bigint AS mapped_frame_count,
+       (coalesce(f.candidate_frame_count, 0)::bigint - coalesce(f.mapped_frame_count, 0)::bigint)::bigint AS unmapped_frame_count,
+       f.first_seen,
+       f.last_seen
+FROM scoped_releases r
+LEFT JOIN frame_rollup f ON f.version = r.version
+LEFT JOIN release_maps m ON m.release = r.version
+ORDER BY coalesce(f.last_seen, r.created_at) DESC, r.version DESC
+LIMIT $1
+`
+
+type ListReleaseSymbolicationHealthByProjectParams struct {
+	RowLimit  int32              `json:"row_limit"`
+	ProjectID string             `json:"project_id"`
+	OrgID     string             `json:"org_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+type ListReleaseSymbolicationHealthByProjectRow struct {
+	Version              string             `json:"version"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	MapCount             int64              `json:"map_count"`
+	MapBytes             int64              `json:"map_bytes"`
+	EventCount           int64              `json:"event_count"`
+	StacktraceEventCount int64              `json:"stacktrace_event_count"`
+	CandidateFrameCount  int64              `json:"candidate_frame_count"`
+	MappedFrameCount     int64              `json:"mapped_frame_count"`
+	UnmappedFrameCount   int64              `json:"unmapped_frame_count"`
+	FirstSeen            pgtype.Timestamptz `json:"first_seen"`
+	LastSeen             pgtype.Timestamptz `json:"last_seen"`
+}
+
+// Bounded release/source-map coverage for the authenticated project dashboard.
+// This reports whether an uploaded artifact can be selected for a stack frame;
+// it deliberately does not select source-map content, event payloads, or raw
+// stack traces. A frame is a candidate when it has a filename and a positive
+// generated line, matching the source-map resolver's input contract. Matching
+// uses both the complete filename and its slash-delimited basename because the
+// resolver accepts CDN URLs for artifacts uploaded by basename.
+func (q *Queries) ListReleaseSymbolicationHealthByProject(ctx context.Context, arg ListReleaseSymbolicationHealthByProjectParams) ([]*ListReleaseSymbolicationHealthByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listReleaseSymbolicationHealthByProject,
+		arg.RowLimit,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Since,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ListReleaseSymbolicationHealthByProjectRow{}
+	for rows.Next() {
+		var i ListReleaseSymbolicationHealthByProjectRow
+		if err := rows.Scan(
+			&i.Version,
+			&i.CreatedAt,
+			&i.MapCount,
+			&i.MapBytes,
+			&i.EventCount,
+			&i.StacktraceEventCount,
+			&i.CandidateFrameCount,
+			&i.MappedFrameCount,
+			&i.UnmappedFrameCount,
+			&i.FirstSeen,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReleasesByProject = `-- name: ListReleasesByProject :many
 SELECT r.version,
        r.created_at,
@@ -53,6 +366,65 @@ func (q *Queries) ListReleasesByProject(ctx context.Context, arg ListReleasesByP
 		return nil, err
 	}
 	return items, nil
+}
+
+const markReleaseDeploy = `-- name: MarkReleaseDeploy :one
+INSERT INTO releases (id, project_id, org_id, version, deploy_marked_at)
+VALUES ($1, $2, $3, $4, now())
+ON CONFLICT (project_id, version) DO UPDATE
+SET deploy_marked_at = now()
+RETURNING version, created_at, deploy_marked_at
+`
+
+type MarkReleaseDeployParams struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	OrgID     string `json:"org_id"`
+	Version   string `json:"version"`
+}
+
+type MarkReleaseDeployRow struct {
+	Version        string             `json:"version"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	DeployMarkedAt pgtype.Timestamptz `json:"deploy_marked_at"`
+}
+
+// Only the authenticated deploy-marker endpoint may set deploy_marked_at.
+// Event ingest uses UpsertRelease and therefore cannot make an arbitrary old
+// event look like a deployed release.
+func (q *Queries) MarkReleaseDeploy(ctx context.Context, arg MarkReleaseDeployParams) (*MarkReleaseDeployRow, error) {
+	row := q.db.QueryRow(ctx, markReleaseDeploy,
+		arg.ID,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Version,
+	)
+	var i MarkReleaseDeployRow
+	err := row.Scan(&i.Version, &i.CreatedAt, &i.DeployMarkedAt)
+	return &i, err
+}
+
+const touchReleaseHeartbeat = `-- name: TouchReleaseHeartbeat :execrows
+UPDATE releases
+SET last_heartbeat_at = now()
+WHERE project_id = $1 AND org_id = $2 AND version = $3
+`
+
+type TouchReleaseHeartbeatParams struct {
+	ProjectID string `json:"project_id"`
+	OrgID     string `json:"org_id"`
+	Version   string `json:"version"`
+}
+
+// Called only for the canonical info-level service-up:<service> heartbeat
+// shape after the event has been durably inserted. The project and org
+// predicates keep the timestamp tenant-safe even when release labels collide.
+func (q *Queries) TouchReleaseHeartbeat(ctx context.Context, arg TouchReleaseHeartbeatParams) (int64, error) {
+	result, err := q.db.Exec(ctx, touchReleaseHeartbeat, arg.ProjectID, arg.OrgID, arg.Version)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertRelease = `-- name: UpsertRelease :exec

@@ -21,33 +21,69 @@ import (
 // handleOTLPLogs ingests OTLP/HTTP logs (protobuf or OTLP/JSON). Auth is the
 // DSN public key via X-Flare-Key (OTEL_EXPORTER_OTLP_HEADERS) or sentry_key.
 func (s *Server) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("log")
+		recordIngestRequest("otlp", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
 	}
 	body, ok := readIngestBody(w, r)
 	if !ok {
+		return
+	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "logs", "otlp", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
 		return
 	}
 	asJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
 	records, err := ingest.ParseOTLPLogs(body, asJSON)
 	if err != nil {
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid OTLP logs payload")
 		return
 	}
+	receipt.setReceived(len(records))
+	requestOutcome = ""
 	budget := newIngestBudget()
 	if err := s.persistLogs(r.Context(), project, records, budget); err != nil {
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// The persistence operation is all-or-nothing for this batch. Rows
+		// admitted by the budget were not durably accepted when it failed.
+		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slogError(w, "persist otlp logs", err)
 		return
 	}
+	outcome.accepted = uint64(len(records) - budget.rejected())
+	outcome.invalid = uint64(budget.invalid)
+	outcome.dropped = uint64(budget.dropped)
 	budget.report(project.ID, "logs")
 	// OTLP success response, carrying partial_success when the row cap truncated
 	// the export so the collector does not count dropped rows as delivered.
-	writeJSON(w, http.StatusOK, otlpResponse(budget.dropped, otlpRejectedLogRecords))
+	writeJSON(w, http.StatusOK, otlpResponse(budget.rejected(), otlpRejectedLogRecords))
 }
 
 // handleNativeLogs ingests a JSON array of log records (the thin SDK path).
 func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("log")
+		recordIngestRequest("native", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
@@ -56,20 +92,38 @@ func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "logs", "native", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
+		return
+	}
 	records, err := ingest.ParseNativeLogs(body)
 	if err != nil {
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid logs payload")
 		return
 	}
+	receipt.setReceived(len(records))
+	requestOutcome = ""
 	budget := newIngestBudget()
 	if err := s.persistLogs(r.Context(), project, records, budget); err != nil {
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// The persistence operation is all-or-nothing for this batch. Rows
+		// admitted by the budget were not durably accepted when it failed.
+		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slogError(w, "persist logs", err)
 		return
 	}
+	outcome.accepted = uint64(len(records) - budget.rejected())
+	outcome.invalid = uint64(budget.invalid)
+	outcome.dropped = uint64(budget.dropped)
 	budget.report(project.ID, "logs")
 	// accepted is what was STORED, not what was posted: reporting the posted
 	// count after truncating would be the silent loss the cap must not introduce.
-	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.dropped})
+	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.rejected()})
 }
 
 func (s *Server) persistLogs(ctx context.Context, project *generated.Project, records []ingest.LogRecord, budget *ingestBudget) error {

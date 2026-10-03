@@ -17,33 +17,76 @@ import (
 	"github.com/bright-interaction/flare/internal/ingest"
 )
 
+// maxMetricLabelBytes bounds one client-supplied label document before it is
+// copied into JSONB. Oversized points are rejected as invalid rather than
+// silently truncating standard OpenTelemetry attributes; OTLP callers receive
+// partial_success and native callers see a lower accepted count. The bound is
+// per point, so a normal batch can still contain many independent dimensions.
+const maxMetricLabelBytes = 4 << 10
+
 // handleOTLPMetrics ingests OTLP/HTTP metrics (protobuf or OTLP/JSON).
 func (s *Server) handleOTLPMetrics(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("metric")
+		recordIngestRequest("otlp", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
 	}
 	body, ok := readIngestBody(w, r)
 	if !ok {
+		return
+	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "metrics", "otlp", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
 		return
 	}
 	asJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
 	records, err := ingest.ParseOTLPMetrics(body, asJSON)
 	if err != nil {
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid OTLP metrics payload")
 		return
 	}
+	receipt.setReceived(len(records))
+	requestOutcome = ""
 	budget := newIngestBudget()
 	if err := s.persistMetrics(r.Context(), project, records, budget); err != nil {
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// The persistence operation is all-or-nothing for this batch. Rows
+		// admitted by the budget were not durably accepted when it failed.
+		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slogError(w, "persist metrics", err)
 		return
 	}
+	outcome.accepted = uint64(len(records) - budget.rejected())
+	outcome.invalid = uint64(budget.invalid)
+	outcome.dropped = uint64(budget.dropped)
 	budget.report(project.ID, "metrics")
-	writeJSON(w, http.StatusOK, otlpResponse(budget.dropped, otlpRejectedDataPoints))
+	writeJSON(w, http.StatusOK, otlpResponse(budget.rejected(), otlpRejectedDataPoints))
 }
 
 // handleNativeMetrics ingests a bare JSON array of metric points (or {"metrics":[...]}).
 func (s *Server) handleNativeMetrics(w http.ResponseWriter, r *http.Request) {
+	var outcome ingestOutcome
+	var receipt *ingestReceipt
+	receiptStatus := http.StatusOK
+	requestOutcome := "rejected"
+	defer func() {
+		outcome.record("metric")
+		recordIngestRequest("native", outcome, requestOutcome)
+		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
 		return
@@ -52,35 +95,47 @@ func (s *Server) handleNativeMetrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "metrics", "native", &outcome, &requestOutcome, &receiptStatus)
+	if receipt == nil {
+		return
+	}
 	records, err := ingest.ParseNativeMetrics(body)
 	if err != nil {
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid metrics payload")
 		return
 	}
+	receipt.setReceived(len(records))
+	requestOutcome = ""
 	budget := newIngestBudget()
 	if err := s.persistMetrics(r.Context(), project, records, budget); err != nil {
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// The persistence operation is all-or-nothing for this batch. Rows
+		// admitted by the budget were not durably accepted when it failed.
+		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+		requestOutcome = "failed"
+		receiptStatus = http.StatusServiceUnavailable
 		slogError(w, "persist metrics", err)
 		return
 	}
+	outcome.accepted = uint64(len(records) - budget.rejected())
+	outcome.invalid = uint64(budget.invalid)
+	outcome.dropped = uint64(budget.dropped)
 	budget.report(project.ID, "metrics")
-	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.dropped})
+	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.rejected()})
 }
 
 func (s *Server) persistMetrics(ctx context.Context, project *generated.Project, records []ingest.MetricRecord, budget *ingestBudget) error {
 	// Spend the request's row budget first. See maxIngestRecords.
 	records = records[:budget.take(len(records))]
+	records = finiteMetricRows(records, budget)
 	if len(records) == 0 {
 		return nil
 	}
 	params := make([]generated.InsertMetricsParams, 0, len(records))
 	for _, m := range records {
-		// NaN and +/-Inf are accepted by float64 and by Postgres double
-		// precision, but they are not representable in JSON: the query endpoint
-		// and the MCP tool then failed to marshal and answered 200 with an empty
-		// body. Drop them at the door instead.
-		if math.IsNaN(m.Value) || math.IsInf(m.Value, 0) {
-			continue
-		}
 		params = append(params, generated.InsertMetricsParams{
 			ID:         id.New(),
 			ProjectID:  project.ID,
@@ -97,6 +152,29 @@ func (s *Server) persistMetrics(ctx context.Context, project *generated.Project,
 	}
 	_, err := s.q.InsertMetrics(ctx, params)
 	return err
+}
+
+// metricRowsForPersistence applies the request row cap and rejects non-finite
+// values or oversized label documents before SQL construction. NaN and +/-Inf
+// are valid float64 values but cannot be represented in JSON responses, so
+// accepting them would make the sender believe a metric was stored while later
+// queries fail to encode it. Labels are rejected as a whole when they exceed
+// maxMetricLabelBytes: truncating an OTel attribute document would silently
+// change the metric's dimensions.
+func finiteMetricRows(records []ingest.MetricRecord, budget *ingestBudget) []ingest.MetricRecord {
+	accepted := records[:0]
+	for _, m := range records {
+		if math.IsNaN(m.Value) || math.IsInf(m.Value, 0) {
+			budget.rejectInvalid()
+			continue
+		}
+		if len(m.Labels) > maxMetricLabelBytes {
+			budget.rejectInvalid()
+			continue
+		}
+		accepted = append(accepted, m)
+	}
+	return accepted
 }
 
 type metricNameResponse struct {

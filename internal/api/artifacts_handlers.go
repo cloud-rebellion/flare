@@ -12,6 +12,7 @@ import (
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
 	"github.com/bright-interaction/flare/internal/ingest"
+	"github.com/bright-interaction/flare/internal/sourcemaps"
 )
 
 // maxArtifactBody bounds a source map upload. Maps for large bundles can be
@@ -19,11 +20,12 @@ import (
 const maxArtifactBody = 30 << 20
 
 type artifactResponse struct {
-	ID        string    `json:"id"`
-	Release   string    `json:"release"`
-	Name      string    `json:"name"`
-	Size      int64     `json:"size"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	Release     string    `json:"release"`
+	Name        string    `json:"name"`
+	Size        int64     `json:"size"`
+	ParseStatus string    `json:"parse_status"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // handleUploadSourceMap stores (or replaces) one minified file's source map for
@@ -63,7 +65,6 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "content must be a source map JSON document")
 		return
 	}
-
 	// Verify the project belongs to the caller's org BEFORE upserting (mirror the
 	// monitors/metrics handlers). Without this a tenant could pass another org's project
 	// id in the URL and overwrite that project's sourcemap (cross-tenant write), since the
@@ -93,6 +94,15 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Keep upload compatibility: malformed maps are retained with a bounded
+	// parser outcome instead of turning a CI upload into a hard failure. The
+	// same parser backs read-time symbolication, so `valid` means the resolver
+	// accepted the document and every other status explains why it will remain
+	// unmapped. Parser errors never cross the API boundary. Run this after the
+	// tenant and quota gates so an unauthorized or rejected upload cannot spend
+	// parser work on a large body.
+	parseStatus := sourcemaps.Validate([]byte(req.Content))
+
 	row, err := s.q.UpsertSourceMap(r.Context(), generated.UpsertSourceMapParams{
 		ID:        id.New(),
 		ProjectID: chi.URLParam(r, "id"),
@@ -102,9 +112,10 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		// the upload 500s forever with no diagnostic and no way for the
 		// uploader to know what is wrong. SanitizeJSON parse-remarshals, so an
 		// escaped NUL is removed without corrupting the document.
-		Release: ingest.SanitizeColumn(req.Release),
-		Name:    ingest.SanitizeColumn(req.Name),
-		Content: string(ingest.SanitizeJSON([]byte(req.Content))),
+		Release:     ingest.SanitizeColumn(req.Release),
+		Name:        ingest.SanitizeColumn(req.Name),
+		Content:     string(ingest.SanitizeJSON([]byte(req.Content))),
+		ParseStatus: string(parseStatus),
 	})
 	if err != nil {
 		slogError(w, "upsert source map", err)
@@ -112,7 +123,7 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), "sourcemap.upload", row.Release+"/"+row.Name)
 	writeJSON(w, http.StatusCreated, artifactResponse{
-		ID: row.ID, Release: row.Release, Name: row.Name, Size: int64(row.Size), CreatedAt: row.CreatedAt.Time,
+		ID: row.ID, Release: row.Release, Name: row.Name, Size: int64(row.Size), ParseStatus: row.ParseStatus, CreatedAt: row.CreatedAt.Time,
 	})
 }
 
@@ -126,7 +137,7 @@ func (s *Server) handleListSourceMaps(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]artifactResponse, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, artifactResponse{ID: row.ID, Release: row.Release, Name: row.Name, Size: int64(row.Size), CreatedAt: row.CreatedAt.Time})
+		out = append(out, artifactResponse{ID: row.ID, Release: row.Release, Name: row.Name, Size: int64(row.Size), ParseStatus: row.ParseStatus, CreatedAt: row.CreatedAt.Time})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

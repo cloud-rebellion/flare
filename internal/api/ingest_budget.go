@@ -35,6 +35,7 @@ const maxIngestRecords = 10000
 type ingestBudget struct {
 	left    int
 	dropped int
+	invalid int
 }
 
 func newIngestBudget() *ingestBudget { return &ingestBudget{left: maxIngestRecords} }
@@ -56,16 +57,24 @@ func (b *ingestBudget) take(n int) int {
 	return allowed
 }
 
-// report logs the truncation once per request. Dropping telemetry silently is
-// the one failure an observability product must not ship: the operator would see
-// a hole in their data and have nothing on either side to explain it.
+// rejectInvalid records a parsed logical item that cannot be persisted.
+// Keeping it on the same request budget makes partial-success responses and
+// ingest outcome metrics agree about what the sender must retry or discard.
+func (b *ingestBudget) rejectInvalid() { b.invalid++ }
+
+func (b *ingestBudget) rejected() int { return b.dropped + b.invalid }
+
+// report logs truncation and invalid values once per request. Dropping telemetry
+// silently is the one failure an observability product must not ship: the
+// operator would see a hole in their data and have nothing on either side to
+// explain it.
 func (b *ingestBudget) report(projectID, pillar string) {
-	if b.dropped == 0 {
+	if b.dropped == 0 && b.invalid == 0 {
 		return
 	}
-	slog.Warn("ingest truncated: too many records in one request",
+	slog.Warn("ingest rejected records",
 		"project_id", projectID, "pillar", pillar,
-		"dropped", b.dropped, "cap", maxIngestRecords)
+		"dropped", b.dropped, "invalid", b.invalid, "cap", maxIngestRecords)
 }
 
 // OTLP partial_success field names, one per signal. They are the wire spelling
@@ -85,13 +94,13 @@ const (
 // present-but-zero reads as "some records failed" to some collectors.
 //
 // int64 fields are STRINGS in OTLP/JSON, per the proto3 JSON mapping.
-func otlpResponse(dropped int, field string) map[string]any {
-	if dropped == 0 {
+func otlpResponse(rejected int, field string) map[string]any {
+	if rejected == 0 {
 		return map[string]any{}
 	}
 	return map[string]any{"partialSuccess": map[string]any{
-		field: strconv.Itoa(dropped),
+		field: strconv.Itoa(rejected),
 		"errorMessage": fmt.Sprintf(
-			"%d records dropped: one request may carry at most %d", dropped, maxIngestRecords),
+			"%d records rejected: invalid values are dropped and one request may carry at most %d", rejected, maxIngestRecords),
 	}}
 }

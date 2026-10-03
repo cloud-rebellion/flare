@@ -10,6 +10,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AiActionReceipt struct {
+	ID             string             `json:"id"`
+	OrgID          string             `json:"org_id"`
+	ProjectID      string             `json:"project_id"`
+	IssueID        string             `json:"issue_id"`
+	Operation      string             `json:"operation"`
+	Status         string             `json:"status"`
+	Provider       string             `json:"provider"`
+	StartedAt      pgtype.Timestamptz `json:"started_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	Retryable      bool               `json:"retryable"`
+	ErrorCode      pgtype.Text        `json:"error_code"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	EvidenceDigest string             `json:"evidence_digest"`
+}
+
 type AiConfig struct {
 	OrgID             string             `json:"org_id"`
 	BaseUrl           string             `json:"base_url"`
@@ -29,16 +45,39 @@ type AiTriageUsage struct {
 }
 
 type AlertRule struct {
-	ID            string             `json:"id"`
-	ProjectID     string             `json:"project_id"`
-	OrgID         string             `json:"org_id"`
-	Name          string             `json:"name"`
-	Type          string             `json:"type"`
-	Threshold     int32              `json:"threshold"`
-	Enabled       bool               `json:"enabled"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	WindowMinutes int32              `json:"window_minutes"`
-	LastFiredAt   pgtype.Timestamptz `json:"last_fired_at"`
+	ID                           string             `json:"id"`
+	ProjectID                    string             `json:"project_id"`
+	OrgID                        string             `json:"org_id"`
+	Name                         string             `json:"name"`
+	Type                         string             `json:"type"`
+	Threshold                    int32              `json:"threshold"`
+	Enabled                      bool               `json:"enabled"`
+	CreatedAt                    pgtype.Timestamptz `json:"created_at"`
+	WindowMinutes                int32              `json:"window_minutes"`
+	LastFiredAt                  pgtype.Timestamptz `json:"last_fired_at"`
+	MetricName                   string             `json:"metric_name"`
+	Comparison                   string             `json:"comparison"`
+	ThresholdValue               float64            `json:"threshold_value"`
+	ConnectorProvider            string             `json:"connector_provider"`
+	ConnectorOperation           string             `json:"connector_operation"`
+	ConnectorChannel             string             `json:"connector_channel"`
+	SpanName                     string             `json:"span_name"`
+	Percentile                   int32              `json:"percentile"`
+	ReleaseVersion               string             `json:"release_version"`
+	LogSeverity                  string             `json:"log_severity"`
+	ConnectorQuotaMetric         string             `json:"connector_quota_metric"`
+	UsageSurface                 string             `json:"usage_surface"`
+	UsageOperation               string             `json:"usage_operation"`
+	UsageMeasure                 string             `json:"usage_measure"`
+	ApiKeyHygieneMode            string             `json:"api_key_hygiene_mode"`
+	ConnectorErrorCode           string             `json:"connector_error_code"`
+	ConnectorFreshnessBaselineAt pgtype.Timestamptz `json:"connector_freshness_baseline_at"`
+	AiTriageMode                 string             `json:"ai_triage_mode"`
+	ServiceName                  string             `json:"service_name"`
+	ServiceFreshnessBaselineAt   pgtype.Timestamptz `json:"service_freshness_baseline_at"`
+	MetricLabels                 json.RawMessage    `json:"metric_labels"`
+	ConnectorConnectionID        string             `json:"connector_connection_id"`
+	ConnectorSyncMode            string             `json:"connector_sync_mode"`
 }
 
 type ApiKey struct {
@@ -63,9 +102,98 @@ type AuditLog struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type AutomationClaim struct {
+	ID             string             `json:"id"`
+	OrgID          string             `json:"org_id"`
+	ProjectID      string             `json:"project_id"`
+	IssueID        string             `json:"issue_id"`
+	Stage          string             `json:"stage"`
+	TargetRevision string             `json:"target_revision"`
+	WorkerRef      string             `json:"worker_ref"`
+	EvidenceRef    string             `json:"evidence_ref"`
+	Status         string             `json:"status"`
+	LeasedUntil    pgtype.Timestamptz `json:"leased_until"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type AutomationReceipt struct {
+	ID             string             `json:"id"`
+	OrgID          string             `json:"org_id"`
+	ProjectID      string             `json:"project_id"`
+	IssueID        string             `json:"issue_id"`
+	Stage          string             `json:"stage"`
+	Status         string             `json:"status"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	EvidenceRef    string             `json:"evidence_ref"`
+	SourceRevision string             `json:"source_revision"`
+	TargetRevision string             `json:"target_revision"`
+	RunRef         string             `json:"run_ref"`
+	ActorUserID    pgtype.Text        `json:"actor_user_id"`
+	Retryable      bool               `json:"retryable"`
+	ErrorCode      string             `json:"error_code"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ClaimID        pgtype.Text        `json:"claim_id"`
+}
+
 type ChannelProject struct {
 	ChannelID string `json:"channel_id"`
 	ProjectID string `json:"project_id"`
+}
+
+type ConnectorAttempt struct {
+	ID             string             `json:"id"`
+	OrgID          string             `json:"org_id"`
+	ProjectID      pgtype.Text        `json:"project_id"`
+	Provider       string             `json:"provider"`
+	Operation      string             `json:"operation"`
+	Channel        string             `json:"channel"`
+	Outcome        string             `json:"outcome"`
+	StatusClass    string             `json:"status_class"`
+	ErrorCode      string             `json:"error_code"`
+	ElapsedMs      int64              `json:"elapsed_ms"`
+	AttemptedAt    pgtype.Timestamptz `json:"attempted_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	QuotaRemaining pgtype.Int8        `json:"quota_remaining"`
+	RetryAfterMs   pgtype.Int8        `json:"retry_after_ms"`
+	SyncLagMs      pgtype.Int8        `json:"sync_lag_ms"`
+	ConnectionID   pgtype.Text        `json:"connection_id"`
+}
+
+type ConnectorConnection struct {
+	ID               string             `json:"id"`
+	OrgID            string             `json:"org_id"`
+	Provider         string             `json:"provider"`
+	InstallationID   string             `json:"installation_id"`
+	InstallationName string             `json:"installation_name"`
+	Status           string             `json:"status"`
+	Scopes           json.RawMessage    `json:"scopes"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ConnectorSyncState struct {
+	ID               string             `json:"id"`
+	OrgID            string             `json:"org_id"`
+	ConnectionID     string             `json:"connection_id"`
+	Operation        string             `json:"operation"`
+	State            string             `json:"state"`
+	CursorCiphertext string             `json:"cursor_ciphertext"`
+	CursorVersion    int64              `json:"cursor_version"`
+	AttemptCount     int64              `json:"attempt_count"`
+	LastStartedAt    pgtype.Timestamptz `json:"last_started_at"`
+	LastCompletedAt  pgtype.Timestamptz `json:"last_completed_at"`
+	LastSuccessAt    pgtype.Timestamptz `json:"last_success_at"`
+	LastErrorCode    string             `json:"last_error_code"`
+	LastSyncLagMs    pgtype.Int8        `json:"last_sync_lag_ms"`
+	NextRunAt        pgtype.Timestamptz `json:"next_run_at"`
+	LeaseOwner       string             `json:"lease_owner"`
+	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Event struct {
@@ -105,10 +233,16 @@ type EventsDefault struct {
 }
 
 type ExportLog struct {
-	Tbl        string             `json:"tbl"`
-	Day        pgtype.Date        `json:"day"`
-	ExportedAt pgtype.Timestamptz `json:"exported_at"`
-	RowCount   int64              `json:"row_count"`
+	Tbl             string             `json:"tbl"`
+	Day             pgtype.Date        `json:"day"`
+	ExportedAt      pgtype.Timestamptz `json:"exported_at"`
+	RowCount        int64              `json:"row_count"`
+	Status          string             `json:"status"`
+	AttemptedAt     pgtype.Timestamptz `json:"attempted_at"`
+	ExportedBytes   int64              `json:"exported_bytes"`
+	BytesKnown      bool               `json:"bytes_known"`
+	ExportLatencyMs int64              `json:"export_latency_ms"`
+	ErrorCode       string             `json:"error_code"`
 }
 
 type GithubConfig struct {
@@ -116,6 +250,26 @@ type GithubConfig struct {
 	Repo      string             `json:"repo"`
 	Token     string             `json:"token"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type IngestReceipt struct {
+	ID             string             `json:"id"`
+	RequestID      pgtype.Text        `json:"request_id"`
+	OrgID          string             `json:"org_id"`
+	ProjectID      string             `json:"project_id"`
+	Pillar         string             `json:"pillar"`
+	Protocol       string             `json:"protocol"`
+	ReceivedCount  int64              `json:"received_count"`
+	AcceptedCount  int64              `json:"accepted_count"`
+	RejectedCount  int64              `json:"rejected_count"`
+	DroppedCount   int64              `json:"dropped_count"`
+	PersistedCount int64              `json:"persisted_count"`
+	Outcome        string             `json:"outcome"`
+	HttpStatus     int16              `json:"http_status"`
+	Retryable      bool               `json:"retryable"`
+	ReceivedAt     pgtype.Timestamptz `json:"received_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
 type Invitation struct {
@@ -212,6 +366,21 @@ type Monitor struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type NativeSymbolArtifact struct {
+	ID               string             `json:"id"`
+	ProjectID        string             `json:"project_id"`
+	OrgID            string             `json:"org_id"`
+	Release          string             `json:"release"`
+	Platform         string             `json:"platform"`
+	Format           string             `json:"format"`
+	Name             string             `json:"name"`
+	Digest           string             `json:"digest"`
+	Size             int64              `json:"size"`
+	Content          []byte             `json:"content"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ValidationStatus string             `json:"validation_status"`
+}
+
 type NotificationChannel struct {
 	ID            string             `json:"id"`
 	OrgID         string             `json:"org_id"`
@@ -276,11 +445,13 @@ type Project struct {
 }
 
 type Release struct {
-	ID        string             `json:"id"`
-	ProjectID string             `json:"project_id"`
-	OrgID     string             `json:"org_id"`
-	Version   string             `json:"version"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID              string             `json:"id"`
+	ProjectID       string             `json:"project_id"`
+	OrgID           string             `json:"org_id"`
+	Version         string             `json:"version"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	DeployMarkedAt  pgtype.Timestamptz `json:"deploy_marked_at"`
+	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
 }
 
 type Session struct {
@@ -290,13 +461,14 @@ type Session struct {
 }
 
 type SourceMapArtifact struct {
-	ID        string             `json:"id"`
-	ProjectID string             `json:"project_id"`
-	OrgID     string             `json:"org_id"`
-	Release   string             `json:"release"`
-	Name      string             `json:"name"`
-	Content   string             `json:"content"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID          string             `json:"id"`
+	ProjectID   string             `json:"project_id"`
+	OrgID       string             `json:"org_id"`
+	Release     string             `json:"release"`
+	Name        string             `json:"name"`
+	Content     string             `json:"content"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ParseStatus string             `json:"parse_status"`
 }
 
 type Span struct {
@@ -327,6 +499,19 @@ type SpansDefault struct {
 	EndTime      pgtype.Timestamptz `json:"end_time"`
 	DurationMs   float64            `json:"duration_ms"`
 	Attributes   []byte             `json:"attributes"`
+}
+
+type UsageBucket struct {
+	OrgID        string             `json:"org_id"`
+	ProjectID    string             `json:"project_id"`
+	CredentialID string             `json:"credential_id"`
+	Surface      string             `json:"surface"`
+	Operation    string             `json:"operation"`
+	BucketStart  pgtype.Timestamptz `json:"bucket_start"`
+	RequestCount int64              `json:"request_count"`
+	ErrorCount   int64              `json:"error_count"`
+	DeniedCount  int64              `json:"denied_count"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type User struct {

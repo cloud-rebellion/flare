@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,7 @@ func InitFlare(service, release string) bool {
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		Release:          release,
+		Environment:      flareEnvironment(),
 		ServerName:       service,
 		EnableTracing:    true,
 		TracesSampleRate: tracesSampleRate(),
@@ -89,6 +91,17 @@ func InitFlare(service, release string) bool {
 	return true
 }
 
+// flareEnvironment mirrors config.Load's ENVIRONMENT default so Flare's own
+// startup and request signals retain an explicit environment dimension even
+// when a local process has not set the variable. Keep this separate from the
+// release: one immutable build may legitimately run in staging and production.
+func flareEnvironment() string {
+	if value := strings.TrimSpace(os.Getenv("ENVIRONMENT")); value != "" {
+		return value
+	}
+	return "development"
+}
+
 // FlareRecoverer captures panics to Flare and re-panics so the existing
 // recovery middleware (chi Recoverer) still renders the 500. Mount it AFTER
 // Recoverer in the chain so it sees the panic first. Safe to mount when
@@ -116,4 +129,11 @@ func CaptureErr(err error) {
 		return
 	}
 	sentry.CaptureException(err)
+}
+
+// Flush drains the SDK queue during graceful shutdown. A true result means
+// the local queue drained before the deadline; it does not prove Flare's
+// ingest worker durably accepted every envelope.
+func Flush(timeout time.Duration) bool {
+	return sentry.Flush(timeout)
 }

@@ -8,13 +8,18 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/bright-interaction/flare/internal/flarereport"
+	"github.com/bright-interaction/flare/internal/metrics"
 )
 
 // Routes builds the full HTTP handler: middleware stack, JSON API, and the
 // embedded SPA fallback.
 func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
+	httpMetrics := metrics.Default
 	r.Use(chimw.RequestID)
+	r.Use(httpMetrics.Middleware(func(req *http.Request) string {
+		return chi.RouteContext(req.Context()).RoutePattern()
+	}))
 	// Trusted-proxy-aware client IP: only honor X-Forwarded-For from an internal
 	// proxy peer, so a public client cannot spoof it to dodge the login lockout
 	// or ingest rate limit. Replaces chimw.RealIP (unconditional header trust).
@@ -25,6 +30,17 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 	r.Use(flarereport.FlareRecoverer)
 	r.Use(securityHeaders(cspForBuild(build)))
 	r.Use(s.sessions.LoadAndSave)
+	// This endpoint is intentionally unauthenticated for Prometheus scrapers;
+	// bind it to a private listener or protect it at the reverse proxy. It only
+	// exposes bounded route/integration/ingest counters and never tenant data.
+	r.Get("/metrics", httpMetrics.Handler().ServeHTTP)
+	// Liveness is dependency-free; readiness includes bounded database,
+	// analytics, retention, and worker-pool state. Keep the aliases outside the
+	// authenticated /api router so load balancers and orchestrators can probe
+	// them without a session.
+	r.Get("/livez", s.handleLive)
+	r.Get("/readyz", s.handleReady)
+	r.Get("/healthz", s.handleReady)
 
 	ccsrf := conditionalCSRF(csrfMW)
 
@@ -44,6 +60,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 			r.Post("/{projectID}/events", s.handleStore)
 			r.Post("/{projectID}/logs", s.handleNativeLogs)
 			r.Post("/{projectID}/metrics", s.handleNativeMetrics)
+			r.Post("/{projectID}/connector-attempts", s.handleConnectorAttempt)
 			// Cron/job check-in: DSN-authed like ingest. GET too, so a bare
 			// `curl` from a cron works; ?status=error marks the run failed.
 			r.Post("/{projectID}/checkins/{slug}", s.handleCheckin)
@@ -92,15 +109,33 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/traces/{traceID}", s.handleGetTrace)
 				r.Get("/projects/{id}/analytics/log-volume", s.handleLogVolume)
 				r.Get("/projects/{id}/analytics/span-latency", s.handleSpanLatency)
+				r.Get("/projects/{id}/analytics/service-level", s.handleServiceLevel)
 				r.Get("/projects/{id}/metrics", s.handleListMetrics)
 				r.Get("/projects/{id}/metrics/query", s.handleQueryMetric)
 				r.Get("/projects/{id}/alert-rules", s.handleListAlertRules)
 				r.Get("/projects/{id}/monitors", s.handleListMonitors)
 				r.Get("/projects/{id}/artifacts", s.handleListSourceMaps)
+				r.Get("/projects/{id}/symbol-artifacts", s.handleListNativeSymbolArtifacts)
+				r.Get("/projects/{id}/native-symbol-health", s.handleListNativeSymbolHealth)
 				r.Get("/projects/{id}/releases", s.handleListReleases)
+				r.Get("/projects/{id}/release-health", s.handleListReleaseHealth)
+				r.Get("/projects/{id}/release-freshness", s.handleListReleaseFreshness)
+				r.Get("/projects/{id}/symbolication-health", s.handleListReleaseSymbolicationHealth)
+				r.Get("/projects/{id}/client-health", s.handleListClientHealth)
+				r.Get("/projects/{id}/connector-health", s.handleListProjectConnectorHealth)
+				r.Get("/projects/{id}/connector-quota-health", s.handleListProjectConnectorQuotaHealth)
+				r.Get("/projects/{id}/ingest-receipts", s.handleListIngestReceipts)
+				r.Get("/projects/{id}/ai-receipts", s.handleListAIActionReceipts)
+				r.Get("/projects/{id}/automation-receipts", s.handleListAutomationReceipts)
+				r.Get("/projects/{id}/automation-next", s.handleGetAutomationNext)
+				r.Get("/usage", s.handleListUsage)
 				r.Get("/issues/{id}", s.handleGetIssue)
 				r.Get("/issues/{id}/events", s.handleListIssueEvents)
 				r.Get("/channels", s.handleListChannels)
+				r.Get("/connector-health", s.handleListConnectorHealth)
+				r.Get("/connector-quota-health", s.handleListConnectorQuotaHealth)
+				r.Get("/connector-sync-health", s.handleListConnectorSyncHealth)
+				r.Get("/analytics-health", s.handleAnalyticsHealth)
 				r.Get("/keys", s.handleListAPIKeys)
 				r.Get("/members", s.handleListMembers)
 				r.Get("/integrations/github", s.handleGetGithubConfig)
@@ -118,9 +153,13 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Delete("/monitors/{id}", s.handleDeleteMonitor)
 					r.Post("/projects/{id}/artifacts", s.handleUploadSourceMap)
 					r.Delete("/projects/{id}/artifacts/{artifactID}", s.handleDeleteSourceMap)
+					r.Post("/projects/{id}/symbol-artifacts", s.handleUploadNativeSymbolArtifact)
+					r.Delete("/projects/{id}/symbol-artifacts/{artifactID}", s.handleDeleteNativeSymbolArtifact)
 					r.Post("/projects/{id}/releases", s.handleCreateRelease)
 					r.Patch("/issues/{id}", s.handleUpdateIssueStatus)
 					r.Post("/issues/{id}/triage", s.handleTriageIssue)
+					r.Post("/projects/{id}/automation-claims", s.handleCreateAutomationClaim)
+					r.Post("/projects/{id}/automation-receipts", s.handleCreateAutomationReceipt)
 					r.Post("/channels", s.handleCreateChannel)
 					r.Post("/channels/{id}/test", s.handleTestChannel)
 					r.Patch("/channels/{id}", s.handleUpdateChannel)
@@ -176,6 +215,17 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Get("/integrations/ai", s.handleGetAIConfig)
 					r.Put("/integrations/ai", s.handleSetAIConfig)
 					r.Delete("/integrations/ai", s.handleDeleteAIConfig)
+					// Connector credentials are encrypted at rest and never returned.
+					// Keep the whole registry behind admin: a member may observe
+					// connector health, but only an administrator can alter provider
+					// installation metadata or rotate a credential.
+					r.Get("/connector-connections", s.handleListConnectorConnections)
+					r.Post("/connector-connections", s.handleCreateConnectorConnection)
+					r.Get("/connector-connections/{id}", s.handleGetConnectorConnection)
+					r.Patch("/connector-connections/{id}", s.handleUpdateConnectorConnection)
+					r.Delete("/connector-connections/{id}", s.handleDeleteConnectorConnection)
+					r.Post("/connector-connections/{id}/check", s.handleCheckConnectorConnection)
+					r.Post("/connector-connections/{id}/sync", s.handleRunConnectorSync)
 				})
 
 				// Owner only.
