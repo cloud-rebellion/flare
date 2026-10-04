@@ -95,10 +95,18 @@ func TestHubSpotOAuthConsentRefreshAndRevokeDB(t *testing.T) {
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("cross-org start=%d", bad.Code)
 	}
+	var startAuditCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE org_id=$1 AND action='connector.oauth_start'`, project.OrgID).Scan(&startAuditCount); err != nil || startAuditCount != 0 {
+		t.Fatalf("rejected OAuth start wrote audit row: count=%d err=%v", startAuditCount, err)
+	}
 	started := httptest.NewRecorder()
 	s.handleHubSpotOAuthStart(started, request(project.ID))
 	if started.Code != http.StatusOK {
 		t.Fatalf("start=%d %s", started.Code, started.Body.String())
+	}
+	var auditActor, auditTarget string
+	if err := pool.QueryRow(ctx, `SELECT actor_user_id,target FROM audit_log WHERE org_id=$1 AND action='connector.oauth_start'`, project.OrgID).Scan(&auditActor, &auditTarget); err != nil || auditActor != userID || auditTarget != project.ID {
+		t.Fatalf("OAuth start audit attribution: actor=%q target=%q err=%v", auditActor, auditTarget, err)
 	}
 	var startBody struct {
 		AuthorizationURL string `json:"authorization_url"`
@@ -191,11 +199,11 @@ func TestHubSpotOAuthConsentRefreshAndRevokeDB(t *testing.T) {
 	// The generic admin PATCH surface must not transform the OAuth grant into
 	// another provider or change its bound account/project/scopes/credential.
 	for name, body := range map[string]string{
-		"provider":     `{"provider":"github"}`,
-		"installation": `{"installation_id":"another-account"}`,
-		"project":      `{"project_id":"` + secondProject.ID + `"}`,
-		"credential":   `{"secret":"manual-token"}`,
-		"scopes":       `{"scopes":["crm.objects.contacts.read"]}`,
+		"provider":      `{"provider":"github"}`,
+		"installation":  `{"installation_id":"another-account"}`,
+		"project":       `{"project_id":"` + secondProject.ID + `"}`,
+		"credential":    `{"secret":"manual-token"}`,
+		"scopes":        `{"scopes":["crm.objects.contacts.read"]}`,
 		"revoke-status": `{"status":"revoked"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -310,5 +318,47 @@ func TestHubSpotOAuthConsentRefreshAndRevokeDB(t *testing.T) {
 	var remaining int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM connector_connections WHERE id=$1`, connectionID).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("connection remains=%d err=%v", remaining, err)
+	}
+}
+
+func TestHubSpotOAuthStartRollsBackWhenAuditUnavailableDB(t *testing.T) {
+	pool := newTestDB(t)
+	ctx := context.Background()
+	project := seedProjectForIngest(t, pool)
+	userID := id.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users(id,org_id,email,password_hash,role) VALUES($1,$2,$3,'test','admin')`, userID, project.OrgID, userID+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	s := serverForDB(pool)
+	s.secrets = secretbox.New("oauth-audit-test-key")
+	s.cfg = config.Config{Environment: "production", BaseURL: "https://flare.example"}
+	s.hubspotOAuth = hubspot.OAuthClient{ClientID: "test-client-id", ClientSecret: "test-client-secret", RedirectURI: "https://flare.example/api/connectors/hubspot/callback"}
+	request := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/api/connectors/hubspot/start", strings.NewReader(`{"project_id":"`+project.ID+`"}`))
+		cx := context.WithValue(context.WithValue(context.WithValue(req.Context(), ctxOrgID, project.OrgID), ctxUserID, userID), ctxAuthSource, "session")
+		return req.WithContext(cx)
+	}
+	first := httptest.NewRecorder()
+	s.handleHubSpotOAuthStart(first, request())
+	if first.Code != http.StatusOK {
+		t.Fatalf("baseline OAuth start = %d %s", first.Code, first.Body.String())
+	}
+	var before int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM hubspot_oauth_transactions`).Scan(&before); err != nil || before != 1 {
+		t.Fatalf("baseline pending state: count=%d err=%v", before, err)
+	}
+	// A missing audit table simulates a failed durable audit write. A usable
+	// consent URL/cookie must never escape while its state lacks attribution.
+	if _, err := pool.Exec(ctx, `ALTER TABLE audit_log RENAME TO audit_log_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	failed := httptest.NewRecorder()
+	s.handleHubSpotOAuthStart(failed, request())
+	if failed.Code != http.StatusServiceUnavailable || len(failed.Result().Cookies()) != 0 || strings.Contains(failed.Body.String(), "authorization_url") {
+		t.Fatalf("unattributed OAuth start escaped: status=%d cookies=%d body=%s", failed.Code, len(failed.Result().Cookies()), failed.Body.String())
+	}
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM hubspot_oauth_transactions`).Scan(&after); err != nil || after != before {
+		t.Fatalf("failed audit retained pending state: before=%d after=%d err=%v", before, after, err)
 	}
 }

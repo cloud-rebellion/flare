@@ -37,13 +37,16 @@ var exemptFromAudit = map[string]string{
 	"handleLogout":            "ends the caller's own session, no state another member can observe",
 }
 
-// Business key mutations commit the audit row in the same transaction as the
-// credential change. Their DB tests also prove that an unavailable audit table
-// rolls the mutation back. Keep these action names pinned here so the guard
-// cannot mistake an unrelated InsertAuditLog call for the required record.
-var transactionalAuditActions = map[string]string{
-	"handleCreateBusinessCheckKey": "business_key.create",
-	"handleRevokeBusinessCheckKey": "business_key.revoke",
+// These security state mutations commit an audit row in the same transaction.
+// Their DB tests prove that an unavailable audit table rolls the mutation back.
+// Pin actor, scope and target so an unrelated InsertAuditLog cannot satisfy the
+// route guard.
+var transactionalAuditActions = map[string]struct {
+	action, org, actor, target, commit string
+}{
+	"handleCreateBusinessCheckKey": {"business_key.create", "project.OrgID", "businessKeyAuditActor(r.Context())", "project.ID +", "tx.Commit("},
+	"handleRevokeBusinessCheckKey": {"business_key.revoke", "project.OrgID", "businessKeyAuditActor(r.Context())", "project.ID +", "tx.Commit("},
+	"handleHubSpotOAuthStart":      {"connector.oauth_start", "orgIDFrom(r.Context())", "pgText(userIDFrom(r.Context()))", "req.ProjectID", "dbtx.Commit("},
 }
 
 // Receipt verification delegates the mutation to a helper that commits its
@@ -99,14 +102,14 @@ func TestMutatingRoleGatedRoutesAreAudited(t *testing.T) {
 			t.Errorf("%s is routed but its definition was not found; this guard cannot see it", name)
 			continue
 		}
-		if action, transactional := transactionalAuditActions[name]; transactional {
+		if rule, transactional := transactionalAuditActions[name]; transactional {
 			for _, required := range []string{
-				"qtx.InsertAuditLog(", `Action: "` + action + `"`,
-				"OrgID: project.OrgID", "ActorUserID: businessKeyAuditActor(r.Context())",
-				"Target: project.ID +", "tx.Commit(",
+				"qtx.InsertAuditLog(", `Action: "` + rule.action + `"`,
+				"OrgID: " + rule.org, "ActorUserID: " + rule.actor,
+				"Target: " + rule.target, rule.commit,
 			} {
 				if !strings.Contains(body, required) {
-					t.Errorf("%s must commit its %q audit row in the mutation transaction; missing %q", name, action, required)
+					t.Errorf("%s must commit its %q audit row in the mutation transaction; missing %q", name, rule.action, required)
 				}
 			}
 			continue

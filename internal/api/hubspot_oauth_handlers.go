@@ -84,11 +84,35 @@ func (s *Server) handleHubSpotOAuthStart(w http.ResponseWriter, r *http.Request)
 	// Bounded, opportunistic cleanup; consumed and expired state carries no
 	// credential and has no reason to persist after the retry window.
 	_, _ = s.pool.Exec(r.Context(), `DELETE FROM hubspot_oauth_transactions WHERE expires_at < now() - interval '1 day'`)
-	_, err = s.pool.Exec(r.Context(), `INSERT INTO hubspot_oauth_transactions
+	dbtx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "HubSpot OAuth is unavailable")
+		return
+	}
+	defer func() {
+		cleanup, done := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+		defer done()
+		_ = dbtx.Rollback(cleanup)
+	}()
+	_, err = dbtx.Exec(r.Context(), `INSERT INTO hubspot_oauth_transactions
         (state_hash, cookie_hash, org_id, user_id, project_id, expires_at)
         VALUES ($1,$2,$3,$4,$5,now()+interval '10 minutes')`,
 		stateHash[:], cookieHash[:], orgIDFrom(r.Context()), userIDFrom(r.Context()), req.ProjectID)
 	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "HubSpot OAuth is unavailable")
+		return
+	}
+	// Starting a consent flow changes durable security state. Keep the audit
+	// row in the same transaction, and never record the state, cookie or URL.
+	qtx := generated.New(dbtx)
+	if err := qtx.InsertAuditLog(r.Context(), generated.InsertAuditLogParams{
+		ID: id.New(), OrgID: orgIDFrom(r.Context()), ActorUserID: pgText(userIDFrom(r.Context())),
+		Action: "connector.oauth_start", Target: req.ProjectID,
+	}); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "HubSpot OAuth is unavailable")
+		return
+	}
+	if err := dbtx.Commit(r.Context()); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "HubSpot OAuth is unavailable")
 		return
 	}
