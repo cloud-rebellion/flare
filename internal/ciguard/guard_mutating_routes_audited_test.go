@@ -13,10 +13,14 @@ package ciguard
 // resource that WAS recorded is the least sensitive one.
 //
 // So the rule is enforced rather than remembered: a non-GET route registered
-// inside a requireRole group either calls s.audit, or appears in the exemption
-// table below with a reason. Adding a route makes the build tell you which.
+// inside a requireRole group either calls s.audit, writes a transactional
+// InsertAuditLog row, or appears in the exemption table below with a reason.
+// Adding a route makes the build tell you which.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"regexp"
 	"strings"
@@ -33,10 +37,28 @@ var exemptFromAudit = map[string]string{
 	"handleLogout":            "ends the caller's own session, no state another member can observe",
 }
 
+// Business key mutations commit the audit row in the same transaction as the
+// credential change. Their DB tests also prove that an unavailable audit table
+// rolls the mutation back. Keep these action names pinned here so the guard
+// cannot mistake an unrelated InsertAuditLog call for the required record.
+var transactionalAuditActions = map[string]string{
+	"handleCreateBusinessCheckKey": "business_key.create",
+	"handleRevokeBusinessCheckKey": "business_key.revoke",
+}
+
+// Receipt verification delegates the mutation to a helper that commits its
+// proof, status change and audit row together. Pin both sides of the call so a
+// route cannot borrow an unrelated helper's audit statement.
+var delegatedTransactionalAuditActions = map[string]struct {
+	helper string
+	action string
+}{
+	"handleVerifyAutomationReceipt": {"promoteStageReceipt", "automation.receipt.verify"},
+}
+
 var (
 	reRequireRole = regexp.MustCompile(`requireRole\("(\w+)"\)`)
 	reMutating    = regexp.MustCompile(`r\.(Post|Put|Patch|Delete)\("[^"]*",\s*s\.(\w+)\)`)
-	reHandlerFunc = regexp.MustCompile(`func \(s \*Server\) (\w+)\(w http\.ResponseWriter, r \*http\.Request\)`)
 )
 
 func TestMutatingRoleGatedRoutesAreAudited(t *testing.T) {
@@ -77,17 +99,43 @@ func TestMutatingRoleGatedRoutesAreAudited(t *testing.T) {
 			t.Errorf("%s is routed but its definition was not found; this guard cannot see it", name)
 			continue
 		}
+		if action, transactional := transactionalAuditActions[name]; transactional {
+			for _, required := range []string{
+				"qtx.InsertAuditLog(", `Action: "` + action + `"`,
+				"OrgID: project.OrgID", "ActorUserID: businessKeyAuditActor(r.Context())",
+				"Target: project.ID +", "tx.Commit(",
+			} {
+				if !strings.Contains(body, required) {
+					t.Errorf("%s must commit its %q audit row in the mutation transaction; missing %q", name, action, required)
+				}
+			}
+			continue
+		}
+		if delegated, transactional := delegatedTransactionalAuditActions[name]; transactional {
+			helperBody, found := bodies[delegated.helper]
+			if !found || !strings.Contains(body, "s."+delegated.helper+"(") {
+				t.Errorf("%s does not call transactional audit helper %s", name, delegated.helper)
+				continue
+			}
+			for _, required := range []string{
+				"INSERT INTO audit_log", `"` + delegated.action + `"`, "b.OrgID", "tx.Commit(ctx)",
+			} {
+				if !strings.Contains(helperBody, required) {
+					t.Errorf("%s helper %s must commit scoped %q audit row; missing %q", name, delegated.helper, delegated.action, required)
+				}
+			}
+			continue
+		}
 		if !strings.Contains(body, "s.audit(") {
 			t.Errorf("%s mutates inside a requireRole group and writes no audit row.\n"+
-				"Add s.audit(ctx, \"<resource>.<verb>\", target), or add it to exemptFromAudit "+
+				"Add s.audit(ctx, \"<resource>.<verb>\", target), use a checked transactional audit, or add it to exemptFromAudit "+
 				"with a reason.", name)
 		}
 	}
 }
 
-// TestAuditExemptionsAreStillRouted keeps the exemption table from rotting: an
-// entry for a handler that no longer exists is a comment pretending to be a
-// control.
+// Keep exception and transactional-audit entries from rotting: a row for a
+// handler that no longer exists is a comment pretending to be a control.
 func TestAuditExemptionsAreStillRouted(t *testing.T) {
 	bodies, err := handlerBodies("../api")
 	if err != nil {
@@ -98,10 +146,24 @@ func TestAuditExemptionsAreStillRouted(t *testing.T) {
 			t.Errorf("exemptFromAudit lists %s, which no longer exists", name)
 		}
 	}
+	for name := range transactionalAuditActions {
+		if _, ok := bodies[name]; !ok {
+			t.Errorf("transactionalAuditActions lists %s, which no longer exists", name)
+		}
+	}
+	for name, delegated := range delegatedTransactionalAuditActions {
+		if _, ok := bodies[name]; !ok {
+			t.Errorf("delegatedTransactionalAuditActions lists %s, which no longer exists", name)
+		}
+		if _, ok := bodies[delegated.helper]; !ok {
+			t.Errorf("delegatedTransactionalAuditActions lists missing helper %s", delegated.helper)
+		}
+	}
 }
 
-// handlerBodies maps handler name -> source text, split on the next top-level
-// func so a body cannot borrow its neighbour's audit call.
+// handlerBodies maps server methods to their own source text. Parsing the Go
+// declarations prevents a handler from borrowing a neighbouring method's
+// audit statement (including non-HTTP helpers in the same file).
 func handlerBodies(dir string) (map[string]string, error) {
 	out := map[string]string{}
 	entries, err := os.ReadDir(dir)
@@ -116,15 +178,26 @@ func handlerBodies(dir string) (map[string]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		src := string(raw)
-		locs := reHandlerFunc.FindAllStringSubmatchIndex(src, -1)
-		for i, loc := range locs {
-			name := src[loc[2]:loc[3]]
-			end := len(src)
-			if i+1 < len(locs) {
-				end = locs[i+1][0]
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, e.Name(), raw, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		for _, declaration := range file.Decls {
+			method, ok := declaration.(*ast.FuncDecl)
+			if !ok || method.Recv == nil || method.Body == nil || len(method.Recv.List) != 1 {
+				continue
 			}
-			out[name] = src[loc[0]:end]
+			receiver, ok := method.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			typeName, ok := receiver.X.(*ast.Ident)
+			if !ok || typeName.Name != "Server" {
+				continue
+			}
+			start, end := fset.Position(method.Pos()).Offset, fset.Position(method.End()).Offset
+			out[method.Name.Name] = string(raw[start:end])
 		}
 	}
 	return out, nil
