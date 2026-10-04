@@ -103,6 +103,83 @@ test('a realtime browser error sends opaque stack assets and a templated page', 
 	}
 });
 
+test('Flare dashboard canary sends one fixed handled error per Window and ignores event detail', async () => {
+	const saved = Object.fromEntries(['window', 'location', 'navigator', 'document'].map((key) =>
+		[key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+	const beacons = [];
+	const options = { dsn: 'https://public@flare.example/1', release: 'flare-v1+g' + 'a'.repeat(40) };
+	try {
+		Object.defineProperty(globalThis, 'location', { configurable: true, value: {
+			href: 'https://flare.example.com/issues/private-token?code=private',
+			pathname: '/issues/private-token', origin: 'https://flare.example.com'
+		} });
+		Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+			sendBeacon: (_url, body) => { beacons.push(body); return true; }
+		} });
+		Object.defineProperty(globalThis, 'document', { configurable: true, value: { scripts: [] } });
+		const firstPage = new EventTarget();
+		Object.defineProperty(globalThis, 'window', { configurable: true, value: firstPage });
+		const stop = installFlareBrowserCapture(options);
+		const untrustedEvent = new Event('flare:browser-canary');
+		Object.defineProperty(untrustedEvent, 'detail', { value: { error: new Error('private detail'), message: 'private detail' } });
+		firstPage.dispatchEvent(untrustedEvent);
+		firstPage.dispatchEvent(new Event('flare:browser-canary'));
+		stop();
+		const stopAgain = installFlareBrowserCapture(options);
+		firstPage.dispatchEvent(new Event('flare:browser-canary'));
+		stopAgain();
+
+		const secondPage = new EventTarget();
+		Object.defineProperty(globalThis, 'window', { configurable: true, value: secondPage });
+		const stopSecond = installFlareBrowserCapture(options);
+		secondPage.dispatchEvent(new Event('flare:browser-canary'));
+		stopSecond();
+		for (let i = 0; i < 20 && beacons.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+
+		expect(beacons).toHaveLength(2);
+		const payloads = await Promise.all(beacons.map(async (body) => JSON.parse(await body.text())));
+		for (const event of payloads) {
+			expect(event.message).toBe('Flare dashboard browser source-map canary v1');
+			expect(event.exception.values[0].type).toBe('FlareBrowserCanary');
+			expect(event.exception.values[0].stacktrace.frames.length).toBeGreaterThan(0);
+			expect(event.request.url).toBe('https://flare.example.com/issues/:id');
+			expect(event.release).toBe(options.release);
+			expect(JSON.stringify(event)).not.toContain('private detail');
+			expect(JSON.stringify(event)).not.toContain('private-token');
+		}
+	} finally {
+		for (const [key, descriptor] of Object.entries(saved)) {
+			if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+			else Reflect.deleteProperty(globalThis, key);
+		}
+	}
+});
+
+test('opaque canary frame names bind separately to both Flare UI origins', async () => {
+	const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+	const path = '/_app/immutable/chunks/flare-client.AbCdEf12.js';
+	const expected = new Map([
+		['https://flare.example.com', 'd2a5b95789d6daa85affc0397db3fc493cf05f03d69691f5a6c459d6ec252f98'],
+		['https://flare.cloudrebellion.tech', 'ba315c703edd5100009d30a1212134c38936e7fafa795386dc8c5013e8d54caa']
+	]);
+	try {
+		for (const [origin, hash] of expected) {
+			const script = `${origin}${path}`;
+			Object.defineProperty(globalThis, 'document', { configurable: true, value: { scripts: [{ src: script }, { src: `${script}?v=1` }] } });
+			const opaque = `flare-asset-sha256:${hash}`;
+			expect(await flareBrowserAssetName(script, origin)).toBe(opaque);
+			expect(await flareBrowserAssetName(`${script}?v=1#fragment`, origin)).toBe(opaque);
+			expect(sourceMapNameForURL(script)).toBe(opaque);
+			expect(await flareBrowserAssetName(`${origin}/_app/immutable/chunks/forged.AbCdEf12.js`, origin)).toBeUndefined();
+			expect(await flareBrowserAssetName(script, [...expected.keys()].find((other) => other !== origin))).toBeUndefined();
+			expect(opaque).not.toContain('flare-client');
+		}
+	} finally {
+		if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument);
+		else Reflect.deleteProperty(globalThis, 'document');
+	}
+});
+
 test('dynamic imports use script resource evidence, not arbitrary fetches', async () => {
 	const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
 	const savedPerformance = Object.getOwnPropertyDescriptor(globalThis, 'performance');
