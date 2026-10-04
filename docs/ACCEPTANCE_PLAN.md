@@ -75,9 +75,9 @@ sampling did not prove an active Flare DSN or event receipt. Their app builds
 also lack a demonstrated private-map artifact and most Compose releases still
 default to `development`; each app needs exact build-time release injection,
 private map delivery, and an event and bundled-frame resolution canary on its
-own product branch. Bright Hub (`portal`) is the first candidate because it has
-a managed deployment and rollback, but its Stage `NoFlareProject` setting
-must be reconciled before promotion. A
+own product branch. Choose the first pilot from the currently operated app
+inventory; Bright Hub (`portal`) was previously marked discarded and must be
+revalidated before any rollout. A
 Flutter starter has framework, zone, platform, HTTP, frame, and metric hooks,
 but no production Flutter app repository or Dart/Flutter build has been
 selected. Backend DSNs and provider connections still need deployed
