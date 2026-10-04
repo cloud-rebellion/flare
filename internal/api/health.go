@@ -162,8 +162,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	}
 	status, code := readinessStatus(db.Healthy, analyticsConfigured, analyticsOK, policy)
 	queueHealth := healthAutomationOutbox{State: "unconfigured"}
-	if s.automationOutbox != nil && db.Healthy {
-		if stats, err := s.automationOutbox.Snapshot(ctx); err == nil {
+	if s.automationOutbox != nil {
+		if !db.Healthy {
+			queueHealth.State = "unavailable"
+		} else if stats, err := s.automationOutbox.Snapshot(ctx); err == nil {
 			queueHealth = healthAutomationOutbox{
 				State: "healthy", Pending: stats.Pending, Due: stats.Due,
 				Leased: stats.Leased, Dead: stats.Dead,

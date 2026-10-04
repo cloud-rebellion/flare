@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/flare/internal/automationoutbox"
 	"github.com/bright-interaction/flare/internal/config"
 )
 
@@ -70,7 +71,7 @@ func TestReadinessStatusSeparatesCoreAndOptionalFailures(t *testing.T) {
 }
 
 func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
-	srv := &Server{cfg: config.Config{RetentionDays: 14}}
+	srv := &Server{cfg: config.Config{RetentionDays: 14}, automationOutbox: automationoutbox.New(nil)}
 	rec := httptest.NewRecorder()
 	srv.handleReady(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -91,6 +92,9 @@ func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
 	}
 	if got.Queue.Mode != "bounded_drop" || got.Queue.Queued != 0 || got.Queue.Durable || !got.Queue.DropOnFull {
 		t.Fatalf("queue response = %#v, want explicit bounded drop mode", got.Queue)
+	}
+	if got.AutomationOutbox.State != "unavailable" {
+		t.Fatalf("automation outbox = %#v, want unavailable with database down", got.AutomationOutbox)
 	}
 	body := rec.Body.String()
 	for _, forbidden := range []string{"org_id", "project_id", "token", "payload", "secret"} {
