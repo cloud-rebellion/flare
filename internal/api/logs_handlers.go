@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -80,13 +81,10 @@ func (s *Server) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 // handleNativeLogs ingests a JSON array of log records (the thin SDK path).
 func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
-	var receipt *ingestReceipt
-	receiptStatus := http.StatusOK
 	requestOutcome := "rejected"
 	defer func() {
 		outcome.record("log")
 		recordIngestRequest("native", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -96,38 +94,61 @@ func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "logs", "native", &outcome, &requestOutcome, &receiptStatus)
-	if receipt == nil {
+	keyHash, err := nativeIngestKeyHash(r)
+	if err != nil {
+		outcome.invalid = 1
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	records, err := ingest.ParseNativeLogs(body)
 	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
+		if receipt := s.beginIngestReceipt(r.Context(), w, r, project, "logs", "native"); receipt != nil {
+			receipt.setReceived(1)
+			s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", http.StatusBadRequest)
+		}
 		writeErr(w, http.StatusBadRequest, "invalid logs payload")
 		return
 	}
-	receipt.setReceived(len(records))
-	requestOutcome = ""
-	budget := newIngestBudget()
-	if err := s.persistLogs(r.Context(), s.q, project, records, budget); err != nil {
-		outcome.invalid = uint64(budget.invalid)
-		outcome.dropped = uint64(budget.dropped)
-		// The persistence operation is all-or-nothing for this batch. Rows
-		// admitted by the budget were not durably accepted when it failed.
-		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+	receipt := newIngestReceipt(w, r, project, "logs", "native")
+	if receipt == nil || s.pool == nil {
+		outcome.failed = uint64(len(records))
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "persist logs", err)
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
-	outcome.accepted = uint64(len(records) - budget.rejected())
-	outcome.invalid = uint64(budget.invalid)
-	outcome.dropped = uint64(budget.dropped)
-	budget.report(project.ID, "logs")
+	receipt.setReceived(len(records))
+	budget := newIngestBudget()
+	result, replay, err := s.acceptNativeLogBatch(r.Context(), receipt, project, keyHash, nativeIngestPayloadHash(body), records, budget)
+	if err != nil {
+		if err == errNativeLogKeyConflict {
+			outcome.invalid = 1
+			writeErr(w, http.StatusConflict, "Idempotency-Key was already used for different log payload bytes")
+			return
+		}
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		outcome.failed = uint64(len(records) - budget.rejected())
+		requestOutcome = "failed"
+		w.Header().Set("Retry-After", "1")
+		slog.Error("native log acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
+		return
+	}
+	if replay {
+		w.Header().Set("Idempotency-Replayed", "true")
+		outcome.deduplicated = uint64(result.Accepted)
+	} else {
+		outcome.accepted = uint64(result.Accepted)
+		outcome.invalid = uint64(result.Invalid)
+		outcome.dropped = uint64(result.Dropped)
+		budget.report(project.ID, "logs")
+	}
+	requestOutcome = result.Outcome
 	// accepted is what was STORED, not what was posted: reporting the posted
 	// count after truncating would be the silent loss the cap must not introduce.
-	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.rejected()})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) persistLogs(ctx context.Context, q *generated.Queries, project *generated.Project, records []ingest.LogRecord, budget *ingestBudget) error {
@@ -155,8 +176,14 @@ func (s *Server) persistLogs(ctx context.Context, q *generated.Queries, project 
 			ObservedAt: pgtype.Timestamptz{Time: rec.ObservedAt, Valid: true},
 		})
 	}
-	_, err := q.InsertLogs(ctx, params)
-	return err
+	written, err := q.InsertLogs(ctx, params)
+	if err != nil {
+		return err
+	}
+	if written != int64(len(params)) {
+		return errors.New("log COPY count did not match prepared rows")
+	}
+	return nil
 }
 
 type logResponse struct {

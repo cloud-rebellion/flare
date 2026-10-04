@@ -168,6 +168,8 @@ func run() error {
 	// Native metric retry keys expire after seven days. Each replica removes a
 	// bounded batch of expired identities without touching retained receipts.
 	go srv.RunNativeMetricAcceptancePrune(ctx)
+	// Native log retry identities have the same bounded seven-day window.
+	go srv.RunNativeLogAcceptancePrune(ctx)
 
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.

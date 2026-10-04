@@ -31,7 +31,7 @@ type nativeMetricResult struct {
 // A missing key keeps older native senders working. A present key must be one
 // opaque token; neither its value nor the body is stored. Clients must reuse
 // both the token and exact serialized body bytes on an ambiguous retry.
-func nativeMetricKeyHash(r *http.Request) (string, error) {
+func nativeIngestKeyHash(r *http.Request) (string, error) {
 	values := r.Header.Values("Idempotency-Key")
 	if len(values) == 0 {
 		return "", nil
@@ -44,10 +44,14 @@ func nativeMetricKeyHash(r *http.Request) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func metricPayloadHash(body []byte) string {
+func nativeMetricKeyHash(r *http.Request) (string, error) { return nativeIngestKeyHash(r) }
+
+func nativeIngestPayloadHash(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
 }
+
+func metricPayloadHash(body []byte) string { return nativeIngestPayloadHash(body) }
 
 // acceptNativeMetricBatch is the 200 boundary. Metric COPY, terminal receipt,
 // and (when keyed) replay ledger enter one PostgreSQL transaction. A duplicate
