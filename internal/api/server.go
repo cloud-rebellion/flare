@@ -18,6 +18,7 @@ import (
 	"github.com/bright-interaction/flare/internal/ai"
 	"github.com/bright-interaction/flare/internal/alerts"
 	"github.com/bright-interaction/flare/internal/analytics"
+	"github.com/bright-interaction/flare/internal/automationoutbox"
 	"github.com/bright-interaction/flare/internal/config"
 	"github.com/bright-interaction/flare/internal/connectorcheck"
 	"github.com/bright-interaction/flare/internal/connectorsync"
@@ -52,6 +53,7 @@ type Server struct {
 	sessions           *scs.SessionManager
 	cfg                config.Config
 	dispatcher         *alerts.Dispatcher
+	automationOutbox   *automationoutbox.Store
 	mailer             *email.Mailer
 	symbolicator       *sourcemaps.Resolver
 	ai                 *ai.Client
@@ -332,6 +334,7 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 		sessions:                   sessions,
 		cfg:                        cfg,
 		dispatcher:                 alerts.NewDispatcher(mailer),
+		automationOutbox:           automationoutbox.New(pool),
 		mailer:                     mailer,
 		symbolicator:               sourcemaps.NewResolver(),
 		ai:                         ai.New(!allowPrivateAI),
@@ -454,7 +457,9 @@ func (s *Server) dispatchToProject(ctx context.Context, org, project string, n a
 	for _, c := range chans {
 		channels = append(channels, alerts.Channel{ID: c.ID, OrgID: c.OrgID, Type: c.Type, Config: s.decryptChannelConfig(c.Type, c.Config)})
 	}
-	s.dispatcher.Dispatch(ctx, channels, n)
+	if _, err := s.dispatchWithAutomationClaim(ctx, org, project, channels, n, nil); err != nil {
+		slog.Error("enqueue automation alert", "org_id", org, "project_id", project, "error", err)
+	}
 }
 func (s *Server) recordChannelDelivery(ctx context.Context, orgID, channelID string, derr error) {
 	// Detach from the dispatch context, which a prior slow/hung channel in the

@@ -103,6 +103,26 @@ type AuditLog struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type AutomationAlertOutbox struct {
+	ID            string             `json:"id"`
+	OrgID         string             `json:"org_id"`
+	ProjectID     string             `json:"project_id"`
+	ChannelID     pgtype.Text        `json:"channel_id"`
+	IssueID       string             `json:"issue_id"`
+	Event         string             `json:"event"`
+	EventCount    int64              `json:"event_count"`
+	ObservedAt    pgtype.Timestamptz `json:"observed_at"`
+	State         string             `json:"state"`
+	Attempts      int32              `json:"attempts"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	LeaseToken    string             `json:"lease_token"`
+	LeasedUntil   pgtype.Timestamptz `json:"leased_until"`
+	LastErrorCode string             `json:"last_error_code"`
+	DeliveredAt   pgtype.Timestamptz `json:"delivered_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type AutomationClaim struct {
 	ID             string             `json:"id"`
 	OrgID          string             `json:"org_id"`

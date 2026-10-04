@@ -102,22 +102,26 @@ func (s *Server) watchdogTick(ctx context.Context) {
 		// Cooldown dedup: claim the fire only once a notification will actually
 		// be dispatched. max(window, 60m) so a persisting condition pages once.
 		cooldown := time.Duration(maxInt32(rule.WindowMinutes, 60)) * time.Minute
-		claimed, err := s.q.TrySetAlertRuleFired(ctx, generated.TrySetAlertRuleFiredParams{
-			ID:          rule.ID,
-			OrgID:       rule.OrgID,
-			LastFiredAt: pgtype.Timestamptz{Time: now.Add(-cooldown), Valid: true},
-		})
-		if err != nil || claimed == 0 {
-			continue
-		}
-		s.dispatcher.Dispatch(ctx, channels, alerts.Notification{
+		claimed, err := s.dispatchWithAutomationClaim(ctx, rule.OrgID, rule.ProjectID, channels, alerts.Notification{
 			ProjectID:   rule.ProjectID,
 			ProjectName: rule.ProjectName,
 			Title:       rule.ProjectName,
 			Level:       "warning",
 			Reason:      reason,
 			URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/projects/" + rule.ProjectID,
+		}, func(q *generated.Queries) (int64, error) {
+			return q.TrySetAlertRuleFired(ctx, generated.TrySetAlertRuleFiredParams{
+				ID: rule.ID, OrgID: rule.OrgID,
+				LastFiredAt: pgtype.Timestamptz{Time: now.Add(-cooldown), Valid: true},
+			})
 		})
+		if err != nil {
+			slog.Error("watchdog: claim/queue failed", "rule_id", rule.ID, "error", err)
+			continue
+		}
+		if !claimed {
+			continue
+		}
 		slog.Info("watchdog: alert fired", "type", rule.Type, "project", rule.ProjectName, "reason", reason)
 	}
 
@@ -143,15 +147,6 @@ func (s *Server) checkMonitors(ctx context.Context, chanCache map[string][]alert
 		if len(channels) == 0 {
 			continue
 		}
-		claimed, err := s.q.TrySetMonitorMissing(ctx, generated.TrySetMonitorMissingParams{
-			ID:              m.ID,
-			OrgID:           m.OrgID,
-			LastAlertAt:     pgtype.Timestamptz{Time: now, Valid: true},
-			RenotifySeconds: monitorRenotifySeconds,
-		})
-		if err != nil || claimed == 0 {
-			continue
-		}
 		// Mirror the query's COALESCE: a monitor that has never checked in is
 		// measured from creation, and says so, rather than reporting a nonsense
 		// age off a zero-value timestamp.
@@ -160,14 +155,27 @@ func (s *Server) checkMonitors(ctx context.Context, chanCache map[string][]alert
 			since, reason = m.CreatedAt.Time, "Never checked in since it was created"
 		}
 		overdue := int64(now.Sub(since).Seconds())
-		s.dispatcher.Dispatch(ctx, channels, alerts.Notification{
+		claimed, err := s.dispatchWithAutomationClaim(ctx, m.OrgID, m.ProjectID, channels, alerts.Notification{
 			ProjectID:   m.ProjectID,
 			ProjectName: m.ProjectName,
 			Title:       "Monitor overdue: " + m.Slug,
 			Level:       "warning",
 			Reason:      fmt.Sprintf("%s: nothing for ~%ds (expected every %ds + %ds grace)", reason, overdue, m.IntervalSeconds, m.GraceSeconds),
 			URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/projects/" + m.ProjectID,
+		}, func(q *generated.Queries) (int64, error) {
+			return q.TrySetMonitorMissing(ctx, generated.TrySetMonitorMissingParams{
+				ID: m.ID, OrgID: m.OrgID,
+				LastAlertAt:     pgtype.Timestamptz{Time: now, Valid: true},
+				RenotifySeconds: monitorRenotifySeconds,
+			})
 		})
+		if err != nil {
+			slog.Error("watchdog: monitor claim/queue failed", "monitor_id", m.ID, "error", err)
+			continue
+		}
+		if !claimed {
+			continue
+		}
 		slog.Info("watchdog: monitor missing", "monitor", m.Slug, "project", m.ProjectName)
 	}
 }

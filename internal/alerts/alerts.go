@@ -44,15 +44,19 @@ type Channel struct {
 // Reason names what triggered it ("New issue", "Regression", "Spike: N events
 // in Mm") and drives the subject/headline.
 type Notification struct {
-	ProjectID   string `json:"-"`
-	ProjectName string `json:"project"`
-	IssueID     string `json:"issue_id"`
-	Title       string `json:"title"`
-	Level       string `json:"level"`
-	Culprit     string `json:"culprit"`
-	EventCount  int64  `json:"events"`
-	Reason      string `json:"reason"`
-	URL         string `json:"url"`
+	ProjectID string `json:"-"`
+	// Queued automation delivery keeps the same signed body across retries.
+	// These fields never enter ordinary email/Slack/webhook payloads.
+	ObservedAt      time.Time `json:"-"`
+	AutomationEvent string    `json:"-"`
+	ProjectName     string    `json:"project"`
+	IssueID         string    `json:"issue_id"`
+	Title           string    `json:"title"`
+	Level           string    `json:"level"`
+	Culprit         string    `json:"culprit"`
+	EventCount      int64     `json:"events"`
+	Reason          string    `json:"reason"`
+	URL             string    `json:"url"`
 }
 
 type Dispatcher struct {
@@ -285,6 +289,10 @@ func automationWebhookEvent(reason string) string {
 	return "alert"
 }
 
+// AutomationWebhookEvent is the canonical, bounded event vocabulary stored in
+// the durable automation outbox. Raw alert reasons are never persisted there.
+func AutomationWebhookEvent(reason string) string { return automationWebhookEvent(reason) }
+
 func automationWebhookBody(n Notification, observedAt time.Time) ([]byte, error) {
 	if strings.TrimSpace(n.ProjectID) == "" {
 		return nil, errors.New("automation webhook requires a project identifier")
@@ -292,8 +300,12 @@ func automationWebhookBody(n Notification, observedAt time.Time) ([]byte, error)
 	if n.EventCount < 0 || n.EventCount > maxAutomationWebhookEventCount {
 		return nil, fmt.Errorf("automation webhook event count must be between 0 and %d", maxAutomationWebhookEventCount)
 	}
+	event := n.AutomationEvent
+	if event == "" {
+		event = automationWebhookEvent(n.Reason)
+	}
 	return json.Marshal(automationWebhookPayload{
-		Schema: automationWebhookSchema, Event: automationWebhookEvent(n.Reason),
+		Schema: automationWebhookSchema, Event: event,
 		ProjectID: n.ProjectID, IssueID: n.IssueID, EventCount: n.EventCount,
 		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
 	})
@@ -316,7 +328,11 @@ func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessa
 		return errors.New("automation webhook misconfigured (url and signing_secret are required)")
 	}
 	now := time.Now().UTC()
-	body, err := automationWebhookBody(n, now)
+	observedAt := n.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = now
+	}
+	body, err := automationWebhookBody(n, observedAt)
 	if err != nil {
 		return err
 	}
@@ -328,7 +344,11 @@ func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessa
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Flare-Automation-Timestamp", timestamp)
 	req.Header.Set("X-Flare-Automation-Signature", automationWebhookSignature(cfg.SigningSecret, timestamp, body))
-	req.Header.Set("X-Flare-Automation-Event", automationWebhookEvent(n.Reason))
+	event := n.AutomationEvent
+	if event == "" {
+		event = automationWebhookEvent(n.Reason)
+	}
+	req.Header.Set("X-Flare-Automation-Event", event)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return err

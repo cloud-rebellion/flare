@@ -468,8 +468,11 @@ func isReleaseHeartbeat(level, message string) bool {
 
 // evaluateAlerts matches an ingested event against the project's enabled alert
 // rules and dispatches at most one notification (the most actionable reason
-// wins: regression > spike > new issue). Runs in the background with a detached
-// context so it never blocks or fails ingest.
+// wins: regression > spike > new issue). Evaluation still runs in a bounded
+// background pool that may drop work under saturation. The durable automation
+// outbox starts only after evaluation reaches dispatch; an ingest 200 does not
+// yet guarantee an alert-evaluation job was accepted. This needs its own
+// durable evaluation handoff before that broader guarantee can be claimed.
 // pageableLevel reports whether an issue at this severity may fire an alert.
 // info/debug are informational (heartbeats, breadcrumbs) and never page; every
 // other level - including the empty/default, which Sentry treats as error -
@@ -534,24 +537,22 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		// one that matched.
 		sort.SliceStable(spikes, func(i, j int) bool { return moreSensitiveRule(spikes[i], spikes[j]) })
 
-		var reason string
-		switch {
-		case reopened && byType["regression"] != nil:
+		reason := ""
+		if reopened && byType["regression"] != nil {
 			reason = "Regression"
-		default:
-			// First match wins. Dispatch stays at most one notification per
-			// issue, so the existing "most actionable reason wins" contract holds
-			// and the per-issue TrySetIssueSpike dedup still gates the send.
+		}
+		// Determine threshold matches without spending the spike claim. The
+		// claim is written later in the same transaction as automation notices.
+		var spikeCandidates []spikeAlertCandidate
+		if reason == "" {
 			for _, sr := range spikes {
-				if reason = s.spikeReason(ctx, issue, project.OrgID, sr); reason != "" {
-					break
+				if candidate := s.spikeReason(ctx, issue, project.OrgID, sr); candidate.reason != "" {
+					spikeCandidates = append(spikeCandidates, candidate)
 				}
 			}
 		}
-		if reason == "" && isNew && byType["new_issue"] != nil {
-			reason = "New issue"
-		}
-		if reason == "" {
+		newIssueAlert := isNew && byType["new_issue"] != nil
+		if reason == "" && len(spikeCandidates) == 0 && !newIssueAlert {
 			return
 		}
 
@@ -593,7 +594,7 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		//
 		// detectSensitive decides whether to raise the badge. It never decides
 		// whether redaction runs.
-		s.dispatcher.Dispatch(ctx, channels, alerts.Notification{
+		notice := alerts.Notification{
 			ProjectID:   project.ID,
 			ProjectName: project.Name,
 			IssueID:     issue.ID,
@@ -601,9 +602,37 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 			Level:       issue.Level,
 			Culprit:     ai.Scrub(issue.Culprit),
 			EventCount:  issue.EventCount,
-			Reason:      reason,
 			URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/issues/" + issue.ID,
-		})
+		}
+		if reason != "" {
+			notice.Reason = reason
+			if _, err := s.dispatchWithAutomationClaim(ctx, project.OrgID, project.ID, channels, notice, nil); err != nil {
+				slog.Error("queue regression automation alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
+			}
+			return
+		}
+		for _, candidate := range spikeCandidates {
+			notice.Reason = candidate.reason
+			claimed, err := s.dispatchWithAutomationClaim(ctx, project.OrgID, project.ID, channels, notice,
+				func(q *generated.Queries) (int64, error) {
+					return q.TrySetIssueSpike(ctx, generated.TrySetIssueSpikeParams{
+						ID: issue.ID, OrgID: project.OrgID, LastSpikeAt: candidate.cutoff,
+					})
+				})
+			if err != nil {
+				slog.Error("claim/queue spike alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
+				return
+			}
+			if claimed {
+				return
+			}
+		}
+		if newIssueAlert {
+			notice.Reason = "New issue"
+			if _, err := s.dispatchWithAutomationClaim(ctx, project.OrgID, project.ID, channels, notice, nil); err != nil {
+				slog.Error("queue new-issue automation alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
+			}
+		}
 	})
 }
 
@@ -617,27 +646,25 @@ func moreSensitiveRule(a, b *generated.AlertRule) bool {
 	return a.WindowMinutes > b.WindowMinutes
 }
 
-// spikeReason returns a non-empty reason when the issue has crossed the rule's
-// threshold within its window AND this is the first spike alert for the issue
-// in that window (atomic test-and-set dedup). Empty otherwise.
-func (s *Server) spikeReason(ctx context.Context, issue *generated.UpsertIssueRow, org string, rule *generated.AlertRule) string {
+type spikeAlertCandidate struct {
+	reason string
+	cutoff pgtype.Timestamptz
+}
+
+// spikeReason evaluates the threshold only. Its claim is made by the caller in
+// the same transaction as the durable automation enqueue.
+func (s *Server) spikeReason(ctx context.Context, issue *generated.UpsertIssueRow, org string, rule *generated.AlertRule) spikeAlertCandidate {
 	if rule.Threshold < 1 || rule.WindowMinutes < 1 {
-		return ""
+		return spikeAlertCandidate{}
 	}
 	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-time.Duration(rule.WindowMinutes) * time.Minute), Valid: true}
 	cnt, err := s.q.CountEventsForIssueSince(ctx, generated.CountEventsForIssueSinceParams{
 		IssueID: pgText(issue.ID), OrgID: org, ReceivedAt: cutoff,
 	})
 	if err != nil || cnt < int64(rule.Threshold) {
-		return ""
+		return spikeAlertCandidate{}
 	}
-	rows, err := s.q.TrySetIssueSpike(ctx, generated.TrySetIssueSpikeParams{
-		ID: issue.ID, OrgID: org, LastSpikeAt: cutoff,
-	})
-	if err != nil || rows == 0 {
-		return ""
-	}
-	return fmt.Sprintf("Spike: %d events in %dm", cnt, rule.WindowMinutes)
+	return spikeAlertCandidate{reason: fmt.Sprintf("Spike: %d events in %dm", cnt, rule.WindowMinutes), cutoff: cutoff}
 }
 
 // authIngest resolves the project from the DSN public key (the ingest secret)
