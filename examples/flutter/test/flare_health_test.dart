@@ -89,7 +89,11 @@ void main() {
             200, '{"accepted":true,"rejected":0,"dropped":0,"receipt_id":"r"}', 1),
         isFalse);
     expect(flareMetricResponseAccepted(200, '<html>ok</html>', 1), isFalse);
-    expect(flareConnectorResponseAccepted(202, '{"accepted":true}'), isTrue);
+    expect(
+        flareConnectorResponseAccepted(
+            202, '{"accepted":true,"receipt_id":"receipt-1"}'),
+        isTrue);
+    expect(flareConnectorResponseAccepted(202, '{"accepted":true}'), isFalse);
     expect(flareConnectorResponseAccepted(200, '{"accepted":true}'), isFalse);
     expect(flareConnectorResponseAccepted(202, '{"accepted":false}'), isFalse);
     expect(flareConnectorResponseAccepted(202, '{"accepted":1}'), isFalse);
@@ -106,6 +110,28 @@ void main() {
         FlareMetricPoint(name: 'client.flutter.startup_ms', value: 12)
             .idempotencyKey,
         isNot(point.idempotencyKey));
+  });
+
+  test('a connector retry retains one opaque key and exact body bytes', () {
+    final attempt = FlareConnectorAttempt(
+      provider: 'backend',
+      operation: 'sync',
+      channel: 'api',
+      outcome: 'ok',
+      elapsedMs: 4,
+    );
+    expect(attempt.idempotencyKey, matches(RegExp(r'^[A-Za-z0-9_-]{16,128}$')));
+    expect(attempt.requestBody, encodeFlareConnectorAttempt(attempt));
+    expect(attempt.requestBody, isNot(contains(attempt.idempotencyKey)));
+    expect(
+        FlareConnectorAttempt(
+          provider: 'backend',
+          operation: 'sync',
+          channel: 'api',
+          outcome: 'ok',
+          elapsedMs: 4,
+        ).idempotencyKey,
+        isNot(attempt.idempotencyKey));
   });
 
   test('failed sinks send only normalized retry items to the app queue', () async {
@@ -127,6 +153,11 @@ void main() {
     expect(result, 42);
     expect(failed.where((failure) => failure.metric != null), hasLength(2));
     expect(failed.where((failure) => failure.connectorAttempt != null), hasLength(1));
+    final queuedConnector =
+        failed.singleWhere((failure) => failure.connectorAttempt != null).connectorAttempt!;
+    expect(queuedConnector.idempotencyKey,
+        matches(RegExp(r'^[A-Za-z0-9_-]{16,128}$')));
+    expect(queuedConnector.requestBody, encodeFlareConnectorAttempt(queuedConnector));
     final retried = jsonEncode(<Object>[
       for (final failure in failed)
         if (failure.metric != null) failure.metric!.toJson()

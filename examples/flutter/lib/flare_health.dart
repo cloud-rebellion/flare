@@ -93,7 +93,8 @@ class FlareConnectorAttempt {
         elapsedMs = _clampInt(elapsedMs, 0, maxFlareConnectorElapsedMs),
         quotaRemaining = _optionalBounded(quotaRemaining, 0, 1000000000000000),
         retryAfterMs = _optionalBounded(retryAfterMs, 0, 7 * 24 * 60 * 60 * 1000),
-        syncLagMs = _optionalBounded(syncLagMs, 0, 7 * 24 * 60 * 60 * 1000);
+        syncLagMs = _optionalBounded(syncLagMs, 0, 7 * 24 * 60 * 60 * 1000),
+        idempotencyKey = _newFlareMetricKey();
 
   final String provider;
   final String operation;
@@ -105,6 +106,9 @@ class FlareConnectorAttempt {
   final int? quotaRemaining;
   final int? retryAfterMs;
   final int? syncLagMs;
+  /// Persist this key together with [requestBody] for ambiguous retries.
+  final String idempotencyKey;
+  late final String requestBody = jsonEncode(toJson());
 
   Map<String, Object> toJson() {
     final out = <String, Object>{
@@ -196,12 +200,15 @@ bool flareMetricResponseAccepted(int statusCode, String body, int sentCount) {
   }
 }
 
-/// Checks the native connector-attempt endpoint's persistence acknowledgement.
+/// Checks the native connector-attempt endpoint's durable receipt.
 bool flareConnectorResponseAccepted(int statusCode, String body) {
   if (statusCode != 202) return false;
   try {
     final decoded = jsonDecode(body);
-    return decoded is Map<String, dynamic> && decoded['accepted'] == true;
+    return decoded is Map<String, dynamic> &&
+        decoded['accepted'] == true &&
+        decoded['receipt_id'] is String &&
+        (decoded['receipt_id'] as String).isNotEmpty;
   } catch (_) {
     return false;
   }
@@ -217,7 +224,7 @@ String encodeFlareMetricBatch(Iterable<FlareMetricPoint> points) {
 }
 
 /// Produces one bounded connector-attempt JSON body.
-String encodeFlareConnectorAttempt(FlareConnectorAttempt attempt) => jsonEncode(attempt.toJson());
+String encodeFlareConnectorAttempt(FlareConnectorAttempt attempt) => attempt.requestBody;
 
 /// Parses the public project DSN into the two native endpoint URLs.
 ///

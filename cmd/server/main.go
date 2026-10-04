@@ -170,6 +170,8 @@ func run() error {
 	go srv.RunNativeMetricAcceptancePrune(ctx)
 	// Native log retry identities have the same bounded seven-day window.
 	go srv.RunNativeLogAcceptancePrune(ctx)
+	// Public connector reports have a separate bounded seven-day retry window.
+	go srv.RunClientConnectorAcceptancePrune(ctx)
 
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.

@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -54,7 +58,8 @@ type connectorAttemptRequest struct {
 }
 
 type connectorAttemptResponse struct {
-	Accepted bool `json:"accepted"`
+	Accepted  bool   `json:"accepted"`
+	ReceiptID string `json:"receipt_id"`
 }
 
 // handleConnectorAttempt accepts one payload-free connector outcome from an
@@ -63,13 +68,10 @@ type connectorAttemptResponse struct {
 // server derives timestamps, tenant/project scope, and client provenance.
 func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
-	var receipt *ingestReceipt
-	receiptStatus := http.StatusAccepted
 	requestOutcome := "rejected"
 	defer func() {
 		outcome.record("connector")
 		recordIngestRequest("native", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 
 	project, ok := s.authIngest(w, r)
@@ -77,37 +79,61 @@ func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req connectorAttemptRequest
-	if err := decodeJSON(r, &req); err != nil {
+	// Keep the exact bounded JSON bytes for an ambiguous-response retry. This
+	// endpoint has never accepted gzip, so the serialized body is the identity.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONBody))
+	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var req connectorAttemptRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		outcome.invalid = 1
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		outcome.invalid = 1
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	normalized, err := normalizeConnectorAttemptRequest(req)
 	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if normalized.ConnectionID != "" {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "connection_id requires a server-side connector adapter")
 		return
 	}
-	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "connectors", "native", &outcome, &requestOutcome, &receiptStatus)
-	if receipt == nil {
+	keyHash, err := nativeIngestKeyHash(r)
+	if err != nil {
+		outcome.invalid = 1
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	receipt := newIngestReceipt(w, r, project, "connectors", "native")
+	if receipt == nil || s.pool == nil {
+		outcome.failed = 1
+		requestOutcome = "failed"
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
 	receipt.setReceived(1)
 
 	completedAt := time.Now().UTC()
-	if err := s.q.InsertConnectorAttempt(r.Context(), generated.InsertConnectorAttemptParams{
+	params := generated.InsertConnectorAttemptParams{
 		ID:             id.New(),
 		OrgID:          project.OrgID,
 		ProjectID:      pgtype.Text{String: project.ID, Valid: true},
+		ConnectionID:   pgtype.Text{},
 		SourceKind:     "client_reported",
 		Provider:       normalized.Provider,
 		Operation:      normalized.Operation,
@@ -121,17 +147,30 @@ func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) 
 		SyncLagMs:      optionalInt8(normalized.SyncLagMS),
 		AttemptedAt:    pgtype.Timestamptz{Time: completedAt.Add(-time.Duration(normalized.ElapsedMS) * time.Millisecond), Valid: true},
 		CompletedAt:    pgtype.Timestamptz{Time: completedAt, Valid: true},
-	}); err != nil {
+	}
+	result, replay, err := s.acceptClientConnectorAttempt(r.Context(), receipt, keyHash, nativeIngestPayloadHash(body), params)
+	if err != nil {
+		if err == errClientConnectorKeyConflict {
+			outcome.invalid = 1
+			writeErr(w, http.StatusConflict, "Idempotency-Key was already used for different connector payload bytes")
+			return
+		}
 		outcome.failed = 1
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "record external connector attempt", err)
+		w.Header().Set("Retry-After", "1")
+		slog.Error("client connector acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
-
-	outcome.accepted = 1
-	requestOutcome = ""
-	writeJSON(w, http.StatusAccepted, connectorAttemptResponse{Accepted: true})
+	if replay {
+		outcome.deduplicated = 1
+		w.Header().Set("Idempotency-Replayed", "true")
+	} else {
+		outcome.accepted = 1
+	}
+	requestOutcome = "accepted"
+	w.Header().Set("X-Flare-Receipt-ID", result.ReceiptID)
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func optionalInt8(value *int64) pgtype.Int8 {

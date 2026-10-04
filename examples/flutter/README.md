@@ -209,7 +209,7 @@ import 'flare_flutter_health.dart';
 
 final dsn = FlareDsn.parse(const String.fromEnvironment('FLARE_SENTRY_DSN'));
 // appOfflineQueue is your app's bounded, persistent queue. It stores only the
-// normalized metric body and retry key, or connector attempt, never the DSN,
+// normalized metric or connector body and retry key, never the DSN,
 // HTTP response, exception, or credentials.
 final health = FlareHealthReporter(
   // Keep these byte-for-byte aligned with initializeFlareObservability below.
@@ -235,8 +235,11 @@ final health = FlareHealthReporter(
   connectorSink: dsn == null ? null : (attempt) async {
     final response = await http.post(
       dsn.connectorEndpoint,
-      headers: {'content-type': 'application/json'},
-      body: encodeFlareConnectorAttempt(attempt),
+      headers: {
+        'content-type': 'application/json',
+        'Idempotency-Key': attempt.idempotencyKey,
+      },
+      body: attempt.requestBody,
     ).timeout(const Duration(seconds: 5));
     if (!flareConnectorResponseAccepted(response.statusCode, response.body)) {
       throw const FormatException('connector delivery was not accepted');
@@ -271,10 +274,10 @@ break the app. The sample requires HTTP 200 with `accepted == 1`, zero rejected
 and dropped points, and a nonempty `receipt_id` for its one metric. Flare
 commits the metric and terminal ingest receipt together. A replay with the same
 `Idempotency-Key` and exact body returns the original receipt without another
-point for seven days. HTTP 202 with `accepted == true` acknowledges a connector
-attempt row, but its separate receipt completion is still written after the
-response and the endpoint has no retry key yet. An ambiguous connector timeout
-can therefore produce another client-reported attempt on replay. The
+point for seven days. HTTP 202 with `accepted == true` and a nonempty
+`receipt_id` acknowledges an atomic connector-attempt and terminal receipt
+commit. A retry with the same connector `Idempotency-Key` and exact body returns
+the original receipt without another observation for seven days. The
 `onDeliveryFailure` callback receives only the normalized signal, not the
 transport exception, response body, URL, or DSN.
 For HTTP clients such as `package:http` that return 4xx/5xx responses without
@@ -292,8 +295,11 @@ with backoff using the same response checks. For a failed metric, persist
 entry; replay those exact bytes and header, without reconstructing a new point
 or timestamp. If delivery remains uncertain beyond seven days, quarantine that
 entry rather than assuming the key still deduplicates it. Connector entries
-contain only `failure.connectorAttempt!.toJson()` and may duplicate after an
-ambiguous timeout. Put a storage quota, expiry, and retry budget around the
+must likewise retain `failure.connectorAttempt!.idempotencyKey` and
+`failure.connectorAttempt!.requestBody` together; rebuilding JSON after a
+timeout can change its bytes and return `409`. After seven days, quarantine an
+uncertain entry instead of assuming the key still deduplicates it. Put a
+storage quota, expiry, and retry budget around the
 queue, and expose its failure and depth in app diagnostics. Queue failures are
 also swallowed to keep telemetry from breaking the app. If the DSN is absent,
 sinks are disabled and no failed item is queued. Report queue depth with
@@ -412,8 +418,8 @@ it; put the check-in on the backend or scheduler for availability guarantees.
 
 For Flutter web on a different origin from Flare, first install a same-origin
 collector edge route or a narrowly allow-listed CORS policy for Sentry and
-native metric/connector requests. The metric `Idempotency-Key` header causes a
-browser preflight; the current Flare API does not provide a general cross-origin
+native metric/connector requests. The `Idempotency-Key` header causes a browser
+preflight for both sends; the current Flare API does not provide a general cross-origin
 ingest CORS response. Test the deployed browser network path and the matching
 Flare receipt; an SDK call that merely queued locally is insufficient.
 

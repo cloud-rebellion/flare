@@ -232,6 +232,15 @@ type ChannelProject struct {
 	ProjectID string `json:"project_id"`
 }
 
+type ClientConnectorAcceptance struct {
+	OrgID       string             `json:"org_id"`
+	ProjectID   string             `json:"project_id"`
+	KeyHash     string             `json:"key_hash"`
+	PayloadHash string             `json:"payload_hash"`
+	ReceiptID   string             `json:"receipt_id"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
 type ConnectorAttempt struct {
 	ID             string             `json:"id"`
 	OrgID          string             `json:"org_id"`
