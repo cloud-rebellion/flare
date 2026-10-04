@@ -873,6 +873,14 @@ not trusted Stage outcomes. They do not unlock later stages or count as accepted
 deployments. Flare currently has no trusted promotion endpoint; Stage must
 provide an authenticated, exact-run attestation path before these stages can
 complete. Failed and blocked receipts remain usable diagnostics.
+The future verifier needs a defined attestation contract and migration for
+server-owned provenance: Stage run identity, exact source and target commits,
+CI result, merged commit, deployed immutable image or artifact digest, and
+synthetic probe result bound to the same project, issue, and revision. It must
+authenticate Stage's outcome, check each stage against that exact lineage,
+and store the attestation reference or digest before setting
+`verification_status` to `verified`. The current opaque `run_ref` and
+`evidence_ref` cannot supply those guarantees by themselves.
 
 The worker can persist each bounded coding-loop stage with
 `POST /api/projects/{id}/automation-receipts` using a member session or
