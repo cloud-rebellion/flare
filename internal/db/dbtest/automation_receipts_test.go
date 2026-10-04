@@ -102,6 +102,26 @@ func TestAutomationReceiptScopeAndIdempotency(t *testing.T) {
 	if row.Stage != "ci" || row.Status != "passed" || row.IssueID != issue {
 		t.Fatalf("inserted receipt = %#v", row)
 	}
+	if row.VerificationStatus != "unverified" {
+		t.Fatalf("caller-supplied CI outcome status = %q, want unverified", row.VerificationStatus)
+	}
+	if allowed, checkErr := q.HasAutomationReceiptEvidence(ctx, generated.HasAutomationReceiptEvidenceParams{
+		OrgID: org, ProjectID: project, IssueID: issue, Stage: "ci", Status: "passed", TargetRevision: "def",
+	}); checkErr != nil || allowed {
+		t.Fatalf("unverified CI as prerequisite = %v, %v; want false", allowed, checkErr)
+	}
+	if _, claimErr := q.ClaimAutomationStage(ctx, generated.ClaimAutomationStageParams{
+		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
+		Stage: "merge", TargetRevision: "def", WorkerRef: "worker-1", LeasedUntil: leaseUntil,
+	}); !errors.Is(claimErr, pgx.ErrNoRows) {
+		t.Fatalf("merge claim after unverified CI = %v, want no rows", claimErr)
+	}
+	secondKey := params
+	secondKey.ID = id.New()
+	secondKey.IdempotencyKey = "run-2"
+	if _, dupErr := q.InsertAutomationReceipt(ctx, secondKey); !errors.Is(dupErr, pgx.ErrNoRows) {
+		t.Fatalf("second pass under same live claim = %v, want no rows", dupErr)
+	}
 	rollback, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
 		Stage: "rollback", Status: "passed", IdempotencyKey: "rollback-1",
@@ -201,18 +221,20 @@ func TestAutomationReceiptScopeAndIdempotency(t *testing.T) {
 	if ungroundedEvidence {
 		t.Fatal("patch without a matching AI receipt was accepted as workflow evidence")
 	}
-	if _, err := q.DeleteUser(ctx, generated.DeleteUserParams{ID: actor.ID, OrgID: org}); err != nil {
-		t.Fatalf("delete workflow actor: %v", err)
+	// The schema's approved-review check deliberately prevents deleting an
+	// actor while its human approval remains retained.
+	if _, err := q.DeleteUser(ctx, generated.DeleteUserParams{ID: actor.ID, OrgID: org}); err == nil {
+		t.Fatal("review actor was deleted while an approved receipt still references it")
 	}
-	deletedActorEvidence, err := q.HasAutomationReceiptEvidence(ctx, generated.HasAutomationReceiptEvidenceParams{
+	retainedActorEvidence, err := q.HasAutomationReceiptEvidence(ctx, generated.HasAutomationReceiptEvidenceParams{
 		OrgID: org, ProjectID: project, IssueID: issue,
 		Stage: "review", Status: "approved", TargetRevision: "def",
 	})
 	if err != nil {
-		t.Fatalf("deleted-actor evidence query: %v", err)
+		t.Fatalf("retained-actor evidence query: %v", err)
 	}
-	if deletedActorEvidence {
-		t.Fatal("review evidence remained valid after its human actor was deleted")
+	if !retainedActorEvidence {
+		t.Fatal("review evidence disappeared although actor deletion was rejected")
 	}
 	_ = pool
 }
@@ -231,6 +253,11 @@ func TestSyntheticReceiptCanCarryProbeEvidence(t *testing.T) {
 	now := pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
 	leaseUntil := pgtype.Timestamptz{Time: time.Now().UTC().Add(10 * time.Minute), Valid: true}
 	const revision = "release-1"
+	acceptanceParams := generated.GetDeployAcceptanceStatsParams{
+		OrgID: org, ProjectID: project,
+		Since:       pgtype.Timestamptz{Time: now.Time.Add(-time.Hour), Valid: true},
+		GraceCutoff: pgtype.Timestamptz{Time: now.Time.Add(time.Minute), Valid: true},
+	}
 
 	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
@@ -248,12 +275,27 @@ func TestSyntheticReceiptCanCarryProbeEvidence(t *testing.T) {
 		if claimErr != nil || claim == nil {
 			t.Fatalf("claim %s stage: %v", stage, claimErr)
 		}
-		if _, receiptErr := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		receipt, receiptErr := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 			ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
 			Stage: stage, Status: "passed", IdempotencyKey: key,
 			TargetRevision: revision, RunRef: runRef, CompletedAt: now, ClaimID: claim.ID,
-		}); receiptErr != nil {
+		})
+		if receiptErr != nil {
 			t.Fatalf("insert %s receipt: %v", stage, receiptErr)
+		}
+		if receipt.VerificationStatus != "unverified" {
+			t.Fatalf("%s outcome was preverified", stage)
+		}
+		if stage == "deploy" {
+			count, checkErr := q.GetDeployAcceptanceStats(ctx, acceptanceParams)
+			if checkErr != nil || count != 0 {
+				t.Fatalf("unverified deploy accepted by watchdog = %d, %v", count, checkErr)
+			}
+		}
+		// This test-only update represents a future trusted verifier. The
+		// public API cannot promote a caller's opaque run_ref.
+		if _, promoteErr := pool.Exec(ctx, "UPDATE automation_receipts SET verification_status='verified' WHERE id=$1", receipt.ID); promoteErr != nil {
+			t.Fatalf("promote %s test fixture: %v", stage, promoteErr)
 		}
 		return claim
 	}
@@ -274,6 +316,27 @@ func TestSyntheticReceiptCanCarryProbeEvidence(t *testing.T) {
 	if synthetic.EvidenceRef != "probe-result-1" {
 		t.Fatalf("synthetic evidence_ref = %q, want probe-result-1", synthetic.EvidenceRef)
 	}
+	if synthetic.VerificationStatus != "unverified" {
+		t.Fatalf("synthetic evidence accepted without verifier: %q", synthetic.VerificationStatus)
+	}
+	count, err := q.GetDeployAcceptanceStats(ctx, acceptanceParams)
+	if err != nil || count != 1 {
+		t.Fatalf("unverified synthetic suppressed accepted deploy gap = %d, %v", count, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE automation_receipts SET verification_status='verified' WHERE id=$1", synthetic.ID); err != nil {
+		t.Fatal(err)
+	}
+	count, err = q.GetDeployAcceptanceStats(ctx, acceptanceParams)
+	if err != nil || count != 0 {
+		t.Fatalf("verified synthetic did not close accepted deploy gap = %d, %v", count, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE automation_receipts SET evidence_ref='' WHERE id=$1", synthetic.ID); err != nil {
+		t.Fatal(err)
+	}
+	count, err = q.GetDeployAcceptanceStats(ctx, acceptanceParams)
+	if err != nil || count != 1 {
+		t.Fatalf("synthetic without probe evidence closed deploy gap = %d, %v", count, err)
+	}
 	_ = pool
 }
 
@@ -287,4 +350,72 @@ func claimStageOnly(t *testing.T, ctx context.Context, q *generated.Queries, org
 		t.Fatalf("claim %s stage: %v", stage, err)
 	}
 	return claim
+}
+
+func TestUnverifiedCIClaimCanBeRetriedAfterLeaseExpiry(t *testing.T) {
+	ctx := context.Background()
+	pool, q := newPool(t)
+	org, project := seedProject(t, ctx, q)
+	otherOrg, otherProject := seedProject(t, ctx, q)
+	issue := seedIssue(t, ctx, q, org, project, "claim recovery", "error")
+	actor, err := q.CreateUser(ctx, generated.CreateUserParams{
+		ID: id.New(), OrgID: org, Email: id.New() + "@example.test", PasswordHash: "hash", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
+		Stage: "review", Status: "approved", IdempotencyKey: "recover-review",
+		TargetRevision: "rev-1", ActorUserID: pgtype.Text{String: actor.ID, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lease := pgtype.Timestamptz{Time: time.Now().UTC().Add(10 * time.Minute), Valid: true}
+	claim := claimStageOnly(t, ctx, q, org, project, issue, "ci", "rev-1", lease)
+	first, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
+		Stage: "ci", Status: "passed", IdempotencyKey: "recover-ci-1",
+		TargetRevision: "rev-1", RunRef: "opaque-run-1", ClaimID: claim.ID,
+		CompletedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	})
+	if err != nil || first.VerificationStatus != "unverified" {
+		t.Fatalf("first CI advisory = %#v, %v", first, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE automation_claims SET leased_until=now()-interval '1 second' WHERE id=$1", claim.ID); err != nil {
+		t.Fatal(err)
+	}
+	replacement := claimStageOnly(t, ctx, q, org, project, issue, "ci", "rev-1", lease)
+	if replacement.ID == claim.ID {
+		t.Fatal("expired claim was not replaced")
+	}
+	second, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
+		Stage: "ci", Status: "passed", IdempotencyKey: "recover-ci-2",
+		TargetRevision: "rev-1", RunRef: "opaque-run-2", ClaimID: replacement.ID,
+		CompletedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	})
+	if err != nil || second.VerificationStatus != "unverified" {
+		t.Fatalf("retried CI advisory = %#v, %v", second, err)
+	}
+	stats, err := q.GetAutomationVerificationStats(ctx, generated.GetAutomationVerificationStatsParams{
+		OrgID: org, ProjectID: project, Since: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
+	})
+	if err != nil || stats.PendingCount != 2 || stats.CiCount != 2 {
+		t.Fatalf("pending verification after retry = %#v, %v", stats, err)
+	}
+	other, err := q.GetAutomationVerificationStats(ctx, generated.GetAutomationVerificationStatsParams{
+		OrgID: otherOrg, ProjectID: otherProject, Since: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
+	})
+	if err != nil || other.PendingCount != 0 {
+		t.Fatalf("cross-tenant verification backlog = %#v, %v", other, err)
+	}
+	// Only a future trusted verifier may perform this update. It proves an
+	// advisory row does not block later attestation and the next stage.
+	if _, err := pool.Exec(ctx, "UPDATE automation_receipts SET verification_status='verified' WHERE id=$1", second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := claimStageOnly(t, ctx, q, org, project, issue, "merge", "rev-1", lease); got == nil {
+		t.Fatal("verified CI did not permit merge claim")
+	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 const getAutomationReceiptByIdempotency = `-- name: GetAutomationReceiptByIdempotency :one
-SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id
+SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
 FROM automation_receipts
 WHERE org_id = $1 AND project_id = $2 AND idempotency_key = $3
 `
@@ -45,6 +45,52 @@ func (q *Queries) GetAutomationReceiptByIdempotency(ctx context.Context, arg Get
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.ClaimID,
+		&i.VerificationStatus,
+	)
+	return &i, err
+}
+
+const getAutomationVerificationStats = `-- name: GetAutomationVerificationStats :one
+SELECT count(*)::bigint AS pending_count,
+       count(*) FILTER (WHERE stage = 'ci')::bigint AS ci_count,
+       count(*) FILTER (WHERE stage = 'merge')::bigint AS merge_count,
+       count(*) FILTER (WHERE stage = 'deploy')::bigint AS deploy_count,
+       count(*) FILTER (WHERE stage = 'synthetic')::bigint AS synthetic_count
+FROM automation_receipts
+WHERE org_id = $1::text
+  AND project_id = $2::text
+  AND status = 'passed'
+  AND stage IN ('ci', 'merge', 'deploy', 'synthetic')
+  AND verification_status = 'unverified'
+  AND created_at >= $3
+`
+
+type GetAutomationVerificationStatsParams struct {
+	OrgID     string             `json:"org_id"`
+	ProjectID string             `json:"project_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+}
+
+type GetAutomationVerificationStatsRow struct {
+	PendingCount   int64 `json:"pending_count"`
+	CiCount        int64 `json:"ci_count"`
+	MergeCount     int64 `json:"merge_count"`
+	DeployCount    int64 `json:"deploy_count"`
+	SyntheticCount int64 `json:"synthetic_count"`
+}
+
+// Project-scoped, bounded recent backlog for external execution results that
+// have no Stage-owned proof yet. These rows remain visible even though they
+// cannot advance the workflow or count as accepted deployment evidence.
+func (q *Queries) GetAutomationVerificationStats(ctx context.Context, arg GetAutomationVerificationStatsParams) (*GetAutomationVerificationStatsRow, error) {
+	row := q.db.QueryRow(ctx, getAutomationVerificationStats, arg.OrgID, arg.ProjectID, arg.Since)
+	var i GetAutomationVerificationStatsRow
+	err := row.Scan(
+		&i.PendingCount,
+		&i.CiCount,
+		&i.MergeCount,
+		&i.DeployCount,
+		&i.SyntheticCount,
 	)
 	return &i, err
 }
@@ -61,11 +107,14 @@ SELECT EXISTS (
       AND ar.target_revision = $6
       AND (
           -- A review approval remains human evidence only while its actor
-          -- identity is retained. User deletion intentionally nulls this FK.
+          -- identity is retained; the table check rejects actor deletion
+          -- while an approved receipt still references that user.
           (ar.stage = 'review' AND ar.actor_user_id IS NOT NULL)
-          -- Execution receipts must carry the immutable external run that
-          -- produced the result; this excludes legacy/unattributed rows.
-          OR (ar.stage IN ('ci', 'merge', 'deploy', 'synthetic') AND ar.run_ref <> '')
+          -- Opaque caller references are not outcome proof. Only a trusted
+          -- server-side verifier may promote an external execution receipt.
+          OR (ar.stage IN ('ci', 'merge', 'deploy', 'synthetic')
+              AND ar.run_ref <> '' AND ar.verification_status = 'verified'
+              AND (ar.stage <> 'synthetic' OR ar.evidence_ref <> ''))
           -- Patch completion must point to the exact completed AI evidence
           -- that the worker used; a revision marker alone is insufficient.
           OR (
@@ -155,7 +204,7 @@ const insertAutomationReceipt = `-- name: InsertAutomationReceipt :one
 WITH claim AS (
     SELECT id
     FROM automation_claims ac
-    WHERE $1 <> ''
+    WHERE COALESCE($1::text, '') <> ''
       AND ac.id = $1
       AND ac.org_id = $2
       AND ac.project_id = $3
@@ -179,37 +228,36 @@ WITH claim AS (
            $5, $9, $10,
            $7, $11, $6,
            $12, $13, $14,
-           $15, $16, NULLIF($1::text, '')
+           $15, $16, NULLIF(COALESCE($1::text, ''), '')
     FROM issues i
     LEFT JOIN claim c ON true
     WHERE i.id = $4
       AND i.org_id = $2
       AND i.project_id = $3
       AND (
-          ($1 = '' AND (
+          (COALESCE($1::text, '') = '' AND (
               $9 <> 'passed'
               OR $5 NOT IN ('patch', 'ci', 'merge', 'deploy', 'synthetic')
           ))
           OR c.id IS NOT NULL
       )
-    ON CONFLICT (org_id, project_id, idempotency_key) DO NOTHING
-    RETURNING id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id
+    ON CONFLICT DO NOTHING
+    RETURNING id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
 ), consumed AS (
     UPDATE automation_claims ac
-    SET status = CASE WHEN $9 = 'passed' THEN 'consumed' ELSE ac.status END,
+    SET status = CASE WHEN $9 = 'passed' AND $5 = 'patch' THEN 'consumed' ELSE ac.status END,
         updated_at = now()
     FROM inserted i
     WHERE ac.id = i.claim_id
-    RETURNING i.id, i.org_id, i.project_id, i.issue_id, i.stage, i.status, i.idempotency_key, i.evidence_ref, i.source_revision, i.target_revision, i.run_ref, i.actor_user_id, i.retryable, i.error_code, i.created_at, i.updated_at, i.completed_at, i.claim_id
+    RETURNING i.id, i.org_id, i.project_id, i.issue_id, i.stage, i.status, i.idempotency_key, i.evidence_ref, i.source_revision, i.target_revision, i.run_ref, i.actor_user_id, i.retryable, i.error_code, i.created_at, i.updated_at, i.completed_at, i.claim_id, i.verification_status
 )
-SELECT ar.id, ar.org_id, ar.project_id, ar.issue_id, ar.stage, ar.status, ar.idempotency_key, ar.evidence_ref, ar.source_revision, ar.target_revision, ar.run_ref, ar.actor_user_id, ar.retryable, ar.error_code, ar.created_at, ar.updated_at, ar.completed_at, ar.claim_id
-FROM automation_receipts ar
-JOIN inserted i ON i.id = ar.id
+SELECT i.id, i.org_id, i.project_id, i.issue_id, i.stage, i.status, i.idempotency_key, i.evidence_ref, i.source_revision, i.target_revision, i.run_ref, i.actor_user_id, i.retryable, i.error_code, i.created_at, i.updated_at, i.completed_at, i.claim_id, i.verification_status
+FROM inserted i
 LEFT JOIN consumed c ON c.id = i.id
 `
 
 type InsertAutomationReceiptParams struct {
-	ClaimID        interface{}        `json:"claim_id"`
+	ClaimID        string             `json:"claim_id"`
 	OrgID          string             `json:"org_id"`
 	ProjectID      string             `json:"project_id"`
 	IssueID        string             `json:"issue_id"`
@@ -227,14 +275,37 @@ type InsertAutomationReceiptParams struct {
 	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
 }
 
+type InsertAutomationReceiptRow struct {
+	ID                 string             `json:"id"`
+	OrgID              string             `json:"org_id"`
+	ProjectID          string             `json:"project_id"`
+	IssueID            string             `json:"issue_id"`
+	Stage              string             `json:"stage"`
+	Status             string             `json:"status"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	EvidenceRef        string             `json:"evidence_ref"`
+	SourceRevision     string             `json:"source_revision"`
+	TargetRevision     string             `json:"target_revision"`
+	RunRef             string             `json:"run_ref"`
+	ActorUserID        pgtype.Text        `json:"actor_user_id"`
+	Retryable          bool               `json:"retryable"`
+	ErrorCode          string             `json:"error_code"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	ClaimID            pgtype.Text        `json:"claim_id"`
+	VerificationStatus string             `json:"verification_status"`
+}
+
 // Payload-free receipts for the external AI coding loop. Keep references
 // bounded and never add prompts, completions, credentials, source contents, or
 // provider response text.
-// The claim CTE is an atomic handoff: a passed execution receipt consumes its
-// active lease, while a failed/pending receipt leaves the lease available for
-// a bounded retry. Human review and rollback receipts intentionally have no
-// claim and remain governed by their existing actor/revision checks.
-func (q *Queries) InsertAutomationReceipt(ctx context.Context, arg InsertAutomationReceiptParams) (*AutomationReceipt, error) {
+// The claim CTE is an atomic handoff. A passed patch consumes its lease after
+// the API checks its AI triage digest. External passed receipts remain
+// unverified advisory rows until Stage evidence is checked by a trusted
+// verifier, so they do not consume the stage or block a later retry.
+// Human review and rollback receipts intentionally have no claim.
+func (q *Queries) InsertAutomationReceipt(ctx context.Context, arg InsertAutomationReceiptParams) (*InsertAutomationReceiptRow, error) {
 	row := q.db.QueryRow(ctx, insertAutomationReceipt,
 		arg.ClaimID,
 		arg.OrgID,
@@ -253,7 +324,7 @@ func (q *Queries) InsertAutomationReceipt(ctx context.Context, arg InsertAutomat
 		arg.ErrorCode,
 		arg.CompletedAt,
 	)
-	var i AutomationReceipt
+	var i InsertAutomationReceiptRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrgID,
@@ -273,14 +344,15 @@ func (q *Queries) InsertAutomationReceipt(ctx context.Context, arg InsertAutomat
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.ClaimID,
+		&i.VerificationStatus,
 	)
 	return &i, err
 }
 
 const listAutomationReceiptsByIssue = `-- name: ListAutomationReceiptsByIssue :many
-SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id
+SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
 FROM (
-    SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id
+    SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
     FROM automation_receipts
     WHERE org_id = $1 AND project_id = $2 AND issue_id = $3
     ORDER BY created_at DESC, id DESC
@@ -332,6 +404,7 @@ func (q *Queries) ListAutomationReceiptsByIssue(ctx context.Context, arg ListAut
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.ClaimID,
+			&i.VerificationStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -344,7 +417,7 @@ func (q *Queries) ListAutomationReceiptsByIssue(ctx context.Context, arg ListAut
 }
 
 const listAutomationReceiptsByProject = `-- name: ListAutomationReceiptsByProject :many
-SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id
+SELECT id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
 FROM automation_receipts
 WHERE org_id = $1 AND project_id = $2
 ORDER BY created_at DESC, id DESC
@@ -385,6 +458,7 @@ func (q *Queries) ListAutomationReceiptsByProject(ctx context.Context, arg ListA
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.ClaimID,
+			&i.VerificationStatus,
 		); err != nil {
 			return nil, err
 		}

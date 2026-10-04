@@ -3,14 +3,15 @@
 -- provider response text.
 
 -- name: InsertAutomationReceipt :one
--- The claim CTE is an atomic handoff: a passed execution receipt consumes its
--- active lease, while a failed/pending receipt leaves the lease available for
--- a bounded retry. Human review and rollback receipts intentionally have no
--- claim and remain governed by their existing actor/revision checks.
+-- The claim CTE is an atomic handoff. A passed patch consumes its lease after
+-- the API checks its AI triage digest. External passed receipts remain
+-- unverified advisory rows until Stage evidence is checked by a trusted
+-- verifier, so they do not consume the stage or block a later retry.
+-- Human review and rollback receipts intentionally have no claim.
 WITH claim AS (
     SELECT id
     FROM automation_claims ac
-    WHERE sqlc.arg(claim_id) <> ''
+    WHERE COALESCE(sqlc.arg(claim_id)::text, '') <> ''
       AND ac.id = sqlc.arg(claim_id)
       AND ac.org_id = sqlc.arg(org_id)
       AND ac.project_id = sqlc.arg(project_id)
@@ -34,32 +35,31 @@ WITH claim AS (
            sqlc.arg(stage), sqlc.arg(status), sqlc.arg(idempotency_key),
            sqlc.arg(evidence_ref), sqlc.arg(source_revision), sqlc.arg(target_revision),
            sqlc.arg(run_ref), sqlc.arg(actor_user_id), sqlc.arg(retryable),
-           sqlc.arg(error_code), sqlc.arg(completed_at), NULLIF(sqlc.arg(claim_id)::text, '')
+           sqlc.arg(error_code), sqlc.arg(completed_at), NULLIF(COALESCE(sqlc.arg(claim_id)::text, ''), '')
     FROM issues i
     LEFT JOIN claim c ON true
     WHERE i.id = sqlc.arg(issue_id)
       AND i.org_id = sqlc.arg(org_id)
       AND i.project_id = sqlc.arg(project_id)
       AND (
-          (sqlc.arg(claim_id) = '' AND (
+          (COALESCE(sqlc.arg(claim_id)::text, '') = '' AND (
               sqlc.arg(status) <> 'passed'
               OR sqlc.arg(stage) NOT IN ('patch', 'ci', 'merge', 'deploy', 'synthetic')
           ))
           OR c.id IS NOT NULL
       )
-    ON CONFLICT (org_id, project_id, idempotency_key) DO NOTHING
+    ON CONFLICT DO NOTHING
     RETURNING *
 ), consumed AS (
     UPDATE automation_claims ac
-    SET status = CASE WHEN sqlc.arg(status) = 'passed' THEN 'consumed' ELSE ac.status END,
+    SET status = CASE WHEN sqlc.arg(status) = 'passed' AND sqlc.arg(stage) = 'patch' THEN 'consumed' ELSE ac.status END,
         updated_at = now()
     FROM inserted i
     WHERE ac.id = i.claim_id
     RETURNING i.*
 )
-SELECT ar.*
-FROM automation_receipts ar
-JOIN inserted i ON i.id = ar.id
+SELECT i.*
+FROM inserted i
 LEFT JOIN consumed c ON c.id = i.id;
 
 -- name: GetAutomationReceiptByIdempotency :one
@@ -88,6 +88,23 @@ FROM (
 ) AS recent
 ORDER BY created_at ASC, id ASC;
 
+-- name: GetAutomationVerificationStats :one
+-- Project-scoped, bounded recent backlog for external execution results that
+-- have no Stage-owned proof yet. These rows remain visible even though they
+-- cannot advance the workflow or count as accepted deployment evidence.
+SELECT count(*)::bigint AS pending_count,
+       count(*) FILTER (WHERE stage = 'ci')::bigint AS ci_count,
+       count(*) FILTER (WHERE stage = 'merge')::bigint AS merge_count,
+       count(*) FILTER (WHERE stage = 'deploy')::bigint AS deploy_count,
+       count(*) FILTER (WHERE stage = 'synthetic')::bigint AS synthetic_count
+FROM automation_receipts
+WHERE org_id = sqlc.arg(org_id)::text
+  AND project_id = sqlc.arg(project_id)::text
+  AND status = 'passed'
+  AND stage IN ('ci', 'merge', 'deploy', 'synthetic')
+  AND verification_status = 'unverified'
+  AND created_at >= sqlc.arg(since);
+
 -- name: HasAutomationReceiptEvidence :one
 -- A completed coding-loop stage is only evidence when it follows the human
 -- approved revision that it claims to advance. Keep all tenant, project, issue,
@@ -104,11 +121,14 @@ SELECT EXISTS (
       AND ar.target_revision = sqlc.arg(target_revision)
       AND (
           -- A review approval remains human evidence only while its actor
-          -- identity is retained. User deletion intentionally nulls this FK.
+          -- identity is retained; the table check rejects actor deletion
+          -- while an approved receipt still references that user.
           (ar.stage = 'review' AND ar.actor_user_id IS NOT NULL)
-          -- Execution receipts must carry the immutable external run that
-          -- produced the result; this excludes legacy/unattributed rows.
-          OR (ar.stage IN ('ci', 'merge', 'deploy', 'synthetic') AND ar.run_ref <> '')
+          -- Opaque caller references are not outcome proof. Only a trusted
+          -- server-side verifier may promote an external execution receipt.
+          OR (ar.stage IN ('ci', 'merge', 'deploy', 'synthetic')
+              AND ar.run_ref <> '' AND ar.verification_status = 'verified'
+              AND (ar.stage <> 'synthetic' OR ar.evidence_ref <> ''))
           -- Patch completion must point to the exact completed AI evidence
           -- that the worker used; a revision marker alone is insufficient.
           OR (

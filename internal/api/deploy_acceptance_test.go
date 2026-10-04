@@ -44,10 +44,12 @@ func TestDeployAcceptanceQueryIsTenantScopedAndPayloadFree(t *testing.T) {
 		"d.org_id = sqlc.arg(org_id)::text",
 		"d.stage = 'deploy'",
 		"d.status = 'passed'",
+		"d.verification_status = 'verified'",
 		"d.completed_at >= sqlc.arg(since)",
 		"d.completed_at < sqlc.arg(grace_cutoff)",
 		"s.stage = 'synthetic'",
 		"s.status = 'passed'",
+		"s.verification_status = 'verified'",
 		"s.target_revision = d.target_revision",
 		"s.completed_at >= d.completed_at",
 	} {
@@ -55,7 +57,7 @@ func TestDeployAcceptanceQueryIsTenantScopedAndPayloadFree(t *testing.T) {
 			t.Fatalf("deploy acceptance query missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"prompt", "completion", "payload", "run_ref", "evidence_ref"} {
+	for _, forbidden := range []string{"prompt", "completion", "payload", "select d.run_ref", "select s.evidence_ref"} {
 		if strings.Contains(strings.ToLower(section), forbidden) {
 			t.Fatalf("deploy acceptance query exposed raw field %q", forbidden)
 		}

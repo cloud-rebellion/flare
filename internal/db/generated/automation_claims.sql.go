@@ -24,6 +24,13 @@ WITH eligible AS (
           AND done.stage = $5
           AND done.status = 'passed'
           AND done.target_revision = $6
+          -- A caller's opaque run_ref cannot consume the stage forever. Patch
+          -- has its own triage digest check; external stages need trusted proof.
+          AND (done.stage = 'patch' OR (
+              done.verification_status = 'verified'
+              AND done.run_ref <> ''
+              AND (done.stage <> 'synthetic' OR done.evidence_ref <> '')
+          ))
     )
       AND (
           ($5 = 'patch' AND EXISTS (
@@ -58,6 +65,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = $6
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
           OR ($5 = 'deploy' AND EXISTS (
               SELECT 1
@@ -69,6 +77,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = $6
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
           OR ($5 = 'synthetic' AND EXISTS (
               SELECT 1
@@ -80,6 +89,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = $6
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
       )
 )

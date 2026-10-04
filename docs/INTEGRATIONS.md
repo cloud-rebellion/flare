@@ -858,13 +858,21 @@ rollback alert rule when rollback outcomes should page.
 
 Create a project alert with `type: "deploy_acceptance"`, a `threshold` from
 `1` to `1000000`, and a `window_minutes` value from `1` to `720` to page when
-passed deploy receipts remain without a later passed synthetic receipt after
+verified passed deploy receipts remain without a later verified passed synthetic receipt after
 that grace period. The watchdog looks back only 24 hours and matches the same
 organization, project, issue, and target revision. It returns an aggregate
 count; receipt references, issue content, and probe evidence never enter the
 alert reason. A synthetic pass must carry its bounded `evidence_ref`, so this
 rule detects missing acceptance evidence rather than assuming a deploy is
 healthy from a deploy receipt alone.
+
+Caller-submitted passed CI, merge, deploy, and synthetic receipts are stored as
+`verification_status: "unverified"`, including rows created before migration 073.
+Their bounded `run_ref` and probe `evidence_ref` values are audit references,
+not trusted Stage outcomes. They do not unlock later stages or count as accepted
+deployments. Flare currently has no trusted promotion endpoint; Stage must
+provide an authenticated, exact-run attestation path before these stages can
+complete. Failed and blocked receipts remain usable diagnostics.
 
 The worker can persist each bounded coding-loop stage with
 `POST /api/projects/{id}/automation-receipts` using a member session or
@@ -890,12 +898,18 @@ than the request body. This endpoint only records evidence. It never runs a
 patch, merges a branch, deploys an artifact, or executes a synthetic check.
 Prompts, model responses, source contents, credentials, and raw provider
 payloads are never stored or returned.
+Each receipt response includes server-owned `verification_status`. The
+authenticated `GET /api/projects/{id}/automation-verification` returns
+project-scoped counts of unverified passed CI, merge, deploy, and synthetic
+receipts created in the past 30 days. The state is `pending` when the count is
+nonzero and `clear` otherwise; a missing or cross-tenant project returns 404.
 
 An external coding-loop worker can poll
 `GET /api/projects/{id}/automation-next?issue_id=...` after each receipt. The
 read-only response is tenant- and project-scoped and contains only the issue,
 target revision, eligible next stage, prerequisite receipt ID, and a bounded
-state (`ready`, `pending`, `retry`, `blocked`, `complete`, or `not_started`).
+state (`ready`, `pending`, `verification_pending`, `retry`, `blocked`,
+`complete`, or `not_started`).
 `ready` is returned only after the immediately preceding stage is valid for the
 same target revision; review approvals require a retained human actor, and a
 synthetic pass requires both a runner and evidence reference. The endpoint
@@ -913,7 +927,9 @@ repository, CI, deployment, or probe capability. Claims are tenant/project/
 issue/stage/revision scoped and the database atomically refuses a second active
 claim. A passed executable receipt must include its claim id. Receipt insertion
 checks the live lease and exact stage/revision/evidence binding in the same
-transaction, consuming the claim on success. Failed or pending receipts may be
+transaction. A passed patch consumes its claim. An external passed receipt
+remains advisory, and the live claim accepts only one such pass. After expiry,
+the stage can be reclaimed and retried with a fresh claim. Failed or pending receipts may be
 recorded without a claim for backward-compatible diagnostics and cannot advance
 the workflow. Expired claims can be reclaimed; consumed claims cannot.
 
@@ -923,14 +939,13 @@ from a completed, fresh `ai_action_receipts` triage row in `evidence_ref`.
 Flare checks that digest with the same organization, project, and issue before
 accepting the patch receipt; a cached triage row has no digest and cannot be
 used as patch evidence. An approved review must name that same revision
-and a human actor; then Flare accepts passed CI, merge, deploy, and synthetic
-receipts only when the immediately preceding receipt exists for the same
+and a human actor; then Flare records passed CI, merge, deploy, and synthetic
+receipts only when the immediately preceding trusted receipt exists for the same
 issue, project, organization, and revision. CI, merge, deploy, and synthetic
 passes also require a bounded `run_ref`. A passed synthetic receipt additionally
 requires a bounded `evidence_ref` identifying the observed canary or probe
-result; Flare treats that value as opaque and never dereferences it. This keeps
-the final verification receipt tied to an external check result instead of only
-to a runner identifier. Failed or blocked stages can be recorded without a
+result; Flare treats that value as opaque and never dereferences it. A caller's
+reference alone cannot establish that the check passed. Failed or blocked stages can be recorded without a
 predecessor so the stopping point remains visible. A missing predecessor
 returns a conflict instead of creating an ungrounded success receipt.
 

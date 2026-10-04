@@ -139,24 +139,25 @@ type AutomationClaim struct {
 }
 
 type AutomationReceipt struct {
-	ID             string             `json:"id"`
-	OrgID          string             `json:"org_id"`
-	ProjectID      string             `json:"project_id"`
-	IssueID        string             `json:"issue_id"`
-	Stage          string             `json:"stage"`
-	Status         string             `json:"status"`
-	IdempotencyKey string             `json:"idempotency_key"`
-	EvidenceRef    string             `json:"evidence_ref"`
-	SourceRevision string             `json:"source_revision"`
-	TargetRevision string             `json:"target_revision"`
-	RunRef         string             `json:"run_ref"`
-	ActorUserID    pgtype.Text        `json:"actor_user_id"`
-	Retryable      bool               `json:"retryable"`
-	ErrorCode      string             `json:"error_code"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
-	ClaimID        pgtype.Text        `json:"claim_id"`
+	ID                 string             `json:"id"`
+	OrgID              string             `json:"org_id"`
+	ProjectID          string             `json:"project_id"`
+	IssueID            string             `json:"issue_id"`
+	Stage              string             `json:"stage"`
+	Status             string             `json:"status"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	EvidenceRef        string             `json:"evidence_ref"`
+	SourceRevision     string             `json:"source_revision"`
+	TargetRevision     string             `json:"target_revision"`
+	RunRef             string             `json:"run_ref"`
+	ActorUserID        pgtype.Text        `json:"actor_user_id"`
+	Retryable          bool               `json:"retryable"`
+	ErrorCode          string             `json:"error_code"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	ClaimID            pgtype.Text        `json:"claim_id"`
+	VerificationStatus string             `json:"verification_status"`
 }
 
 type BusinessCheck struct {

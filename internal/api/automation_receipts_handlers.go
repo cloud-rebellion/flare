@@ -70,21 +70,22 @@ type createAutomationReceiptRequest struct {
 // credentials, source contents, or provider error text. References are bounded
 // opaque identifiers supplied by the caller and are never dereferenced here.
 type automationReceiptResponse struct {
-	ID             string     `json:"id"`
-	IssueID        string     `json:"issue_id"`
-	Stage          string     `json:"stage"`
-	Status         string     `json:"status"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	EvidenceRef    string     `json:"evidence_ref,omitempty"`
-	SourceRevision string     `json:"source_revision,omitempty"`
-	TargetRevision string     `json:"target_revision,omitempty"`
-	RunRef         string     `json:"run_ref,omitempty"`
-	ActorUserID    string     `json:"actor_user_id,omitempty"`
-	Retryable      bool       `json:"retryable"`
-	ErrorCode      string     `json:"error_code,omitempty"`
-	CreatedAt      *time.Time `json:"created_at,omitempty"`
-	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	ID                 string     `json:"id"`
+	IssueID            string     `json:"issue_id"`
+	Stage              string     `json:"stage"`
+	Status             string     `json:"status"`
+	VerificationStatus string     `json:"verification_status"`
+	IdempotencyKey     string     `json:"idempotency_key"`
+	EvidenceRef        string     `json:"evidence_ref,omitempty"`
+	SourceRevision     string     `json:"source_revision,omitempty"`
+	TargetRevision     string     `json:"target_revision,omitempty"`
+	RunRef             string     `json:"run_ref,omitempty"`
+	ActorUserID        string     `json:"actor_user_id,omitempty"`
+	Retryable          bool       `json:"retryable"`
+	ErrorCode          string     `json:"error_code,omitempty"`
+	CreatedAt          *time.Time `json:"created_at,omitempty"`
+	UpdatedAt          *time.Time `json:"updated_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
 }
 
 // automationNextResponse is the read-only handoff from Flare to an external
@@ -98,6 +99,16 @@ type automationNextResponse struct {
 	Stage                 string `json:"stage,omitempty"`
 	State                 string `json:"state"`
 	PrerequisiteReceiptID string `json:"prerequisite_receipt_id,omitempty"`
+}
+
+type automationVerificationResponse struct {
+	State          string `json:"state"`
+	WindowHours    int    `json:"window_hours"`
+	PendingCount   int64  `json:"pending_count"`
+	CICount        int64  `json:"ci_count"`
+	MergeCount     int64  `json:"merge_count"`
+	DeployCount    int64  `json:"deploy_count"`
+	SyntheticCount int64  `json:"synthetic_count"`
 }
 
 var automationWorkflowStages = []string{"patch", "review", "ci", "merge", "deploy", "synthetic"}
@@ -200,7 +211,7 @@ func (s *Server) handleCreateAutomationReceipt(w http.ResponseWriter, r *http.Re
 	})
 	if err == nil {
 		s.audit(r.Context(), "automation.receipt.create", normalized.IssueID)
-		writeJSON(w, http.StatusCreated, toAutomationReceiptResponse(row))
+		writeJSON(w, http.StatusCreated, toInsertedAutomationReceiptResponse(row))
 		return
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -246,6 +257,35 @@ func (s *Server) handleListAutomationReceipts(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleGetAutomationVerification exposes a fixed 30-day, payload-free count
+// of external pass claims awaiting trusted outcome verification. It is scoped
+// by both project and organization and cannot be used as execution authority.
+func (s *Server) handleGetAutomationVerification(w http.ResponseWriter, r *http.Request) {
+	const windowHours = 30 * 24
+	orgID, projectID := orgIDFrom(r.Context()), chi.URLParam(r, "id")
+	if _, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{ID: projectID, OrgScope: orgID}); err != nil {
+		writeErr(w, http.StatusNotFound, "project not found")
+		return
+	}
+	stats, err := s.q.GetAutomationVerificationStats(r.Context(), generated.GetAutomationVerificationStatsParams{
+		OrgID: orgID, ProjectID: projectID,
+		Since: pgtype.Timestamptz{Time: time.Now().UTC().Add(-windowHours * time.Hour), Valid: true},
+	})
+	if err != nil {
+		slogError(w, "get automation verification backlog", err)
+		return
+	}
+	state := "clear"
+	if stats.PendingCount > 0 {
+		state = "pending"
+	}
+	writeJSON(w, http.StatusOK, automationVerificationResponse{
+		State: state, WindowHours: windowHours, PendingCount: stats.PendingCount,
+		CICount: stats.CiCount, MergeCount: stats.MergeCount,
+		DeployCount: stats.DeployCount, SyntheticCount: stats.SyntheticCount,
+	})
+}
+
 // handleGetAutomationNext returns the next eligible coding-loop stage for one
 // issue. A worker can poll this projection after a human approves review and
 // then post its bounded CI/merge/deploy/synthetic receipt. The endpoint is
@@ -288,16 +328,20 @@ func automationNextAction(issueID string, rows []*generated.AutomationReceipt) a
 	out.TargetRevision = latestRevision
 
 	latest := make(map[string]*generated.AutomationReceipt, len(automationWorkflowStages))
+	completed := make(map[string]*generated.AutomationReceipt, len(automationWorkflowStages))
 	for _, row := range rows {
 		if row == nil || row.TargetRevision != latestRevision || !automationWorkflowStage(row.Stage) {
 			continue
 		}
 		latest[row.Stage] = row
+		if automationReceiptStageComplete(row) {
+			completed[row.Stage] = row
+		}
 	}
 
 	for index, stage := range automationWorkflowStages {
 		row := latest[stage]
-		if automationReceiptStageComplete(row) {
+		if completed[stage] != nil {
 			continue
 		}
 		if row != nil && row.Status == "pending" {
@@ -306,8 +350,8 @@ func automationNextAction(issueID string, rows []*generated.AutomationReceipt) a
 			return out
 		}
 		if index > 0 {
-			prerequisite := latest[automationWorkflowStages[index-1]]
-			if !automationReceiptStageComplete(prerequisite) {
+			prerequisite := completed[automationWorkflowStages[index-1]]
+			if prerequisite == nil {
 				out.State = "blocked"
 				return out
 			}
@@ -317,6 +361,11 @@ func automationNextAction(issueID string, rows []*generated.AutomationReceipt) a
 			out.Available = true
 			out.Stage = stage
 			out.State = "retry"
+			return out
+		}
+		if row != nil && row.Status == "passed" && automationReceiptNeedsExternalVerification(row.Stage) && row.VerificationStatus != "verified" {
+			out.Stage = stage
+			out.State = "verification_pending"
 			return out
 		}
 		if row == nil {
@@ -358,12 +407,16 @@ func automationReceiptStageComplete(row *generated.AutomationReceipt) bool {
 	case "review":
 		return row.Status == "approved" && row.TargetRevision != "" && row.ActorUserID.Valid
 	case "ci", "merge", "deploy":
-		return row.Status == "passed" && row.TargetRevision != "" && row.RunRef != ""
+		return row.Status == "passed" && row.VerificationStatus == "verified" && row.TargetRevision != "" && row.RunRef != ""
 	case "synthetic":
-		return row.Status == "passed" && row.TargetRevision != "" && row.RunRef != "" && row.EvidenceRef != ""
+		return row.Status == "passed" && row.VerificationStatus == "verified" && row.TargetRevision != "" && row.RunRef != "" && row.EvidenceRef != ""
 	default:
 		return false
 	}
+}
+
+func automationReceiptNeedsExternalVerification(stage string) bool {
+	return stage == "ci" || stage == "merge" || stage == "deploy" || stage == "synthetic"
 }
 
 func automationReceiptLimit(r *http.Request) int32 {
@@ -553,7 +606,8 @@ func automationReceiptClaimID(row *generated.AutomationReceipt) string {
 func toAutomationReceiptResponse(row *generated.AutomationReceipt) automationReceiptResponse {
 	out := automationReceiptResponse{
 		ID: row.ID, IssueID: row.IssueID, Stage: row.Stage, Status: row.Status,
-		IdempotencyKey: row.IdempotencyKey, EvidenceRef: row.EvidenceRef,
+		VerificationStatus: row.VerificationStatus,
+		IdempotencyKey:     row.IdempotencyKey, EvidenceRef: row.EvidenceRef,
 		SourceRevision: row.SourceRevision, TargetRevision: row.TargetRevision,
 		RunRef: row.RunRef, Retryable: row.Retryable, ErrorCode: row.ErrorCode,
 		CreatedAt: receiptTimestamp(row.CreatedAt), UpdatedAt: receiptTimestamp(row.UpdatedAt),
@@ -563,4 +617,16 @@ func toAutomationReceiptResponse(row *generated.AutomationReceipt) automationRec
 		out.ActorUserID = row.ActorUserID.String
 	}
 	return out
+}
+
+func toInsertedAutomationReceiptResponse(row *generated.InsertAutomationReceiptRow) automationReceiptResponse {
+	return toAutomationReceiptResponse(&generated.AutomationReceipt{
+		ID: row.ID, OrgID: row.OrgID, ProjectID: row.ProjectID, IssueID: row.IssueID,
+		Stage: row.Stage, Status: row.Status, VerificationStatus: row.VerificationStatus,
+		IdempotencyKey: row.IdempotencyKey, EvidenceRef: row.EvidenceRef,
+		SourceRevision: row.SourceRevision, TargetRevision: row.TargetRevision,
+		RunRef: row.RunRef, ActorUserID: row.ActorUserID, Retryable: row.Retryable,
+		ErrorCode: row.ErrorCode, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		CompletedAt: row.CompletedAt, ClaimID: row.ClaimID,
+	})
 }

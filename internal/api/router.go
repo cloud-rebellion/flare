@@ -131,6 +131,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/ingest-receipts", s.handleListIngestReceipts)
 				r.Get("/projects/{id}/ai-receipts", s.handleListAIActionReceipts)
 				r.Get("/projects/{id}/automation-receipts", s.handleListAutomationReceipts)
+				r.Get("/projects/{id}/automation-verification", s.handleGetAutomationVerification)
 				r.Get("/projects/{id}/automation-next", s.handleGetAutomationNext)
 				r.Get("/usage", s.handleListUsage)
 				r.Get("/issues/{id}", s.handleGetIssue)

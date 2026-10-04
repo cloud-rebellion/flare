@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,10 +10,98 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
+	"github.com/bright-interaction/flare/internal/id"
 )
+
+func TestAutomationPassedReceiptOnePerLiveClaimReturnsConflict(t *testing.T) {
+	pool := newTestDB(t)
+	project := seedProjectForIngest(t, pool)
+	q := generated.New(pool)
+	ctx := context.Background()
+	issue, err := q.UpsertIssue(ctx, generated.UpsertIssueParams{
+		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID,
+		Fingerprint: id.New(), Title: "CI claim", Culprit: "test", Level: "error", Platform: "go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := q.CreateUser(ctx, generated.CreateUserParams{
+		ID: id.New(), OrgID: project.OrgID, Email: id.New() + "@example.test", PasswordHash: "hash", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+		Stage: "review", Status: "approved", IdempotencyKey: "review-claim",
+		TargetRevision: "rev-1", ActorUserID: pgtype.Text{String: actor.ID, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := q.ClaimAutomationStage(ctx, generated.ClaimAutomationStageParams{
+		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+		Stage: "ci", TargetRevision: "rev-1", WorkerRef: "worker-1",
+		LeasedUntil: pgtype.Timestamptz{Time: time.Now().Add(time.Minute), Valid: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serverForDB(pool)
+	submit := func(key string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(createAutomationReceiptRequest{
+			IssueID: issue.ID, Stage: "ci", Status: "passed", IdempotencyKey: key,
+			ClaimID: claim.ID, TargetRevision: "rev-1", RunRef: "opaque-run",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/automation-receipts", strings.NewReader(string(body)))
+		route := chi.NewRouteContext()
+		route.URLParams.Add("id", project.ID)
+		rctx := context.WithValue(req.Context(), chi.RouteCtxKey, route)
+		req = req.WithContext(context.WithValue(rctx, ctxOrgID, project.OrgID))
+		out := httptest.NewRecorder()
+		s.handleCreateAutomationReceipt(out, req)
+		return out
+	}
+	first := submit("ci-claim-first")
+	if first.Code != http.StatusCreated || !strings.Contains(first.Body.String(), `"verification_status":"unverified"`) {
+		t.Fatalf("first advisory pass = %d: %s", first.Code, first.Body.String())
+	}
+	second := submit("ci-claim-second")
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second pass under live claim = %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestAutomationVerificationRequiresScopedProject(t *testing.T) {
+	pool := newTestDB(t)
+	project := seedProjectForIngest(t, pool)
+	s := serverForDB(pool)
+	request := func(orgID, projectID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/automation-verification", nil)
+		route := chi.NewRouteContext()
+		route.URLParams.Add("id", projectID)
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, route)
+		req = req.WithContext(context.WithValue(ctx, ctxOrgID, orgID))
+		out := httptest.NewRecorder()
+		s.handleGetAutomationVerification(out, req)
+		return out
+	}
+	if got := request("other-org", project.ID); got.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant project returned %d: %s", got.Code, got.Body.String())
+	}
+	if got := request(project.OrgID, "missing-project"); got.Code != http.StatusNotFound {
+		t.Fatalf("missing project returned %d: %s", got.Code, got.Body.String())
+	}
+	if got := request(project.OrgID, project.ID); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"state":"clear"`) {
+		t.Fatalf("owned project verification summary = %d: %s", got.Code, got.Body.String())
+	}
+}
 
 func TestAutomationReceiptLimitIsBounded(t *testing.T) {
 	for _, tc := range []struct {
@@ -35,6 +124,11 @@ func TestAutomationReceiptLimitIsBounded(t *testing.T) {
 }
 
 func TestNormalizeAutomationReceiptRequestStrict(t *testing.T) {
+	forged := httptest.NewRequest(http.MethodPost, "/api/projects/p/automation-receipts", strings.NewReader(`{"issue_id":"i","stage":"ci","status":"passed","idempotency_key":"k","verification_status":"verified"}`))
+	var forgedRequest createAutomationReceiptRequest
+	if err := decodeJSON(forged, &forgedRequest); err == nil {
+		t.Fatal("client-controlled verification_status was accepted")
+	}
 	valid := createAutomationReceiptRequest{
 		IssueID: "issue-1", Stage: "ci", Status: "passed", IdempotencyKey: "run-1", ClaimID: "claim-1",
 		SourceRevision: "abc123", TargetRevision: "def456", RunRef: "ci-17",
@@ -130,6 +224,10 @@ func automationNextRow(id, stage, status, revision string) *generated.Automation
 	}
 	if stage == "ci" || stage == "merge" || stage == "deploy" || stage == "synthetic" {
 		row.RunRef = id + "-run"
+		if status == "passed" {
+			// This fixture represents a receipt promoted by a future trusted verifier.
+			row.VerificationStatus = "verified"
+		}
 	}
 	if stage == "synthetic" && status == "passed" {
 		row.EvidenceRef = id + "-evidence"
@@ -164,6 +262,29 @@ func TestAutomationNextActionIsTenantSafeStateMachine(t *testing.T) {
 				automationNextRow("review-1", "review", "approved", "rev-1"),
 				automationNextRow("ci-1", "ci", "pending", "rev-1"),
 			}, state: "pending", stage: "ci",
+		},
+		{
+			name: "caller reported ci pass awaits verification", rows: []*generated.AutomationReceipt{
+				automationNextRow("patch-1", "patch", "passed", "rev-1"),
+				automationNextRow("review-1", "review", "approved", "rev-1"),
+				{ID: "ci-advisory", Stage: "ci", Status: "passed", TargetRevision: "rev-1", RunRef: "opaque-run"},
+			}, state: "verification_pending", stage: "ci", prereqID: "review-1",
+		},
+		{
+			name: "newer unverified ci does not mask verified ci", rows: []*generated.AutomationReceipt{
+				automationNextRow("patch-1", "patch", "passed", "rev-1"),
+				automationNextRow("review-1", "review", "approved", "rev-1"),
+				automationNextRow("ci-verified", "ci", "passed", "rev-1"),
+				{ID: "ci-advisory", Stage: "ci", Status: "passed", TargetRevision: "rev-1", RunRef: "opaque-run"},
+			}, available: true, state: "ready", stage: "merge", prereqID: "ci-verified",
+		},
+		{
+			name: "older unverified ci does not mask verified ci", rows: []*generated.AutomationReceipt{
+				automationNextRow("patch-1", "patch", "passed", "rev-1"),
+				automationNextRow("review-1", "review", "approved", "rev-1"),
+				{ID: "ci-advisory", Stage: "ci", Status: "passed", TargetRevision: "rev-1", RunRef: "opaque-run"},
+				automationNextRow("ci-verified", "ci", "passed", "rev-1"),
+			}, available: true, state: "ready", stage: "merge", prereqID: "ci-verified",
 		},
 		{
 			name: "review without human actor blocks ci", rows: []*generated.AutomationReceipt{
@@ -209,7 +330,7 @@ func TestAutomationNextActionIsTenantSafeStateMachine(t *testing.T) {
 				automationNextRow("ci-1", "ci", "passed", "rev-1"),
 				automationNextRow("merge-1", "merge", "passed", "rev-1"),
 				automationNextRow("deploy-1", "deploy", "passed", "rev-1"),
-				{ID: "synthetic-1", IssueID: "issue-1", Stage: "synthetic", Status: "passed", TargetRevision: "rev-1", RunRef: "probe-1"},
+				{ID: "synthetic-1", IssueID: "issue-1", Stage: "synthetic", Status: "passed", VerificationStatus: "verified", TargetRevision: "rev-1", RunRef: "probe-1"},
 			}, state: "blocked", stage: "synthetic", prereqID: "deploy-1",
 		},
 		{
@@ -274,6 +395,9 @@ func TestAutomationReceiptRouteAuthAndNoExecution(t *testing.T) {
 	}
 	if !strings.Contains(readBlock, `r.Get("/projects/{id}/automation-next", s.handleGetAutomationNext)`) {
 		t.Fatal("automation next GET is not in authenticated viewer read group")
+	}
+	if !strings.Contains(readBlock, `r.Get("/projects/{id}/automation-verification", s.handleGetAutomationVerification)`) {
+		t.Fatal("automation verification GET is not in authenticated viewer read group")
 	}
 	memberEnd := strings.Index(body[memberStart:], `s.requireRole("admin")`)
 	if memberEnd < 0 {

@@ -13,6 +13,13 @@ WITH eligible AS (
           AND done.stage = sqlc.arg(stage)
           AND done.status = 'passed'
           AND done.target_revision = sqlc.arg(target_revision)
+          -- A caller's opaque run_ref cannot consume the stage forever. Patch
+          -- has its own triage digest check; external stages need trusted proof.
+          AND (done.stage = 'patch' OR (
+              done.verification_status = 'verified'
+              AND done.run_ref <> ''
+              AND (done.stage <> 'synthetic' OR done.evidence_ref <> '')
+          ))
     )
       AND (
           (sqlc.arg(stage) = 'patch' AND EXISTS (
@@ -47,6 +54,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
           OR (sqlc.arg(stage) = 'deploy' AND EXISTS (
               SELECT 1
@@ -58,6 +66,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
           OR (sqlc.arg(stage) = 'synthetic' AND EXISTS (
               SELECT 1
@@ -69,6 +78,7 @@ WITH eligible AS (
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
                 AND prior.run_ref <> ''
+                AND prior.verification_status = 'verified'
           ))
       )
 )

@@ -82,6 +82,10 @@ triage receipt for the same tenant, project, and issue before accepting a
 passed patch. A worker may propose a remediation and wait for an approved
 actor; Flare records stage receipts, while the worker and the deployment system
 remain responsible for any separately authorized CI/deploy/synthetic actions.
+Caller-reported passed CI, merge, deploy, and synthetic outcomes remain
+`unverified` and cannot advance the next stage or accepted-deploy watchdog.
+Stage outcome attestation is still required before Flare can complete that
+chain; the project verification summary shows the pending 30-day backlog.
 
 Delivery health is visible through the channel's last-attempt/last-success
 fields, alerts integration metrics, and aggregate `automation_outbox` state on

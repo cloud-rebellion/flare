@@ -1179,8 +1179,19 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: issue_id, in: query, required: true, schema: { type: string, maxLength: 128 } }
       responses:
-        "200": { description: "Bounded next-stage state (ready, pending, retry, blocked, complete, or not_started)" }
+        "200": { description: "Bounded next-stage state (ready, pending, verification_pending, retry, blocked, complete, or not_started); external passes require trusted Stage verification" }
         "400": { description: Invalid or missing issue_id }
+  /api/projects/{id}/automation-verification:
+    get:
+      tags: [Projects]
+      summary: Count caller-reported execution passes awaiting trusted verification
+      description: Authenticated project-scoped counts for unverified passed CI, merge, deploy, and synthetic receipts created in the past 30 days. Counts grant no execution authority.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "State clear or pending, fixed 720-hour window, total and per-stage counts" }
+        "404": { description: Project not found in caller organization }
   /api/projects/{id}/automation-claims:
     post:
       tags: [Projects]
@@ -1218,11 +1229,11 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
       responses:
-        "200": { description: "Bounded triage, patch, CI, deploy, rollback, and synthetic receipts" }
+        "200": { description: "Bounded triage, patch, CI, deploy, rollback, and synthetic receipts; each row includes server-owned verification_status" }
     post:
       tags: [Projects]
       summary: Record a human-gated workflow receipt
-      description: Passed patch, CI, merge, deploy, and synthetic receipts must advance the same target revision in order. A passed patch requires evidence_ref to be the 64-character lowercase SHA-256 digest from a completed fresh AI triage receipt for the same issue. Review approval requires a human session actor; execution passes require run_ref. A passed synthetic receipt additionally requires evidence_ref for the observed canary or probe result. Rollback receipts require source_revision and target_revision, and a passed rollback requires run_ref. Failed or blocked stages may be recorded without a predecessor; rollback is never inferred from deploy receipts.
+      description: Passed patch, CI, merge, deploy, and synthetic receipts must follow the same target revision in order. External passed CI, merge, deploy, and synthetic receipts remain unverified advisory reports until trusted Stage attestation; opaque run_ref or evidence_ref values cannot advance workflow or accepted-deploy monitoring. A passed patch requires evidence_ref to be the 64-character lowercase SHA-256 digest from a completed fresh AI triage receipt for the same issue. Review approval requires a human session actor; execution passes require run_ref. A passed synthetic receipt additionally requires evidence_ref for the observed canary or probe result. Rollback receipts require source_revision and target_revision, and a passed rollback requires run_ref. Failed or blocked stages may be recorded without a predecessor; rollback is never inferred from deploy receipts.
       security: [{ apiKey: [] }, { session: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }

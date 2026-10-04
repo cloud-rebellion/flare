@@ -94,8 +94,8 @@ WHERE project_id = sqlc.arg(project_id)::text
       OR (status = 'started' AND completed_at IS NULL AND started_at < sqlc.arg(cutoff))
   );
 
--- Deploy-acceptance rules count passed deploy receipts that have aged beyond
--- the configured grace period without a later passed synthetic receipt for the
+-- Deploy-acceptance rules count verified passed deploy receipts that have aged
+-- beyond the configured grace period without a later verified synthetic for the
 -- same issue and target revision. The lookback is bounded by the watchdog so a
 -- forgotten historical deploy cannot page forever. Only tenant-safe counts
 -- cross this boundary; receipt references and issue content stay out.
@@ -106,6 +106,8 @@ WHERE d.project_id = sqlc.arg(project_id)::text
   AND d.org_id = sqlc.arg(org_id)::text
   AND d.stage = 'deploy'
   AND d.status = 'passed'
+  AND d.verification_status = 'verified'
+  AND d.run_ref <> ''
   AND d.completed_at IS NOT NULL
   AND d.completed_at >= sqlc.arg(since)
   AND d.completed_at < sqlc.arg(grace_cutoff)
@@ -117,6 +119,9 @@ WHERE d.project_id = sqlc.arg(project_id)::text
         AND s.issue_id = d.issue_id
         AND s.stage = 'synthetic'
         AND s.status = 'passed'
+        AND s.verification_status = 'verified'
+        AND s.run_ref <> ''
+        AND s.evidence_ref <> ''
         AND s.target_revision = d.target_revision
         AND s.completed_at IS NOT NULL
         AND s.completed_at >= d.completed_at
