@@ -964,7 +964,7 @@ func connectorSyncHealthReason(stats *generated.GetConnectorSyncHealthStatsRow, 
 	case "failed":
 		count, label = stats.FailedCount, "failed sync state(s)"
 	case "overdue":
-		count, label = stats.OverdueCount, "overdue sync state(s) or lease(s)"
+		count, label = stats.OverdueCount, "overdue sync condition(s)"
 	default:
 		return ""
 	}

@@ -1030,8 +1030,12 @@ durable worker state for one registered installation. The rule requires the
 tenant-checked `connector_connection_id`, the exact sync `connector_operation`
 (for example `account_details`), and `connector_sync_mode` of `failed` or
 `overdue`. `failed` counts recent terminal failures; `overdue` counts a missed
-`next_run_at` or expired worker lease after the configured `window_minutes`
-grace period. `threshold` is the number of matching states required to fire.
+`next_run_at`, expired worker lease, or an active project-bound installation
+that has not made its first sync pass after the configured `window_minutes`
+grace period. An idle state reset by project re-consent gets a fresh grace
+period. An on-demand account `check` does not replace the worker pass; run
+`/sync` or enable the scheduler. For one selected installation, set `threshold`
+to `1`.
 The alert remains project-routed, and its connection must be bound to that
 exact project. The watchdog repeats the binding check when it evaluates an
 existing rule, so a rule cannot page from another project's installation.

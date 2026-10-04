@@ -29,6 +29,20 @@ SELECT count(*) FILTER (
        )::bigint AS failed_count,
        count(*) FILTER (
            WHERE (
+               -- A bound active installation is expected to produce its
+               -- first sync state. Without this branch, a scheduler that
+               -- never ran could leave the installation silent forever.
+               c.status = 'active'
+               AND s.id IS NULL
+               AND c.created_at < sqlc.arg(cutoff)
+           ) OR (
+               -- Re-consent to another project resets an existing state to
+               -- idle. Allow one fresh grace period from that reset.
+               c.status = 'active'
+               AND s.state = 'idle'
+               AND s.next_run_at IS NULL
+               AND s.updated_at < sqlc.arg(cutoff)
+           ) OR (
                s.next_run_at IS NOT NULL
                AND s.next_run_at < sqlc.arg(cutoff)
            ) OR (
@@ -37,15 +51,15 @@ SELECT count(*) FILTER (
                AND s.lease_expires_at < sqlc.arg(cutoff)
            )
        )::bigint AS overdue_count
-FROM connector_sync_states s
-JOIN connector_connections c
-  ON c.id = s.connection_id
- AND c.org_id = s.org_id
-WHERE s.org_id = sqlc.arg(org_id)::text
+FROM connector_connections c
+LEFT JOIN connector_sync_states s
+  ON s.connection_id = c.id
+ AND s.org_id = c.org_id
+ AND s.operation = sqlc.arg(operation)::text
+WHERE c.org_id = sqlc.arg(org_id)::text
   AND c.project_id = sqlc.arg(project_id)::text
-  AND s.connection_id = sqlc.arg(connection_id)::text
+  AND c.id = sqlc.arg(connection_id)::text
   AND c.provider = sqlc.arg(provider)::text
-  AND s.operation = sqlc.arg(operation)::text
   AND c.status IN ('active', 'pending', 'error');
 
 -- In-progress receipts are created before a telemetry handler touches the

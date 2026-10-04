@@ -36,7 +36,7 @@ func TestConnectorSyncHealthReasonUsesOnlySelectedMode(t *testing.T) {
 	if got := connectorSyncHealthReason(stats, "hubspot", "account_details", "conn-1", "failed", 2, 15); !strings.Contains(got, "2 failed sync state") || !strings.Contains(got, "connection:conn-1") {
 		t.Fatalf("failed reason = %q", got)
 	}
-	if got := connectorSyncHealthReason(stats, "hubspot", "account_details", "conn-1", "overdue", 3, 15); !strings.Contains(got, "3 overdue sync state") {
+	if got := connectorSyncHealthReason(stats, "hubspot", "account_details", "conn-1", "overdue", 3, 15); !strings.Contains(got, "3 overdue sync condition") {
 		t.Fatalf("overdue reason = %q", got)
 	}
 	for _, tc := range []struct {
@@ -71,11 +71,21 @@ func TestConnectorSyncHealthQueryIsTenantAndInstallationScoped(t *testing.T) {
 		section = section[:end+1]
 	}
 	for _, want := range []string{
-		"s.org_id = sqlc.arg(org_id)::text",
-		"s.connection_id = sqlc.arg(connection_id)::text",
+		"FROM connector_connections c",
+		"LEFT JOIN connector_sync_states s",
+		"s.connection_id = c.id",
+		"s.org_id = c.org_id",
+		"c.org_id = sqlc.arg(org_id)::text",
+		"c.project_id = sqlc.arg(project_id)::text",
+		"c.id = sqlc.arg(connection_id)::text",
 		"c.provider = sqlc.arg(provider)::text",
 		"s.operation = sqlc.arg(operation)::text",
 		"s.state = 'failed'",
+		"c.status = 'active'",
+		"s.id IS NULL",
+		"c.created_at < sqlc.arg(cutoff)",
+		"s.state = 'idle'",
+		"s.next_run_at IS NULL",
 		"s.next_run_at < sqlc.arg(cutoff)",
 		"s.lease_expires_at < sqlc.arg(cutoff)",
 		"c.status IN ('active', 'pending', 'error')",

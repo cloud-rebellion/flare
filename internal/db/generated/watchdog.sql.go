@@ -280,6 +280,20 @@ SELECT count(*) FILTER (
        )::bigint AS failed_count,
        count(*) FILTER (
            WHERE (
+               -- A bound active installation is expected to produce its
+               -- first sync state. Without this branch, a scheduler that
+               -- never ran could leave the installation silent forever.
+               c.status = 'active'
+               AND s.id IS NULL
+               AND c.created_at < $1
+           ) OR (
+               -- Re-consent to another project resets an existing state to
+               -- idle. Allow one fresh grace period from that reset.
+               c.status = 'active'
+               AND s.state = 'idle'
+               AND s.next_run_at IS NULL
+               AND s.updated_at < $1
+           ) OR (
                s.next_run_at IS NOT NULL
                AND s.next_run_at < $1
            ) OR (
@@ -288,25 +302,25 @@ SELECT count(*) FILTER (
                AND s.lease_expires_at < $1
            )
        )::bigint AS overdue_count
-FROM connector_sync_states s
-JOIN connector_connections c
-  ON c.id = s.connection_id
- AND c.org_id = s.org_id
-WHERE s.org_id = $2::text
-  AND c.project_id = $3::text
-  AND s.connection_id = $4::text
-  AND c.provider = $5::text
-  AND s.operation = $6::text
+FROM connector_connections c
+LEFT JOIN connector_sync_states s
+  ON s.connection_id = c.id
+ AND s.org_id = c.org_id
+ AND s.operation = $2::text
+WHERE c.org_id = $3::text
+  AND c.project_id = $4::text
+  AND c.id = $5::text
+  AND c.provider = $6::text
   AND c.status IN ('active', 'pending', 'error')
 `
 
 type GetConnectorSyncHealthStatsParams struct {
 	Cutoff       pgtype.Timestamptz `json:"cutoff"`
+	Operation    string             `json:"operation"`
 	OrgID        string             `json:"org_id"`
 	ProjectID    string             `json:"project_id"`
 	ConnectionID string             `json:"connection_id"`
 	Provider     string             `json:"provider"`
-	Operation    string             `json:"operation"`
 }
 
 type GetConnectorSyncHealthStatsRow struct {
@@ -322,11 +336,11 @@ type GetConnectorSyncHealthStatsRow struct {
 func (q *Queries) GetConnectorSyncHealthStats(ctx context.Context, arg GetConnectorSyncHealthStatsParams) (*GetConnectorSyncHealthStatsRow, error) {
 	row := q.db.QueryRow(ctx, getConnectorSyncHealthStats,
 		arg.Cutoff,
+		arg.Operation,
 		arg.OrgID,
 		arg.ProjectID,
 		arg.ConnectionID,
 		arg.Provider,
-		arg.Operation,
 	)
 	var i GetConnectorSyncHealthStatsRow
 	err := row.Scan(&i.FailedCount, &i.OverdueCount)
