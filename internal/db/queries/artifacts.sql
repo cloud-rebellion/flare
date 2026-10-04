@@ -42,3 +42,13 @@ DELETE FROM source_map_artifacts WHERE id = $1 AND project_id = $2 AND org_id = 
 -- Row count and total bytes for a project's source maps, for the upload quota.
 SELECT count(*)::bigint AS artifacts, coalesce(sum(octet_length(content)), 0)::bigint AS bytes
 FROM source_map_artifacts WHERE project_id = $1 AND org_id = $2;
+
+-- name: GetSourceMapArtifactQuota :one
+-- Read total use and the exact overwrite target from one snapshot. The upload
+-- holds the project row lock while reading this and writing the artifact.
+SELECT count(*)::bigint AS artifacts,
+       coalesce(sum(octet_length(content)), 0)::bigint AS bytes,
+       count(*) FILTER (WHERE release = $3 AND name = $4)::bigint AS existing_artifacts,
+       coalesce(max(octet_length(content)) FILTER (WHERE release = $3 AND name = $4), 0)::bigint AS existing_bytes
+FROM source_map_artifacts
+WHERE project_id = $1 AND org_id = $2;

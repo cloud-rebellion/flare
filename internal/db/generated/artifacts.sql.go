@@ -52,6 +52,48 @@ func (q *Queries) DeleteSourceMap(ctx context.Context, arg DeleteSourceMapParams
 	return result.RowsAffected(), nil
 }
 
+const getSourceMapArtifactQuota = `-- name: GetSourceMapArtifactQuota :one
+SELECT count(*)::bigint AS artifacts,
+       coalesce(sum(octet_length(content)), 0)::bigint AS bytes,
+       count(*) FILTER (WHERE release = $3 AND name = $4)::bigint AS existing_artifacts,
+       coalesce(max(octet_length(content)) FILTER (WHERE release = $3 AND name = $4), 0)::bigint AS existing_bytes
+FROM source_map_artifacts
+WHERE project_id = $1 AND org_id = $2
+`
+
+type GetSourceMapArtifactQuotaParams struct {
+	ProjectID string `json:"project_id"`
+	OrgID     string `json:"org_id"`
+	Release   string `json:"release"`
+	Name      string `json:"name"`
+}
+
+type GetSourceMapArtifactQuotaRow struct {
+	Artifacts         int64 `json:"artifacts"`
+	Bytes             int64 `json:"bytes"`
+	ExistingArtifacts int64 `json:"existing_artifacts"`
+	ExistingBytes     int64 `json:"existing_bytes"`
+}
+
+// Read total use and the exact overwrite target from one snapshot. The upload
+// holds the project row lock while reading this and writing the artifact.
+func (q *Queries) GetSourceMapArtifactQuota(ctx context.Context, arg GetSourceMapArtifactQuotaParams) (*GetSourceMapArtifactQuotaRow, error) {
+	row := q.db.QueryRow(ctx, getSourceMapArtifactQuota,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Release,
+		arg.Name,
+	)
+	var i GetSourceMapArtifactQuotaRow
+	err := row.Scan(
+		&i.Artifacts,
+		&i.Bytes,
+		&i.ExistingArtifacts,
+		&i.ExistingBytes,
+	)
+	return &i, err
+}
+
 const getSourceMapsForRelease = `-- name: GetSourceMapsForRelease :many
 SELECT name, content FROM (
     SELECT name, content, created_at,

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -76,34 +77,16 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-project quota. Sourcemap upload is the only pipeline with no ingest
-	// rate limit (it is an auth route) and it deliberately sits at MEMBER so CI
-	// keeps working, so a leaked CI key was an unbounded write of 30 MiB
-	// artifacts with (project_id, release, name) all caller-chosen: it fills the
-	// volume. Counted before the upsert, and an upsert over an existing
-	// (release, name) is allowed through so redeploying the same release never
-	// wedges.
-	if used, cerr := s.q.CountSourceMapsByProject(r.Context(), generated.CountSourceMapsByProjectParams{
-		ProjectID: chi.URLParam(r, "id"), OrgID: orgIDFrom(r.Context()),
-	}); cerr != nil {
-		slogError(w, "count source maps", cerr)
-		return
-	} else if used.Artifacts >= maxArtifactsPerProject || used.Bytes+int64(len(req.Content)) > maxArtifactBytesPerProject {
-		writeErr(w, http.StatusInsufficientStorage,
-			"this project has reached its source map storage limit; delete old releases' maps first")
-		return
-	}
-
 	// Keep upload compatibility: malformed maps are retained with a bounded
 	// parser outcome instead of turning a CI upload into a hard failure. The
 	// same parser backs read-time symbolication, so `valid` means the resolver
 	// accepted the document and every other status explains why it will remain
 	// unmapped. Parser errors never cross the API boundary. Run this after the
-	// tenant and quota gates so an unauthorized or rejected upload cannot spend
-	// parser work on a large body.
+	// tenant gate so an unauthorized upload cannot spend parser work on a large
+	// body. Normalize before the quota transaction to count the bytes actually
+	// stored and keep parsing outside the project lock.
 	parseStatus := sourcemaps.Validate([]byte(req.Content))
-
-	row, err := s.q.UpsertSourceMap(r.Context(), generated.UpsertSourceMapParams{
+	artifact := generated.UpsertSourceMapParams{
 		ID:        id.New(),
 		ProjectID: chi.URLParam(r, "id"),
 		OrgID:     orgIDFrom(r.Context()),
@@ -116,15 +99,66 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		Name:        ingest.SanitizeColumn(req.Name),
 		Content:     string(ingest.SanitizeJSON([]byte(req.Content))),
 		ParseStatus: string(parseStatus),
-	})
+	}
+	row, quotaExceeded, err := s.acceptSourceMap(r.Context(), artifact)
 	if err != nil {
-		slogError(w, "upsert source map", err)
+		slogError(w, "accept source map", err)
+		return
+	}
+	if quotaExceeded {
+		writeErr(w, http.StatusInsufficientStorage,
+			"this project has reached its source map storage limit; delete old releases' maps first")
 		return
 	}
 	s.audit(r.Context(), "sourcemap.upload", row.Release+"/"+row.Name)
 	writeJSON(w, http.StatusCreated, artifactResponse{
 		ID: row.ID, Release: row.Release, Name: row.Name, Size: int64(row.Size), ParseStatus: row.ParseStatus, CreatedAt: row.CreatedAt.Time,
 	})
+}
+
+// acceptSourceMap serializes quota admission for every uploader of a project,
+// including concurrent requests handled by other Flare replicas. Replacements
+// consume only their change in stored bytes and no new artifact slot.
+func (s *Server) acceptSourceMap(parent context.Context, artifact generated.UpsertSourceMapParams) (*generated.UpsertSourceMapRow, bool, error) {
+	return s.acceptSourceMapWithLimits(parent, artifact, maxArtifactsPerProject, maxArtifactBytesPerProject)
+}
+
+func (s *Server) acceptSourceMapWithLimits(parent context.Context, artifact generated.UpsertSourceMapParams, maxArtifacts, maxBytes int64) (*generated.UpsertSourceMapRow, bool, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() {
+		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
+		defer done()
+		_ = tx.Rollback(cleanup)
+	}()
+	var projectID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id=$1 AND org_id=$2 FOR UPDATE`, artifact.ProjectID, artifact.OrgID).Scan(&projectID); err != nil {
+		return nil, false, err
+	}
+	qtx := generated.New(tx)
+	used, err := qtx.GetSourceMapArtifactQuota(ctx, generated.GetSourceMapArtifactQuotaParams{
+		ProjectID: artifact.ProjectID, OrgID: artifact.OrgID,
+		Release: artifact.Release, Name: artifact.Name,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if used.Artifacts-used.ExistingArtifacts+1 > maxArtifacts ||
+		used.Bytes-used.ExistingBytes+int64(len(artifact.Content)) > maxBytes {
+		return nil, true, nil
+	}
+	row, err := qtx.UpsertSourceMap(ctx, artifact)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return row, false, nil
 }
 
 func (s *Server) handleListSourceMaps(w http.ResponseWriter, r *http.Request) {
