@@ -55,6 +55,16 @@ type healthAutomationOutbox struct {
 	OldestSeconds int64  `json:"oldest_due_seconds"`
 }
 
+// Aggregate issue evaluation health contains no tenant or event details.
+type healthIssueEvaluations struct {
+	State                string `json:"state"` // healthy | degraded | unavailable
+	Pending              int64  `json:"pending"`
+	ExpiredLeases        int64  `json:"expired_leases"`
+	Dead                 int64  `json:"dead"`
+	OldestPendingSeconds int64  `json:"oldest_pending_seconds"`
+	CountsCapped         bool   `json:"counts_capped"`
+}
+
 type healthResponse struct {
 	Status            string                          `json:"status"`
 	Release           string                          `json:"release"`
@@ -67,6 +77,7 @@ type healthResponse struct {
 	Workers           map[string]healthWorkerSnapshot `json:"workers"`
 	Queue             healthQueue                     `json:"queue"`
 	AutomationOutbox  healthAutomationOutbox          `json:"automation_outbox"`
+	IssueEvaluations  healthIssueEvaluations          `json:"issue_evaluations"`
 }
 
 // workerSnapshot reports the current occupancy of a bounded pool. A nil
@@ -188,6 +199,28 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("automation outbox health query failed", "error", err)
 		}
 	}
+	issueHealth := healthIssueEvaluations{State: "unavailable"}
+	if db.Healthy {
+		if snapshot, err := s.IssueEvaluationHealth(ctx); err == nil {
+			issueHealth = healthIssueEvaluations{
+				State: "healthy", Pending: snapshot.Pending,
+				ExpiredLeases: snapshot.ExpiredLeases, Dead: snapshot.Dead,
+				OldestPendingSeconds: snapshot.OldestPendingAgeSeconds,
+				CountsCapped:         snapshot.CountsCapped,
+			}
+			if snapshot.Dead > 0 || snapshot.ExpiredLeases > 0 || snapshot.Pending > 500 || snapshot.OldestPendingAgeSeconds > 300 {
+				issueHealth.State = "degraded"
+				if status == "ok" {
+					status = "degraded"
+				}
+			}
+		} else {
+			if status == "ok" {
+				status = "degraded"
+			}
+			slog.Warn("issue evaluation health query failed", "error", err)
+		}
+	}
 
 	workers := map[string]healthWorkerSnapshot{
 		"default":     workerSnapshot(s.bgPool("default")),
@@ -225,6 +258,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			DropOnFull: true,
 		},
 		AutomationOutbox: queueHealth,
+		IssueEvaluations: issueHealth,
 	}
 	writeJSON(w, code, resp)
 }

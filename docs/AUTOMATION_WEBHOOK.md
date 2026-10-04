@@ -89,9 +89,12 @@ chain; the project verification summary shows the pending 30-day backlog.
 
 Delivery health is visible through the channel's last-attempt/last-success
 fields, alerts integration metrics, and aggregate `automation_outbox` state on
-`/readyz`. The outbox retries non-2xx responses and timeouts with the same
-body, up to its bounded attempt limit. A receiver must deduplicate
+`/readyz`. For accepted issue events with enabled issue rules, ingest commits
+the event and `issue_alert_evaluations` job together. The fenced evaluation
+worker retries after a crash, and `/readyz.issue_evaluations` exposes pending,
+expired, and dead work. The outbox retries non-2xx responses and timeouts with
+the same body, up to its bounded attempt limit. A receiver must deduplicate
 before starting work because a lost response can cause a successful notice to
-be sent again. A dead outbox row requires operator attention. The ingest alert
-evaluation path still uses a bounded background pool before enqueue, so a
-successful ingest response does not yet guarantee a queued notice.
+be sent again. Dead evaluation or outbox rows require operator attention.
+Ordinary email and Slack channels remain best effort; Flare's issue alert
+rate limits may intentionally suppress excess notices.

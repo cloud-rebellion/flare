@@ -85,7 +85,7 @@ components:
         status: { type: string, enum: [ok] }
     HealthResponse:
       type: object
-      required: [status, release, source_commit, db, analytics, retention, connector_receipts, email, workers, queue, automation_outbox]
+      required: [status, release, source_commit, db, analytics, retention, connector_receipts, email, workers, queue, automation_outbox, issue_evaluations]
       properties:
         status: { type: string, enum: [ok, degraded] }
         release: { type: string, minLength: 1, description: "Binary release version with +g<full SHA> when a source commit was stamped." }
@@ -154,6 +154,17 @@ components:
             leased: { type: integer, format: int64, minimum: 0 }
             dead: { type: integer, format: int64, minimum: 0 }
             oldest_due_seconds: { type: integer, format: int64, minimum: 0 }
+        issue_evaluations:
+          type: object
+          description: "Global, payload-free status for alert-evaluation jobs committed with accepted issue events. Counts are capped at 1001."
+          required: [state, pending, expired_leases, dead, oldest_pending_seconds, counts_capped]
+          properties:
+            state: { type: string, enum: [healthy, degraded, unavailable] }
+            pending: { type: integer, format: int64, minimum: 0 }
+            expired_leases: { type: integer, format: int64, minimum: 0 }
+            dead: { type: integer, format: int64, minimum: 0 }
+            oldest_pending_seconds: { type: integer, format: int64, minimum: 0 }
+            counts_capped: { type: boolean }
     AnalyticsHealthResponse:
       type: object
       description: Global payload-free cold-tier exporter telemetry; no tenant IDs or provider payloads.

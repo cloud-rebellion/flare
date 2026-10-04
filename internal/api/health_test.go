@@ -103,6 +103,9 @@ func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
 	if got.AutomationOutbox.State != "unavailable" {
 		t.Fatalf("automation outbox = %#v, want unavailable with database down", got.AutomationOutbox)
 	}
+	if got.IssueEvaluations.State != "unavailable" {
+		t.Fatalf("issue evaluations = %#v, want unavailable with database down", got.IssueEvaluations)
+	}
 	body := rec.Body.String()
 	for _, forbidden := range []string{"org_id", "project_id", "token", "payload", "secret"} {
 		if strings.Contains(body, forbidden) {

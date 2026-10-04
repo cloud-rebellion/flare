@@ -355,6 +355,24 @@ type Issue struct {
 	Sensitive    string             `json:"sensitive"`
 }
 
+type IssueAlertEvaluation struct {
+	ID            string             `json:"id"`
+	OrgID         string             `json:"org_id"`
+	ProjectID     string             `json:"project_id"`
+	IssueID       string             `json:"issue_id"`
+	IsNew         bool               `json:"is_new"`
+	Reopened      bool               `json:"reopened"`
+	EventCount    int64              `json:"event_count"`
+	ObservedAt    pgtype.Timestamptz `json:"observed_at"`
+	State         string             `json:"state"`
+	Attempts      int32              `json:"attempts"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	LeaseToken    string             `json:"lease_token"`
+	LeasedUntil   pgtype.Timestamptz `json:"leased_until"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Log struct {
 	ID         string             `json:"id"`
 	ProjectID  string             `json:"project_id"`

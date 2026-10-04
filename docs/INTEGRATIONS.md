@@ -14,7 +14,7 @@ monitor:
 | Endpoint | Auth | Meaning |
 | --- | --- | --- |
 | `GET /livez` | None | Process and HTTP listener are alive. It does not query Postgres or providers. |
-| `GET /readyz` | None | Returns database reachability, latency and pool occupancy, optional analytics and retention state, connector-receipt durability, email, bounded worker-pool occupancy, and queue mode. Postgres failure returns `503`; an optional runtime component can be `degraded` while the HTTP status remains `200`. |
+| `GET /readyz` | None | Returns database reachability, latency and pool occupancy, optional analytics and retention state, connector-receipt durability, email, bounded worker-pool occupancy, queue mode, and durable issue-evaluation and automation-outbox backlog. Postgres failure returns `503`; an optional runtime component can be `degraded` while the HTTP status remains `200`. |
 | `GET /healthz` | None | Alias for `/readyz`, useful for platforms that reserve `healthz` as their probe name. |
 | `GET /api/health` | None | Compatibility alias for `/readyz`. |
 | `GET /metrics` | Keep on a private network | Prometheus text with bounded HTTP request counters and latency histograms, selected outbound integration call counters and latency, and process-wide ingest request/item outcome counters. Labels are fixed transport, signal, outcome, provider, operation, and channel values; the output contains no request parameters, credentials, tenant IDs, project IDs, or event payloads. |
@@ -49,6 +49,16 @@ busy, and available slots for the alert and auto-triage pools. `queue.mode` is
 currently `bounded_drop`, with `queued: 0`, `durable: false`, and
 `drop_on_full: true`: detached work is intentionally discarded when a bounded
 pool is full, so operators can distinguish saturation from a durable backlog.
+Accepted issue events now commit an `issue_alert_evaluations` job in the same
+database transaction. `/readyz.issue_evaluations` reports bounded pending,
+expired-lease, and dead counts, plus oldest pending age. `degraded` means a dead
+job, an expired lease, more than 500 pending jobs, or a job over five minutes
+old; `unavailable` means the database or its query failed. `counts_capped`
+means a count reached the 1,001-row query ceiling. The generic `queue` field
+still describes other detached work; it does not describe this durable issue
+alert path. A single-event store returns `503` if its event/job transaction
+fails. A Sentry envelope can report partial success with HTTP `200`, so inspect
+its item result and ingest receipt before counting each item as accepted.
 
 `readyz.connector_receipts` is the process-level projection of the outbound
 connector receipt writer. `configured` reports whether the server installed a
@@ -186,7 +196,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 
 | Integration | Send to | Stored and visible signals | Current alerts and limits |
 | --- | --- | --- | --- |
-| Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | `new_issue`, `regression`, and `spike` rules run on issue evidence. The response can be partial; an accepted HTTP response is not a guarantee that every item was persisted, so inspect the response body and correlation ID. |
+| Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | Successfully persisted issue events include a durable alert-evaluation job. `new_issue`, `regression`, and `spike` rules run from that job. Envelope responses can be partial; HTTP `200` alone does not prove every item persisted, so inspect the response body and correlation ID. |
 | OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
