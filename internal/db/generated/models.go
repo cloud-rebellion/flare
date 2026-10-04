@@ -546,6 +546,16 @@ type Org struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type OtlpAcceptance struct {
+	OrgID       string             `json:"org_id"`
+	ProjectID   string             `json:"project_id"`
+	KeyHash     string             `json:"key_hash"`
+	PayloadHash string             `json:"payload_hash"`
+	Pillar      string             `json:"pillar"`
+	ReceiptID   string             `json:"receipt_id"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
 type PasswordResetToken struct {
 	ID        string             `json:"id"`
 	UserID    string             `json:"user_id"`

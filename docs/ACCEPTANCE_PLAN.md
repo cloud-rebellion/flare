@@ -81,9 +81,13 @@ have the same optional key contract. Sentry envelope items use a project-scoped
 replay ledger; Sentry Store events have an atomic receipt but no replay ledger.
 OTLP rows and their terminal receipt commit atomically, but stock exporters
 cannot supply a new per-batch key through a static header setting. A keyless
-ambiguous retry can duplicate data. Older Flare servers and a BrightCRM
-process restart before delivery still need separate failure handling. Native
-symbol upload acceptance does not itself prove frame resolution.
+ambiguous retry can duplicate data. A custom OTLP/HTTP sender can retain a
+fresh key with each exact batch for seven-day replay protection; acceptance
+needs keyed logs, traces, and metrics canaries plus a separate ordinary
+keyless collector canary that checks partial-success handling. Older Flare
+servers and a BrightCRM process restart before delivery still need separate
+failure handling. Native symbol upload acceptance does not itself prove frame
+resolution.
 
 The public Flare `/metrics` probe currently returns the SPA shell at the live
 hostname, so a successful HTTP status is not a scrape. Stage's public

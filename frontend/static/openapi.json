@@ -72,7 +72,9 @@
         ],
         "summary": "Liveness probe",
         "description": "Process and HTTP listener probe; does not query dependencies.",
-        "security": [],
+        "security": [
+
+        ],
         "responses": {
           "200": {
             "description": "Process is serving HTTP requests",
@@ -94,7 +96,9 @@
         ],
         "summary": "Readiness probe",
         "description": "Bounded database, analytics, retention, worker, and queue state with no tenant payloads.",
-        "security": [],
+        "security": [
+
+        ],
         "responses": {
           "200": {
             "description": "Core database is reachable; optional components may be degraded.",
@@ -125,7 +129,9 @@
           "System"
         ],
         "summary": "Readiness probe alias",
-        "security": [],
+        "security": [
+
+        ],
         "responses": {
           "200": {
             "description": "Core database is reachable; optional components may be degraded.",
@@ -156,7 +162,9 @@
           "System"
         ],
         "summary": "Readiness probe compatibility alias",
-        "security": [],
+        "security": [
+
+        ],
         "responses": {
           "200": {
             "description": "Core database is reachable; optional components may be degraded.",
@@ -190,10 +198,14 @@
         "description": "Global payload-free export counts, bytes, latency, and fixed failure stages. Requires an authenticated viewer.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -225,7 +237,9 @@
         "description": "The endpoint modern @sentry/* SDKs post to. Point an SDK at Flare by changing only the DSN host; no code changes. Accepts the Sentry envelope format (newline-delimited JSON). Supported items commit in one transaction; a store failure rolls them back and returns 503. Exact item replays within hot-tier retention are deduplicated. A reused item ID with different payload bytes returns 409.\n",
         "security": [
           {
-            "sentryKey": []
+            "sentryKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -333,7 +347,9 @@
         "summary": "Single event ingest (Sentry /store/)",
         "security": [
           {
-            "sentryKey": []
+            "sentryKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -403,10 +419,12 @@
           "Ingest"
         ],
         "summary": "Native structured log ingest with optional idempotent retries",
-        "description": "Commits log rows and a terminal ingest receipt in one PostgreSQL transaction before HTTP 200. A client that supplies Idempotency-Key must reuse the same key and exact decompressed JSON body bytes for retries. A same-key replay returns the original counts and receipt_id with Idempotency-Replayed: true; changed bytes return 409. Keys are project-scoped and retained for seven days. Keyless requests remain supported but an ambiguous retry may create duplicate log rows. OTLP logs use a separate endpoint and do not have this key contract.\n",
+        "description": "Commits log rows and a terminal ingest receipt in one PostgreSQL transaction before HTTP 200. A client that supplies Idempotency-Key must reuse the same key and exact decompressed JSON body bytes for retries. A same-key replay returns the original counts and receipt_id with Idempotency-Replayed: true; changed bytes return 409. Keys are project-scoped and retained for seven days. Keyless requests remain supported but an ambiguous retry may create duplicate log rows. OTLP logs use a separate optional key contract for custom dynamic-key senders.\n",
         "security": [
           {
-            "flareKey": []
+            "flareKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -564,18 +582,19 @@
           }
         }
       }
-    }
-,
+    },
     "/api/{projectID}/metrics": {
       "post": {
         "tags": [
           "Ingest"
         ],
         "summary": "Native metric batch ingest with optional idempotent retries",
-        "description": "Commits metric rows and a terminal ingest receipt in one PostgreSQL transaction before HTTP 200. A client that supplies Idempotency-Key must reuse the same key and exact decompressed JSON body bytes for retries. A same-key replay returns the original counts and receipt_id with Idempotency-Replayed: true; changed bytes return 409. Keys are project-scoped and retained for seven days. Keyless requests remain supported but an ambiguous retry may create duplicate metric points. OTLP metrics use a separate endpoint and do not have this key contract.\n",
+        "description": "Commits metric rows and a terminal ingest receipt in one PostgreSQL transaction before HTTP 200. A client that supplies Idempotency-Key must reuse the same key and exact decompressed JSON body bytes for retries. A same-key replay returns the original counts and receipt_id with Idempotency-Replayed: true; changed bytes return 409. Keys are project-scoped and retained for seven days. Keyless requests remain supported but an ambiguous retry may create duplicate metric points. OTLP metrics use a separate optional key contract for custom dynamic-key senders.\n",
         "security": [
           {
-            "flareKey": []
+            "flareKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -740,9 +759,26 @@
           "Ingest"
         ],
         "summary": "OTLP logs (protobuf or JSON)",
+        "description": "Accepted logs and a terminal receipt commit together. A custom sender may supply one fresh Idempotency-Key per batch and reuse it with the same decompressed body bytes and encoding on retry. A matching replay returns the original OTLP success or partialSuccess response without writing new rows. A changed signal, encoding, or body returns 409. Keys are project-scoped for seven days across all three OTLP signals. Standard OTLP exporter header configuration is static across batches; do not put a fixed Idempotency-Key in OTEL_EXPORTER_OTLP_HEADERS. Keyless exporters remain supported and may duplicate after a lost acknowledgement.\n",
         "security": [
           {
-            "flareKey": []
+            "flareKey": [
+
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "For custom dynamic-key senders only. Fresh per batch; reuse with the same decoded bytes and encoding on retries. Never configure as a static exporter header.",
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]+$"
+            }
           }
         ],
         "requestBody": {
@@ -762,7 +798,76 @@
         },
         "responses": {
           "200": {
-            "description": "Accepted"
+            "description": "Accepted with a terminal receipt; partialSuccess reports rejected records",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "Present as true on an identical keyed replay",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              },
+              "X-Flare-Receipt-ID": {
+                "description": "Terminal ingest receipt ID; a replay returns the original ID",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "partialSuccess": {
+                      "type": "object",
+                      "properties": {
+                        "rejectedLogRecords": {
+                          "type": "string"
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed OTLP payload or invalid optional key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key reused with a different signal",
+            "encoding": null,
+            "or decoded body": null,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable acceptance unavailable; retry the same keyed batch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -773,9 +878,26 @@
           "Ingest"
         ],
         "summary": "OTLP traces (protobuf or JSON)",
+        "description": "Accepted spans and a terminal receipt commit together. A custom sender may supply one fresh Idempotency-Key per batch and reuse it with the same decompressed body bytes and encoding on retry. Identical replay returns the original success or partialSuccess response. A changed signal, encoding, or body returns 409. Keys are project-scoped for seven days across all OTLP signals. Static OTLP exporter headers must not carry an Idempotency-Key; keyless exporters remain supported and may duplicate after a lost acknowledgement.\n",
         "security": [
           {
-            "flareKey": []
+            "flareKey": [
+
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "For custom dynamic-key senders only; never set as a static OTLP exporter header.",
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]+$"
+            }
           }
         ],
         "requestBody": {
@@ -795,7 +917,76 @@
         },
         "responses": {
           "200": {
-            "description": "Accepted"
+            "description": "Accepted with a terminal receipt; partialSuccess reports rejected spans",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "Present as true on an identical keyed replay",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              },
+              "X-Flare-Receipt-ID": {
+                "description": "Terminal ingest receipt ID; a replay returns the original ID",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "partialSuccess": {
+                      "type": "object",
+                      "properties": {
+                        "rejectedSpans": {
+                          "type": "string"
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed OTLP payload or invalid optional key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key reused with a different signal",
+            "encoding": null,
+            "or decoded body": null,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable acceptance unavailable; retry the same keyed batch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -808,7 +999,9 @@
         "summary": "List projects",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "responses": {
@@ -834,7 +1027,9 @@
         "summary": "Create a project",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -880,7 +1075,9 @@
         "description": "Safe to call on every deploy; keyed by a stable slug. Used by Cloud auto-wiring.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -935,7 +1132,9 @@
         "summary": "Get a project",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -971,7 +1170,9 @@
         "summary": "Delete a project and all its telemetry",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1002,7 +1203,9 @@
         "summary": "List issues for a project",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1060,7 +1263,9 @@
         "summary": "Get an issue",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1093,7 +1298,9 @@
         "summary": "Update issue status",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1147,7 +1354,9 @@
         "summary": "List an issue's recent events (with symbolicated stack traces)",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1186,7 +1395,9 @@
         "description": "Requires GitHub configured for the org. Idempotent - returns the existing link if already created.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1229,7 +1440,9 @@
         "summary": "List releases (with new-issue counts)",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1266,7 +1479,9 @@
         "description": "Idempotent on (project, version). Call from CI on deploy.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1318,7 +1533,9 @@
         "summary": "List uploaded source maps",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1355,7 +1572,9 @@
         "description": "name is the minified file (e.g. app.min.js); content is the .map JSON. Call from CI after a build. The 201 response includes a bounded parse_status; malformed maps remain stored for compatibility but are excluded from symbolication.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1416,7 +1635,9 @@
         "summary": "Delete a source map",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1452,7 +1673,9 @@
         "summary": "Search logs",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1494,7 +1717,9 @@
         "summary": "List traces",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1522,7 +1747,9 @@
         "summary": "Get a trace's spans (waterfall)",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1558,7 +1785,9 @@
         "summary": "List alert rules",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1594,7 +1823,9 @@
         "summary": "Create an alert rule",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -1865,7 +2096,9 @@
         "summary": "List notification channels",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "responses": {
@@ -1882,7 +2115,9 @@
         "description": "type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -1966,10 +2201,14 @@
         "description": "An automation_webhook test requires a project_id routed to this channel and sends a signed test event. Receivers should acknowledge it without remediation. Other channel types require no body.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2021,10 +2260,14 @@
         "summary": "List members",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -2042,7 +2285,9 @@
         "summary": "Audit log (admin)",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -2063,7 +2308,9 @@
         "summary": "Export the workspace's structured data (admin)",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -2081,7 +2328,9 @@
         "summary": "List API keys",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -2098,7 +2347,9 @@
         "description": "role selects what the key may do and defaults to viewer (read-only). member adds writes, including DELETE /api/projects/{id}, which erases a project and all of its telemetry. owner and admin are not mintable as keys: team management and SSO configuration stay interactive.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -2136,7 +2387,9 @@
           "Auth"
         ],
         "summary": "Register the first user (becomes owner) / a new workspace",
-        "security": [],
+        "security": [
+
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2175,7 +2428,9 @@
           "Auth"
         ],
         "summary": "Sign in",
-        "security": [],
+        "security": [
+
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2215,7 +2470,9 @@
         "summary": "Current user",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -2237,10 +2494,14 @@
         "description": "DSN-authenticated, payload-free health receipt for a SaaS or app connector. Flare supplies tenant/project scope and timestamps and acknowledges only after the connector attempt and terminal receipt commit together. A same-project Idempotency-Key with identical JSON body bytes replays the original receipt for seven days without adding an observation; changed bytes return 409. Keyless requests remain supported but an ambiguous retry can add another observation. The result is client_reported and cannot claim a registered provider connection or a server-observed provider result.\n",
         "security": [
           {
-            "flareKey": []
+            "flareKey": [
+
+            ]
           },
           {
-            "sentryKey": []
+            "sentryKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2442,7 +2703,9 @@
         "description": "A confidential business key determines tenant and project. The public browser/Flutter DSN cannot authorize this endpoint. Flare derives the completion time, writes a payload-free business check and accepted ingest receipt in one transaction, and returns the receipt ID only after commit. Reuse the same Idempotency-Key after a timeout or lost response: an identical normalized assertion returns the same receipt. Authenticated non-202 responses increment business-key usage errors; a 401 after a concurrent revocation also increments denied. Pre-auth failures and rate limits have no tenant usage attribution.\n",
         "security": [
           {
-            "businessKey": []
+            "businessKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2613,10 +2876,14 @@
         "summary": "Query outbound connector health",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2730,10 +2997,14 @@
         "description": "Returns tenant-scoped worker state, lease status, cursor presence/version, and bounded completion metadata. Cursor material, credentials, provider payloads, and tenant identifiers are never returned.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2879,10 +3150,14 @@
         "summary": "Query project-scoped connector health",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -2947,10 +3222,14 @@
         "description": "Returns project and tenant scoped counts, error rate, latency aggregates, and last observation times. No request payload or user data is returned.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3054,10 +3333,14 @@
         "description": "Returns bounded, tenant-scoped one-minute usage aggregates. The projection contains only fixed surface and operation names, opaque project, API-key, or business-key row identifiers belonging to the caller's tenant, counters, and timestamps. Request bodies, credentials, user IDs, and provider payloads are never returned.\n",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3155,10 +3438,14 @@
         "summary": "Query client and runtime health",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3206,10 +3493,14 @@
         "summary": "Query release error health",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3257,10 +3548,14 @@
         "summary": "Query explicit release deploy and heartbeat freshness",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3308,10 +3603,14 @@
         "summary": "Query source-map coverage by release",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3359,10 +3658,14 @@
         "summary": "Query a sampled trace service-level objective",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3428,10 +3731,14 @@
         "summary": "Query durable ingest acceptance receipts",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3469,10 +3776,14 @@
         "summary": "Query bounded AI action receipts",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3511,10 +3822,14 @@
         "description": "Atomically leases one tenant-scoped stage and target revision to an external worker. The claim id is opaque and grants no repository, CI, deployment, or probe capability. A passed execution receipt must include the active claim id.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3604,10 +3919,14 @@
         "description": "Read-only, tenant-scoped handoff for an external coding-loop worker. It returns bounded stage metadata only; Flare never executes the returned action or dereferences evidence.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3648,10 +3967,14 @@
         "description": "Authenticated project-scoped counts for unverified passed CI, merge, deploy, and synthetic receipts created in the past 30 days. Counts grant no execution authority.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3682,10 +4005,14 @@
         "summary": "Query fix-to-deploy workflow receipts",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3722,10 +4049,14 @@
         "description": "Passed patch, CI, merge, deploy, and synthetic receipts must follow the same target revision in order. External passed CI, merge, deploy, and synthetic receipts remain unverified advisory reports until trusted Stage attestation; opaque run_ref or evidence_ref values cannot advance workflow or accepted-deploy monitoring. A passed patch requires evidence_ref to be the 64-character lowercase SHA-256 digest from a completed fresh AI triage receipt for the same issue. Review approval requires a human session actor; execution passes require run_ref. A passed synthetic receipt additionally requires evidence_ref for the observed canary or probe result. Rollback receipts require source_revision and target_revision, and a passed rollback requires run_ref. Failed or blocked stages may be recorded without a predecessor; rollback is never inferred from deploy receipts.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3832,7 +4163,9 @@
         "description": "Returns release-scoped metadata and digests only; raw symbol bytes are never returned.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3869,7 +4202,9 @@
         "description": "Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. A 201 includes receipt_id after the artifact and terminal receipt commit together. Flutter Dart symbols receive bounded upload-time container validation. Upload acceptance does not claim frame symbolication.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -3983,7 +4318,9 @@
         "summary": "Delete a native symbol artifact",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4020,10 +4357,14 @@
         "description": "Returns bounded artifact metadata with an explicit retained_unresolved status. Symbol bytes and inferred frame locations are never returned.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4100,10 +4441,14 @@
         "description": "Returns bounded, payload-free provider metadata grouped by connector series. Values are omitted when the provider did not report that hint. Sync lag is explicitly reported by the bridge after a completed sync/read; it is not inferred from silence.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4234,10 +4579,14 @@
         "description": "Returns the same bounded connector hint projection as the organization route after verifying that the caller's organization owns the project.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4379,7 +4728,9 @@
         "description": "Returns tenant-scoped provider and installation metadata only. Credentials and encrypted ciphertext are never returned.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -4408,7 +4759,9 @@
         "summary": "Register a connector connection (admin)",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -4495,7 +4848,9 @@
         "summary": "Get a connector connection (admin)",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4532,7 +4887,9 @@
         "description": "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only. Set project_id once to assign a historical org-only installation; provider, installation_id, and an existing project binding are immutable.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4619,7 +4976,9 @@
         "summary": "Disconnect a connector connection (admin)",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4651,7 +5010,9 @@
         "description": "Runs one fixed-authority adapter: HubSpot account metadata, GitHub user, Slack auth.test, or OpenAI models. Provider response bodies and credentials are discarded; the result contains bounded status and rate-limit hints and emits a tenant-scoped connector attempt.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4757,7 +5118,9 @@
         "description": "Claims a short tenant-scoped lease and runs the HubSpot account-details adapter. The provider body and credential are discarded; no background polling is started by this endpoint.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4870,7 +5233,9 @@
         "description": "Admin session only. Returns at most 100 keys, with every active key first, without bearer secrets or hashes.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -4913,7 +5278,9 @@
         "description": "Admin session with CSRF only. Shows the random 192-bit bearer secret once. Up to eight active unexpired keys are allowed per project; keep a spare slot to create a replacement before revoking an old key. Action is audited.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -5000,7 +5367,9 @@
         "description": "Admin session with CSRF only. Revocation is immediate for new requests and audited; historical key IDs remain attached to accepted checks.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -5043,10 +5412,14 @@
         "description": "Returns the same bounded state projection as the org route, restricted to installations explicitly bound to this project. Historical unbound installations appear only in the org route.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -5075,6 +5448,125 @@
           },
           "404": {
             "description": "Project not found"
+          }
+        }
+      }
+    },
+    "/otlp/v1/metrics": {
+      "post": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "OTLP metrics (protobuf or JSON)",
+        "description": "Accepted points and a terminal receipt commit together. A custom sender may supply one fresh Idempotency-Key per batch and reuse it with the same decompressed body bytes and encoding on retry. Identical replay returns the original success or partialSuccess response. A changed signal, encoding, or body returns 409. Keys are project-scoped for seven days across all OTLP signals. Static OTLP exporter headers must not carry an Idempotency-Key; keyless exporters remain supported and may duplicate after a lost acknowledgement.\n",
+        "security": [
+          {
+            "flareKey": [
+
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "For custom dynamic-key senders only; never set as a static OTLP exporter header.",
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-protobuf": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted with a terminal receipt; partialSuccess reports rejected data points",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "Present as true on an identical keyed replay",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              },
+              "X-Flare-Receipt-ID": {
+                "description": "Terminal ingest receipt ID; a replay returns the original ID",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "partialSuccess": {
+                      "type": "object",
+                      "properties": {
+                        "rejectedDataPoints": {
+                          "type": "string"
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed OTLP payload or invalid optional key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key reused with a different signal",
+            "encoding": null,
+            "or decoded body": null,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable acceptance unavailable; retry the same keyed batch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

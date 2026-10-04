@@ -233,7 +233,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 | Integration | Send to | Stored and visible signals | Current alerts and limits |
 | --- | --- | --- | --- |
 | Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | Successfully persisted issue events include a durable alert-evaluation job. `new_issue`, `regression`, and `spike` rules run from that job. A transient failure of any supported envelope item rolls back the batch and returns `503`. Within hot-tier retention, exact replays are deduplicated and an item ID reused with changed bytes returns `409`. HTTP `200` can include invalid items or capped spans, so inspect `accepted`, `persisted`, `deduplicated`, `invalid`, `dropped`, `span_dropped`, and the correlation ID. |
-| OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
+| OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. Accepted rows and terminal receipts commit together. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. Native log and metric rows and their terminal receipts commit together before `200`. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
 | Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | Failed transitions page immediately; the watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors. New slugs are capped and quiet, unconfigured monitors are pruned after 30 days. |
@@ -257,8 +257,7 @@ duplicate metric points. Expired keys are pruned in batches of 10,000 every
 30 seconds; reuse after seven days is a new operation. A full batch emits a
 fixed backlog warning. The existing per-DSN ingest limit is process-local,
 so a large estate with many projects or replicas can outpace this sweep;
-monitor its warnings and database growth. OTLP metrics use a separate ingest
-path and do not yet provide this request-key retry guarantee.
+monitor its warnings and database growth.
 
 Native logs use the same optional `Idempotency-Key` format and seven-day retry
 window. Keep the exact serialized JSON body bytes with the key when retrying.
@@ -268,8 +267,33 @@ The native log `200` body includes `accepted`, `rejected`, `dropped`, and
 bytes returns `409`. Keyless senders still work and receive a terminal receipt
 before `200`, but an ambiguous retry can add duplicate logs. Expired log keys
 are swept in batches of 10,000 every 30 seconds, separately from metric keys;
-monitor the fixed batch-cap warning and ledger growth in large estates. OTLP
-logs remain a separate path without request-key replay protection.
+monitor the fixed batch-cap warning and ledger growth in large estates.
+
+OTLP/HTTP logs, traces, and metrics also accept an **optional** per-batch
+`Idempotency-Key` from a custom sender that can generate a fresh opaque 16--128
+character token for each export request and retain that token with the exact
+serialized protobuf or JSON body for retries. Flare compares the signal, wire
+encoding, and decompressed body bytes. One project may use a key for only one
+OTLP batch across all three signals. An identical retry within seven days
+returns the original OTLP success or `partialSuccess` body with
+`Idempotency-Replayed: true` and the original `X-Flare-Receipt-ID` and writes
+no new telemetry or receipt. Every OTLP `200` includes a terminal receipt ID
+in that header. A changed
+body, signal, or encoding returns `409`. The ledger retains only hashes and a
+tenant-bound receipt; expired keys are swept in bounded batches. A failed
+acceptance returns `503` and commits neither keyed telemetry nor the key.
+
+Standard OTLP exporters remain **keyless**. In particular,
+`OTEL_EXPORTER_OTLP_HEADERS` and its signal-specific variants apply configured
+headers to every outgoing batch; setting a fixed `Idempotency-Key` there would
+make the second distinct batch conflict. Do not set this header through static
+exporter configuration. Keyless sends still have atomic payload/receipt
+acceptance, but a retry after a lost acknowledgement may duplicate telemetry,
+which [the OTLP specification](https://opentelemetry.io/docs/specs/otlp/#duplicate-data)
+recognizes as a delivery tradeoff. The [exporter header configuration](https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/#header-configuration)
+describes the static header scope. A dynamic-key bridge must own the exact
+serialized batch and preserve it through retries; this feature does not make
+an unmodified collector's delivery exactly once.
 
 ### Ingest checks for an exporter
 

@@ -172,6 +172,9 @@ func run() error {
 	go srv.RunNativeLogAcceptancePrune(ctx)
 	// Public connector reports have a separate bounded seven-day retry window.
 	go srv.RunClientConnectorAcceptancePrune(ctx)
+	// Custom OTLP/HTTP senders may opt into per-batch retry keys. Sweep their
+	// expired identities without touching telemetry or acceptance receipts.
+	go srv.RunOTLPAcceptancePrune(ctx)
 
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.

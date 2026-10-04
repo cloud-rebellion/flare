@@ -492,7 +492,7 @@ paths:
         with Idempotency-Replayed: true; changed bytes return 409. Keys are
         project-scoped and retained for seven days. Keyless requests remain
         supported but an ambiguous retry may create duplicate log rows.
-        OTLP logs use a separate endpoint and do not have this key contract.
+        OTLP logs use a separate optional key contract for custom dynamic-key senders.
       security: [{ flareKey: [] }]
       parameters:
         - { name: projectID, in: path, required: true, schema: { type: string } }
@@ -542,7 +542,7 @@ paths:
         with Idempotency-Replayed: true; changed bytes return 409. Keys are
         project-scoped and retained for seven days. Keyless requests remain
         supported but an ambiguous retry may create duplicate metric points.
-        OTLP metrics use a separate endpoint and do not have this key contract.
+        OTLP metrics use a separate optional key contract for custom dynamic-key senders.
       security: [{ flareKey: [] }]
       parameters:
         - { name: projectID, in: path, required: true, schema: { type: string } }
@@ -684,24 +684,100 @@ paths:
     post:
       tags: [Ingest]
       summary: OTLP logs (protobuf or JSON)
+      description: >
+        Accepted logs and a terminal receipt commit together. A custom sender
+        may supply one fresh Idempotency-Key per batch and reuse it with the
+        same decompressed body bytes and encoding on retry. A matching replay
+        returns the original OTLP success or partialSuccess response without
+        writing new rows. A changed signal, encoding, or body returns 409.
+        Keys are project-scoped for seven days across all three OTLP signals.
+        Standard OTLP exporter header configuration is static across batches;
+        do not put a fixed Idempotency-Key in OTEL_EXPORTER_OTLP_HEADERS.
+        Keyless exporters remain supported and may duplicate after a lost
+        acknowledgement.
       security: [{ flareKey: [] }]
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, description: "For custom dynamic-key senders only. Fresh per batch; reuse with the same decoded bytes and encoding on retries. Never configure as a static exporter header.", schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
       requestBody:
         content:
           application/x-protobuf: { schema: { type: string, format: binary } }
           application/json: { schema: { type: object } }
       responses:
-        "200": { description: Accepted }
+        "200":
+          description: Accepted with a terminal receipt; partialSuccess reports rejected records
+          headers:
+            Idempotency-Replayed: { description: Present as true on an identical keyed replay, schema: { type: string, enum: ['true'] } }
+            X-Flare-Receipt-ID: { description: Terminal ingest receipt ID; a replay returns the original ID, schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, properties: { partialSuccess: { type: object, properties: { rejectedLogRecords: { type: string }, errorMessage: { type: string } } } } }
+        "400": { description: Malformed OTLP payload or invalid optional key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Key reused with a different signal, encoding, or decoded body, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Durable acceptance unavailable; retry the same keyed batch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /otlp/v1/traces:
     post:
       tags: [Ingest]
       summary: OTLP traces (protobuf or JSON)
+      description: >
+        Accepted spans and a terminal receipt commit together. A custom sender
+        may supply one fresh Idempotency-Key per batch and reuse it with the
+        same decompressed body bytes and encoding on retry. Identical replay
+        returns the original success or partialSuccess response. A changed
+        signal, encoding, or body returns 409. Keys are project-scoped for
+        seven days across all OTLP signals. Static OTLP exporter headers must
+        not carry an Idempotency-Key; keyless exporters remain supported and
+        may duplicate after a lost acknowledgement.
       security: [{ flareKey: [] }]
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, description: "For custom dynamic-key senders only; never set as a static OTLP exporter header.", schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
       requestBody:
         content:
           application/x-protobuf: { schema: { type: string, format: binary } }
           application/json: { schema: { type: object } }
       responses:
-        "200": { description: Accepted }
+        "200":
+          description: Accepted with a terminal receipt; partialSuccess reports rejected spans
+          headers:
+            Idempotency-Replayed: { description: Present as true on an identical keyed replay, schema: { type: string, enum: ['true'] } }
+            X-Flare-Receipt-ID: { description: Terminal ingest receipt ID; a replay returns the original ID, schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, properties: { partialSuccess: { type: object, properties: { rejectedSpans: { type: string }, errorMessage: { type: string } } } } }
+        "400": { description: Malformed OTLP payload or invalid optional key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Key reused with a different signal, encoding, or decoded body, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Durable acceptance unavailable; retry the same keyed batch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /otlp/v1/metrics:
+    post:
+      tags: [Ingest]
+      summary: OTLP metrics (protobuf or JSON)
+      description: >
+        Accepted points and a terminal receipt commit together. A custom
+        sender may supply one fresh Idempotency-Key per batch and reuse it
+        with the same decompressed body bytes and encoding on retry. Identical
+        replay returns the original success or partialSuccess response. A
+        changed signal, encoding, or body returns 409. Keys are project-scoped
+        for seven days across all OTLP signals. Static OTLP exporter headers
+        must not carry an Idempotency-Key; keyless exporters remain supported
+        and may duplicate after a lost acknowledgement.
+      security: [{ flareKey: [] }]
+      parameters:
+        - { name: Idempotency-Key, in: header, required: false, description: "For custom dynamic-key senders only; never set as a static OTLP exporter header.", schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
+      requestBody:
+        content:
+          application/x-protobuf: { schema: { type: string, format: binary } }
+          application/json: { schema: { type: object } }
+      responses:
+        "200":
+          description: Accepted with a terminal receipt; partialSuccess reports rejected data points
+          headers:
+            Idempotency-Replayed: { description: Present as true on an identical keyed replay, schema: { type: string, enum: ['true'] } }
+            X-Flare-Receipt-ID: { description: Terminal ingest receipt ID; a replay returns the original ID, schema: { type: string } }
+          content:
+            application/json:
+              schema: { type: object, properties: { partialSuccess: { type: object, properties: { rejectedDataPoints: { type: string }, errorMessage: { type: string } } } } }
+        "400": { description: Malformed OTLP payload or invalid optional key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Key reused with a different signal, encoding, or decoded body, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Durable acceptance unavailable; retry the same keyed batch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/projects:
     get:
       tags: [Projects]

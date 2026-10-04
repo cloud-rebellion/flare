@@ -33,29 +33,52 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "spans", "otlp", &outcome, &requestOutcome, &receiptStatus)
-	if receipt == nil {
+	keyHash, err := nativeIngestKeyHash(r)
+	if err != nil {
+		outcome.invalid = 1
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if keyHash == "" {
+		receipt = s.requireIngestReceipt(r.Context(), w, r, project, "spans", "otlp", &outcome, &requestOutcome, &receiptStatus)
+		if receipt == nil {
+			return
+		}
 	}
 	asJSON := strings.Contains(r.Header.Get("Content-Type"), "json")
 	spans, err := ingest.ParseOTLPTraces(body, asJSON)
 	if err != nil {
+		if receipt == nil {
+			receipt = s.requireIngestReceipt(r.Context(), w, r, project, "spans", "otlp", &outcome, &requestOutcome, &receiptStatus)
+			if receipt == nil {
+				return
+			}
+		}
 		outcome.invalid = 1
 		receiptStatus = http.StatusBadRequest
 		s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", receiptStatus)
 		writeErr(w, http.StatusBadRequest, "invalid OTLP traces payload")
 		return
 	}
+	if receipt == nil {
+		receipt = newIngestReceipt(w, r, project, "spans", "otlp")
+	}
 	receipt.setReceived(len(spans))
 	requestOutcome = ""
 	budget := newIngestBudget()
 	stored := 0
-	err = s.commitOTLPPayload(r.Context(), receipt, budget, func(ctx context.Context, q *generated.Queries) error {
+	result, err := s.commitOTLPPayload(r.Context(), receipt, budget, keyHash, keyedOTLPPayloadHash(keyHash, body, asJSON), func(ctx context.Context, q *generated.Queries) error {
 		var persistErr error
 		stored, persistErr = s.persistSpans(ctx, q, project, spans, budget)
 		return persistErr
 	})
 	if err != nil {
+		if err == errOTLPKeyConflict {
+			outcome.invalid = 1
+			requestOutcome = "rejected"
+			writeErr(w, http.StatusConflict, "Idempotency-Key was already used for a different OTLP signal or payload")
+			return
+		}
 		outcome.invalid = uint64(budget.invalid)
 		outcome.dropped = uint64(budget.dropped)
 		// The persistence operation is all-or-nothing for this batch. Rows
@@ -65,6 +88,14 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "1")
 		slog.Error("otlp traces acceptance transaction failed", "project_id", project.ID)
 		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
+		return
+	}
+	w.Header().Set("X-Flare-Receipt-ID", result.receiptID)
+	if result.replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+		outcome.deduplicated = uint64(result.accepted)
+		requestOutcome = result.outcome
+		writeJSON(w, http.StatusOK, otlpResponse(int(result.rejected), otlpRejectedSpans))
 		return
 	}
 	// Report rows that were actually admitted to the bounded request budget.
