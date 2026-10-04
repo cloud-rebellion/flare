@@ -37,7 +37,7 @@ func (s *Server) dispatchWithAutomationClaim(ctx context.Context, org, project s
 		}
 	}
 	if s.pool == nil || s.automationOutbox == nil {
-		if len(automation) > 0 {
+		if len(automation) > 0 || n.EvaluationID != "" {
 			return false, errors.New("automation outbox unavailable")
 		}
 		if claim != nil {
@@ -60,12 +60,20 @@ func (s *Server) dispatchWithAutomationClaim(ctx context.Context, org, project s
 			return false, err
 		}
 	}
-	observedAt := time.Now().UTC()
+	observedAt := n.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
 	// The wire contract and table both cap this counter. A long-lived issue
 	// must still produce an alert when its lifetime count exceeds the cap.
 	eventCount := max(int64(0), min(n.EventCount, int64(1_000_000_000)))
 	for _, ch := range automation {
+		noticeID := ""
+		if n.EvaluationID != "" {
+			noticeID = n.EvaluationID + ":" + ch.ID
+		}
 		_, err := s.automationOutbox.EnqueueTx(ctx, tx, automationoutbox.Notice{
+			ID:    noticeID,
 			OrgID: org, ProjectID: project, ChannelID: ch.ID, IssueID: n.IssueID,
 			Event: alerts.AutomationWebhookEvent(n.Reason), EventCount: eventCount,
 			ObservedAt: observedAt,
@@ -74,6 +82,9 @@ func (s *Server) dispatchWithAutomationClaim(ctx context.Context, org, project s
 			metrics.Inc("flare_automation_outbox_writes", map[string]string{"outcome": "failed"})
 			return false, err
 		}
+	}
+	if err := completeIssueEvaluationTx(ctx, tx, n.EvaluationID, org, project, n.EvaluationLeaseToken); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		metrics.Inc("flare_automation_outbox_writes", map[string]string{"outcome": "failed"})

@@ -23,8 +23,9 @@ const (
 )
 
 var (
-	ErrRouteUnavailable = errors.New("automation channel is no longer enabled or routed to this project")
-	ErrStaleLease       = errors.New("automation delivery lease is no longer current")
+	ErrRouteUnavailable       = errors.New("automation channel is no longer enabled or routed to this project")
+	ErrStaleLease             = errors.New("automation delivery lease is no longer current")
+	ErrNoticeIdentityConflict = errors.New("automation notice ID already belongs to different immutable fields")
 )
 
 type Store struct{ pool *pgxpool.Pool }
@@ -55,6 +56,7 @@ func (s *Store) EnqueueTx(ctx context.Context, tx pgx.Tx, n Notice) (string, err
 	if n.ID == "" {
 		n.ID = id.New()
 	}
+	n.ObservedAt = n.ObservedAt.UTC().Truncate(time.Microsecond)
 	var inserted string
 	err := tx.QueryRow(ctx, `
 INSERT INTO automation_alert_outbox
@@ -65,9 +67,34 @@ JOIN projects p ON p.id = $3 AND p.org_id = $2
 WHERE c.id = $4 AND c.org_id = $2 AND c.type = 'automation_webhook' AND c.enabled
   AND (EXISTS (SELECT 1 FROM channel_projects cp WHERE cp.channel_id = c.id AND cp.project_id = $3)
        OR NOT EXISTS (SELECT 1 FROM channel_projects cp WHERE cp.channel_id = c.id))
+ON CONFLICT (id) DO NOTHING
 RETURNING id`, n.ID, n.OrgID, n.ProjectID, n.ChannelID, n.IssueID, n.Event, n.EventCount, n.ObservedAt.UTC()).Scan(&inserted)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrRouteUnavailable
+		// A caller-supplied stable ID may be retried after a lost response. An
+		// exact replay is idempotent; any reused ID with altered tenant, route,
+		// issue, event, count, or observation time is rejected.
+		var existing Notice
+		var channel *string
+		lookupErr := tx.QueryRow(ctx, `SELECT org_id,project_id,channel_id,issue_id,event,event_count,observed_at
+			FROM automation_alert_outbox WHERE id=$1`, n.ID).Scan(
+			&existing.OrgID, &existing.ProjectID, &channel, &existing.IssueID,
+			&existing.Event, &existing.EventCount, &existing.ObservedAt)
+		if errors.Is(lookupErr, pgx.ErrNoRows) {
+			return "", ErrRouteUnavailable
+		}
+		if lookupErr != nil {
+			return "", fmt.Errorf("read automation notice replay: %w", lookupErr)
+		}
+		if channel != nil {
+			existing.ChannelID = *channel
+		}
+		if existing.OrgID != n.OrgID || existing.ProjectID != n.ProjectID ||
+			existing.ChannelID != n.ChannelID || existing.IssueID != n.IssueID ||
+			existing.Event != n.Event || existing.EventCount != n.EventCount ||
+			!existing.ObservedAt.Equal(n.ObservedAt) {
+			return "", ErrNoticeIdentityConflict
+		}
+		return n.ID, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("enqueue automation notice: %w", err)

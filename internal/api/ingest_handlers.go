@@ -317,7 +317,20 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		})
 	}
 
-	issue, err := s.q.UpsertIssue(ctx, generated.UpsertIssueParams{
+	// An accepted event must carry a durable alert-evaluation handoff. Keep
+	// issue grouping, the event, its release marker, and the queue row in one
+	// transaction so a queue failure returns 503 without persisting a phantom
+	// event or spending the new-issue/regression transition.
+	if s.pool == nil {
+		return "", errors.New("event transaction unavailable")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin event transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.q.WithTx(tx)
+	issue, err := qtx.UpsertIssue(ctx, generated.UpsertIssueParams{
 		ID:           id.New(),
 		ProjectID:    project.ID,
 		OrgID:        project.OrgID,
@@ -336,9 +349,10 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	// A resolved issue that recurs is a regression: reopen it here.
 	reopened := false
 	if !issue.IsNew && issue.Status == "resolved" {
-		if err := s.q.ReopenIssue(ctx, generated.ReopenIssueParams{ID: issue.ID, OrgID: project.OrgID}); err == nil {
-			reopened = true
+		if err := qtx.ReopenIssue(ctx, generated.ReopenIssueParams{ID: issue.ID, OrgID: project.OrgID}); err != nil {
+			return "", fmt.Errorf("reopen issue: %w", err)
 		}
+		reopened = true
 	}
 
 	insertParams := generated.InsertEventParams{
@@ -363,16 +377,19 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	// carrying a non-empty release, advances the release heartbeat timestamp.
 	// This keeps arbitrary event traffic from making a deployed release look
 	// live while retaining the payload-free event record as the source of truth.
-	if release != "" && isReleaseHeartbeat(level, msg) {
-		if err := s.storeHeartbeatAtomically(ctx, insertParams, generated.TouchReleaseHeartbeatParams{
-			ProjectID: project.ID,
-			OrgID:     project.OrgID,
-			Version:   release,
-		}); err != nil {
-			return "", err
-		}
-	} else if err := s.q.InsertEvent(ctx, insertParams); err != nil {
+	if err := qtx.InsertEvent(ctx, insertParams); err != nil {
 		return "", err
+	}
+	if release != "" && isReleaseHeartbeat(level, msg) {
+		rows, err := qtx.TouchReleaseHeartbeat(ctx, generated.TouchReleaseHeartbeatParams{
+			ProjectID: project.ID, OrgID: project.OrgID, Version: release,
+		})
+		if err != nil {
+			return "", fmt.Errorf("persist release heartbeat: %w", err)
+		}
+		if rows != 1 {
+			return "", fmt.Errorf("persist release heartbeat: release %q is not registered", release)
+		}
 	}
 
 	// Sensitive-data scan: flag the issue and surface a security signal when an
@@ -383,20 +400,47 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	if project.Slug != securityProjectSlug {
 		if kinds := detectSensitive(ev); len(kinds) > 0 {
 			sensitive = strings.Join(kinds, ",")
-			_ = s.q.MarkIssueSensitive(ctx, generated.MarkIssueSensitiveParams{
+			if err := qtx.MarkIssueSensitive(ctx, generated.MarkIssueSensitiveParams{
 				ID: issue.ID, OrgID: project.OrgID, Sensitive: sensitive,
-			})
+			}); err != nil {
+				return "", fmt.Errorf("mark sensitive issue: %w", err)
+			}
 			// The security event is itself re-ingested as an event into the
 			// flare-security project, so its message must carry the SCRUBBED
 			// title. Passing issue.Title raw copied the detected secret into a
 			// project the detector deliberately skips, which round-tripped the
 			// leak straight past the redaction.
-			s.recordSecurityEvent(project.OrgID, "sensitive-data-in-payload",
-				"possible "+sensitive+" in "+project.Name+" - issue: "+ai.Scrub(issue.Title), "")
 		}
 	}
 
-	s.evaluateAlerts(project, issue, issue.IsNew, reopened, sensitive)
+	// Low-severity issues are retained as telemetry but never page. A queue
+	// row is needed only while at least one relevant issue rule is enabled.
+	if issue.Status != "ignored" && pageableLevel(issue.Level) {
+		var enabled bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM alert_rules
+			WHERE org_id=$1 AND project_id=$2 AND enabled
+			  AND (type='spike' OR (type='new_issue' AND $3::boolean)
+		       OR (type='regression' AND $4::boolean))
+		)`, project.OrgID, project.ID, issue.IsNew, reopened).Scan(&enabled); err != nil {
+			return "", fmt.Errorf("check issue alert rules: %w", err)
+		}
+		if enabled {
+			if _, err := tx.Exec(ctx, `INSERT INTO issue_alert_evaluations
+				(id,org_id,project_id,issue_id,is_new,reopened,event_count,observed_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, insertParams.ID, project.OrgID, project.ID, issue.ID, issue.IsNew, reopened,
+				max(int64(0), min(issue.EventCount, int64(1_000_000_000)))); err != nil {
+				return "", fmt.Errorf("enqueue issue alert evaluation: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit event and alert evaluation: %w", err)
+	}
+	if sensitive != "" {
+		s.recordSecurityEvent(project.OrgID, "sensitive-data-in-payload",
+			"possible "+sensitive+" in "+project.Name+" - issue: "+ai.Scrub(issue.Title), "")
+	}
 
 	// A newly-seen issue gets AI triage automatically (background, budget-gated),
 	// so its root cause and fix are already waiting when a human or the AI
@@ -407,57 +451,6 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	return eventID, nil
 }
 
-// storeHeartbeatAtomically keeps the event row and its release freshness marker
-// in one transaction. A marker update failure must not leave a heartbeat that
-// the caller is told to retry, because that would duplicate the event on the
-// next attempt while the ingest receipt remains failed. Ordinary events keep
-// the existing single-write path.
-func (s *Server) storeHeartbeatAtomically(ctx context.Context, event generated.InsertEventParams, heartbeat generated.TouchReleaseHeartbeatParams) error {
-	if s.pool == nil {
-		// Lightweight servers used by unit tests may not carry a pool. Preserve
-		// the old query path there; production servers always have a pool.
-		if err := s.q.InsertEvent(ctx, event); err != nil {
-			return err
-		}
-		rows, err := s.q.TouchReleaseHeartbeat(ctx, heartbeat)
-		if err != nil {
-			return fmt.Errorf("persist release heartbeat: %w", err)
-		}
-		if rows != 1 {
-			return fmt.Errorf("persist release heartbeat: release %q is not registered", heartbeat.Version)
-		}
-		return nil
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin release heartbeat transaction: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback(ctx)
-		}
-	}()
-
-	qtx := s.q.WithTx(tx)
-	if err := qtx.InsertEvent(ctx, event); err != nil {
-		return err
-	}
-	rows, err := qtx.TouchReleaseHeartbeat(ctx, heartbeat)
-	if err != nil {
-		return fmt.Errorf("persist release heartbeat: %w", err)
-	}
-	if rows != 1 {
-		return fmt.Errorf("persist release heartbeat: release %q is not registered", heartbeat.Version)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit release heartbeat: %w", err)
-	}
-	committed = true
-	return nil
-}
-
 func isReleaseHeartbeat(level, message string) bool {
 	if level != "info" {
 		return false
@@ -466,13 +459,6 @@ func isReleaseHeartbeat(level, message string) bool {
 	return strings.HasPrefix(message, "service-up:") && service != ""
 }
 
-// evaluateAlerts matches an ingested event against the project's enabled alert
-// rules and dispatches at most one notification (the most actionable reason
-// wins: regression > spike > new issue). Evaluation still runs in a bounded
-// background pool that may drop work under saturation. The durable automation
-// outbox starts only after evaluation reaches dispatch; an ingest 200 does not
-// yet guarantee an alert-evaluation job was accepted. This needs its own
-// durable evaluation handoff before that broader guarantee can be claimed.
 // pageableLevel reports whether an issue at this severity may fire an alert.
 // info/debug are informational (heartbeats, breadcrumbs) and never page; every
 // other level - including the empty/default, which Sentry treats as error -
@@ -486,13 +472,16 @@ func pageableLevel(level string) bool {
 	}
 }
 
-func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.UpsertIssueRow, isNew, reopened bool, sensitive string) {
+// evaluateAlerts runs one durable evaluation. Database and automation enqueue
+// failures are returned so the leased job can retry; intentional suppression
+// (ignored issue, low severity, no rule/channel, rate cap) is terminal.
+func (s *Server) evaluateAlerts(ctx context.Context, project *generated.Project, issue *generated.UpsertIssueRow, isNew, reopened bool, evaluationID, leaseToken string, observedAt time.Time) error {
 	// "Ignore" is the only control the UI offers for a noisy issue, and it hid
 	// the issue from the list while its alerts kept firing, so the button did
 	// not do the one thing users press it for. issue.Status is the PRIOR status
 	// from UpsertIssue; a reopened issue was 'resolved', never 'ignored'.
 	if issue.Status == "ignored" {
-		return
+		return nil
 	}
 	// Low-severity signals (info/debug: heartbeats, breadcrumbs, health check-ins)
 	// never page, whatever the rules say - they are informational, not incidents.
@@ -501,15 +490,18 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 	// heartbeat can keep a project "active" without ever firing a new-issue/spike
 	// alert. Warning+ (and the default/empty level) alert as before.
 	if !pageableLevel(issue.Level) {
-		return
+		return nil
 	}
-	s.goBackgroundFor(project.OrgID, "alert-eval", 15*time.Second, func(ctx context.Context) {
+	{
 		rules, err := s.q.ListEnabledAlertRulesByProject(ctx, generated.ListEnabledAlertRulesByProjectParams{
 			ProjectID: project.ID,
 			OrgID:     project.OrgID,
 		})
-		if err != nil || len(rules) == 0 {
-			return
+		if err != nil {
+			return fmt.Errorf("list issue alert rules: %w", err)
+		}
+		if len(rules) == 0 {
+			return nil
 		}
 		// regression and new_issue are BOOLEAN rules: they either apply to this
 		// event or they do not, so collapsing duplicates of those is harmless.
@@ -546,14 +538,18 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		var spikeCandidates []spikeAlertCandidate
 		if reason == "" {
 			for _, sr := range spikes {
-				if candidate := s.spikeReason(ctx, issue, project.OrgID, sr); candidate.reason != "" {
+				candidate, err := s.spikeReason(ctx, issue, project.OrgID, sr, observedAt)
+				if err != nil {
+					return err
+				}
+				if candidate.reason != "" {
 					spikeCandidates = append(spikeCandidates, candidate)
 				}
 			}
 		}
 		newIssueAlert := isNew && byType["new_issue"] != nil
 		if reason == "" && len(spikeCandidates) == 0 && !newIssueAlert {
-			return
+			return nil
 		}
 
 		// Per-org volume cap, matching the monitor path. Checked AFTER the
@@ -563,15 +559,18 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		if !s.issueAlertLimiter.Allow("issue-alert-org:" + project.OrgID) {
 			slog.Warn("issue alert throttled: org is over its per-minute alert budget",
 				"org_id", project.OrgID, "project_id", project.ID, "issue_id", issue.ID)
-			return
+			return nil
 		}
 
 		// Respect per-project routing: an issue alert is about this project.
 		chans, err := s.q.ListEnabledChannelsForProject(ctx, generated.ListEnabledChannelsForProjectParams{
 			OrgID: project.OrgID, ProjectID: project.ID,
 		})
-		if err != nil || len(chans) == 0 {
-			return
+		if err != nil {
+			return fmt.Errorf("list issue alert channels: %w", err)
+		}
+		if len(chans) == 0 {
+			return nil
 		}
 		channels := make([]alerts.Channel, 0, len(chans))
 		for _, c := range chans {
@@ -595,21 +594,24 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 		// detectSensitive decides whether to raise the badge. It never decides
 		// whether redaction runs.
 		notice := alerts.Notification{
-			ProjectID:   project.ID,
-			ProjectName: project.Name,
-			IssueID:     issue.ID,
-			Title:       ai.Scrub(issue.Title),
-			Level:       issue.Level,
-			Culprit:     ai.Scrub(issue.Culprit),
-			EventCount:  issue.EventCount,
-			URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/issues/" + issue.ID,
+			ProjectID:            project.ID,
+			ProjectName:          project.Name,
+			IssueID:              issue.ID,
+			Title:                ai.Scrub(issue.Title),
+			Level:                issue.Level,
+			Culprit:              ai.Scrub(issue.Culprit),
+			EventCount:           issue.EventCount,
+			EvaluationID:         evaluationID,
+			EvaluationLeaseToken: leaseToken,
+			ObservedAt:           observedAt,
+			URL:                  strings.TrimRight(s.cfg.BaseURL, "/") + "/issues/" + issue.ID,
 		}
 		if reason != "" {
 			notice.Reason = reason
 			if _, err := s.dispatchWithAutomationClaim(ctx, project.OrgID, project.ID, channels, notice, nil); err != nil {
-				slog.Error("queue regression automation alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
+				return fmt.Errorf("queue regression automation alert: %w", err)
 			}
-			return
+			return nil
 		}
 		for _, candidate := range spikeCandidates {
 			notice.Reason = candidate.reason
@@ -620,20 +622,20 @@ func (s *Server) evaluateAlerts(project *generated.Project, issue *generated.Ups
 					})
 				})
 			if err != nil {
-				slog.Error("claim/queue spike alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
-				return
+				return fmt.Errorf("claim/queue spike alert: %w", err)
 			}
 			if claimed {
-				return
+				return nil
 			}
 		}
 		if newIssueAlert {
 			notice.Reason = "New issue"
 			if _, err := s.dispatchWithAutomationClaim(ctx, project.OrgID, project.ID, channels, notice, nil); err != nil {
-				slog.Error("queue new-issue automation alert", "project_id", project.ID, "issue_id", issue.ID, "error", err)
+				return fmt.Errorf("queue new-issue automation alert: %w", err)
 			}
 		}
-	})
+	}
+	return nil
 }
 
 // moreSensitiveRule reports whether a would fire earlier than b: a lower
@@ -653,18 +655,26 @@ type spikeAlertCandidate struct {
 
 // spikeReason evaluates the threshold only. Its claim is made by the caller in
 // the same transaction as the durable automation enqueue.
-func (s *Server) spikeReason(ctx context.Context, issue *generated.UpsertIssueRow, org string, rule *generated.AlertRule) spikeAlertCandidate {
+func (s *Server) spikeReason(ctx context.Context, issue *generated.UpsertIssueRow, org string, rule *generated.AlertRule, observedAt time.Time) (spikeAlertCandidate, error) {
 	if rule.Threshold < 1 || rule.WindowMinutes < 1 {
-		return spikeAlertCandidate{}
+		return spikeAlertCandidate{}, nil
 	}
-	cutoff := pgtype.Timestamptz{Time: time.Now().Add(-time.Duration(rule.WindowMinutes) * time.Minute), Valid: true}
-	cnt, err := s.q.CountEventsForIssueSince(ctx, generated.CountEventsForIssueSinceParams{
-		IssueID: pgText(issue.ID), OrgID: org, ReceivedAt: cutoff,
-	})
-	if err != nil || cnt < int64(rule.Threshold) {
-		return spikeAlertCandidate{}
+	// A delayed job must evaluate the window at the accepted event's time.
+	// Counting later events would turn an old new-issue job into a fresh spike
+	// and make the selected reason depend on worker backlog.
+	cutoff := pgtype.Timestamptz{Time: observedAt.Add(-time.Duration(rule.WindowMinutes) * time.Minute), Valid: true}
+	var cnt int64
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM events
+		WHERE issue_id=$1 AND org_id=$2 AND project_id=$3
+		  AND received_at >= $4 AND received_at <= $5`,
+		issue.ID, org, issue.ProjectID, cutoff.Time, observedAt).Scan(&cnt)
+	if err != nil {
+		return spikeAlertCandidate{}, fmt.Errorf("count issue spike events: %w", err)
 	}
-	return spikeAlertCandidate{reason: fmt.Sprintf("Spike: %d events in %dm", cnt, rule.WindowMinutes), cutoff: cutoff}
+	if cnt < int64(rule.Threshold) {
+		return spikeAlertCandidate{}, nil
+	}
+	return spikeAlertCandidate{reason: fmt.Sprintf("Spike: %d events in %dm", cnt, rule.WindowMinutes), cutoff: cutoff}, nil
 }
 
 // authIngest resolves the project from the DSN public key (the ingest secret)

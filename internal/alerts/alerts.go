@@ -47,16 +47,18 @@ type Notification struct {
 	ProjectID string `json:"-"`
 	// Queued automation delivery keeps the same signed body across retries.
 	// These fields never enter ordinary email/Slack/webhook payloads.
-	ObservedAt      time.Time `json:"-"`
-	AutomationEvent string    `json:"-"`
-	ProjectName     string    `json:"project"`
-	IssueID         string    `json:"issue_id"`
-	Title           string    `json:"title"`
-	Level           string    `json:"level"`
-	Culprit         string    `json:"culprit"`
-	EventCount      int64     `json:"events"`
-	Reason          string    `json:"reason"`
-	URL             string    `json:"url"`
+	ObservedAt           time.Time `json:"-"`
+	AutomationEvent      string    `json:"-"`
+	EvaluationID         string    `json:"-"`
+	EvaluationLeaseToken string    `json:"-"`
+	ProjectName          string    `json:"project"`
+	IssueID              string    `json:"issue_id"`
+	Title                string    `json:"title"`
+	Level                string    `json:"level"`
+	Culprit              string    `json:"culprit"`
+	EventCount           int64     `json:"events"`
+	Reason               string    `json:"reason"`
+	URL                  string    `json:"url"`
 }
 
 type Dispatcher struct {

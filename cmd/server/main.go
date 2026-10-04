@@ -161,6 +161,10 @@ func run() error {
 	// leases preserve one stored notice across restarts; retries sign the same
 	// body so receivers can deduplicate its verified hash.
 	go srv.RunAutomationOutbox(ctx)
+	// Event and alert evaluation now share a commit. Every replica may drain
+	// the fenced queue; a saturated or restarting process cannot discard an
+	// accepted event's issue-alert handoff.
+	go srv.RunIssueAlertEvaluations(ctx)
 
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.
