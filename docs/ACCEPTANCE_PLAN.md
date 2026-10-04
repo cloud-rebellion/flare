@@ -44,22 +44,32 @@ green tests are necessary evidence, but they are not live acceptance.
 ## Current proof boundary (2026-10-04)
 
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
-plan are local release candidates. Combined Flare PostgreSQL 16 integration
-tests, its Go suite, frontend type check/build, pinned SQL generation, and the
-backup Bash fixture have passed locally. These do not establish production
-capture. The live backup unit was observed failing on the removed
-`hephaestus-core` container, and a Stage verified-bundle off-host snapshot was
-missing; repair and an independent restore are required before cutover.
+plan are local release candidates. Combined Flare PostgreSQL 16 API and query
+tests through migration 079, focused Go tests, frontend type check/build,
+pinned SQL generation, and the backup Bash fixture have passed locally. A
+hidden-source-map build moved 45 JavaScript maps to a private build directory
+and left zero maps in the served frontend directory. These checks do not
+establish production capture. The live backup unit was observed failing on the
+removed `hephaestus-core` container, and a Stage verified-bundle off-host
+snapshot was missing; repair and an independent restore are required before
+cutover. The repaired backup candidate preserves the installed TrustIssues
+WAL-safe snapshot and has a networkless regression fixture.
 
 The ten first-party browser bridges are source-wired, but public bundle
-sampling did not prove an active Flare DSN or event receipt. A Flutter starter
-exists without a selected production app repository. Backend DSNs and provider
-connections still need deployed configuration and canaries. HubSpot's initial
-account probe exists, while consent and broader provider workflows require
-separate account authorization. Source-map and native-symbol upload acceptance
-does not by itself prove frame resolution. The exact external receipt verifier
-requires a scoped Stage profile and live proof; no caller-provided success flag
-is sufficient.
+sampling did not prove an active Flare DSN or event receipt. Their new private
+asset IDs still need app-specific rollout and a live upload/resolution canary.
+A Flutter starter exists without a selected production app repository. Backend
+DSNs and provider connections still need deployed configuration and canaries.
+HubSpot's initial account probe and explicit project binding exist locally;
+legacy installations require an admin to bind them, while consent and broader
+provider workflows require separate account authorization. The BrightCRM
+native metric pilot can duplicate a delta after an ambiguous HTTP failure, so
+its delivery is not yet an exactly-once metric contract. Native-symbol upload
+acceptance does not itself prove frame resolution. Stage's public synthetic
+verifies the shell, immutable assets, readiness, and release identity, while a
+signed-in browser journey remains an additional live acceptance check. The
+exact external receipt verifier requires a scoped Stage profile and live proof;
+no caller-provided success flag is sufficient.
 
 Keep the rollout ledger explicit: `local`, `pushed`, `exact CI`, `merged`,
 `deployed`, `live accepted`, and `restored` are separate states for every
