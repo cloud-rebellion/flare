@@ -93,8 +93,10 @@ func TestSentryPayloadAndTerminalReceiptCommitTogether(t *testing.T) {
 		t.Fatalf("retry statuses store/envelope/empty = %d/%d/%d", store.Code, env.Code, empty.Code)
 	}
 	s.bgWG.Wait()
+	// The supplied Store event ID now claims the same replay ledger as the
+	// envelope event and transaction IDs, yielding three accepted items.
 	for table, want := range map[string]int{
-		"events": 2, "issues": 2, "spans": 1, "issue_alert_evaluations": 2, "sentry_item_acceptances": 2,
+		"events": 2, "issues": 2, "spans": 1, "issue_alert_evaluations": 2, "sentry_item_acceptances": 3,
 	} {
 		if got := countEnvelopeRows(t, pool, table, project.ID); got != want {
 			t.Fatalf("%s rows after retry = %d, want %d", table, got, want)
@@ -132,7 +134,7 @@ func TestSentryPayloadAndTerminalReceiptCommitTogether(t *testing.T) {
 	if replay.Code != http.StatusServiceUnavailable {
 		t.Fatalf("replay receipt failure = %d %s", replay.Code, replay.Body.String())
 	}
-	for table, want := range map[string]int{"events": 2, "spans": 1, "sentry_item_acceptances": 2} {
+	for table, want := range map[string]int{"events": 2, "spans": 1, "sentry_item_acceptances": 3} {
 		if got := countEnvelopeRows(t, pool, table, project.ID); got != want {
 			t.Fatalf("replay changed %s rows to %d, want %d", table, got, want)
 		}
