@@ -76,16 +76,23 @@ also lack a demonstrated private-map artifact and most Compose releases still
 default to `development`; each app needs exact build-time release injection,
 private map delivery, and an event and bundled-frame resolution canary on its
 own product branch. BrightCRM combined candidate `9a5a3bfbf` and Atomicsite candidate
-`cbf83bf06` now prove in configured local builds that a synthetic DSN and full
+`99f5df78c` now prove in configured local builds that a synthetic DSN and full
 source SHA reach the shipped JavaScript, while 233 and 182 JavaScript maps,
 respectively, stay private. The initial configured builds exposed a real Vite
 env-prefix bug that silently disabled both bridges; the corrected manifest
 builds fail if configured telemetry values are absent from compiled JavaScript.
-Stage candidate `144462194` binds both pilot builds to the checked-out commit
-and provisioned Flare project before image build. Private map extraction,
-matching final-image proof, authenticated upload, and live event/frame canaries
-remain open. Current host checks found both app containers healthy and their
-public `/login` routes returning 200; Atomicsite is the narrower first pilot,
+The Atomicsite handled canary is compiled into a real immutable chunk; its
+local hidden map resolves the generated error position to
+`src/lib/flare-client.ts:322`. Stage candidate `5b6b0c219` binds both pilot
+builds to the checked-out commit and provisioned Flare project before image
+build. Its disabled-by-default Atomicsite cutover gate checks the final image,
+private rebuild, running container, and public asset route before authenticated
+map upload and readback. The gate passed focused local tests, but it has not
+run against a final image or live Flare. A deployed browser event and resolved
+frame, alert delivery, and rollback still need proof. Flare's 2,000-artifact
+per-project quota also needs a retention policy before repeated 182-map
+Atomicsite releases. Current host checks found both app containers healthy and
+their public `/login` routes returning 200; Atomicsite is the narrower first pilot,
 subject to the release gates. Bright Hub (`portal`) was previously marked
 discarded and must be revalidated before any rollout. A
 Flutter starter has framework, zone, platform, HTTP, frame, and metric hooks,
