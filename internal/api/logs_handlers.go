@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,7 +29,6 @@ func (s *Server) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		outcome.record("log")
 		recordIngestRequest("otlp", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -47,21 +47,25 @@ func (s *Server) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		outcome.invalid = 1
 		receiptStatus = http.StatusBadRequest
+		s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", receiptStatus)
 		writeErr(w, http.StatusBadRequest, "invalid OTLP logs payload")
 		return
 	}
 	receipt.setReceived(len(records))
 	requestOutcome = ""
 	budget := newIngestBudget()
-	if err := s.persistLogs(r.Context(), project, records, budget); err != nil {
+	if err := s.commitOTLPPayload(r.Context(), receipt, budget, func(ctx context.Context, q *generated.Queries) error {
+		return s.persistLogs(ctx, q, project, records, budget)
+	}); err != nil {
 		outcome.invalid = uint64(budget.invalid)
 		outcome.dropped = uint64(budget.dropped)
 		// The persistence operation is all-or-nothing for this batch. Rows
 		// admitted by the budget were not durably accepted when it failed.
 		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "persist otlp logs", err)
+		w.Header().Set("Retry-After", "1")
+		slog.Error("otlp logs acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
 	outcome.accepted = uint64(len(records) - budget.rejected())
@@ -106,7 +110,7 @@ func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
 	receipt.setReceived(len(records))
 	requestOutcome = ""
 	budget := newIngestBudget()
-	if err := s.persistLogs(r.Context(), project, records, budget); err != nil {
+	if err := s.persistLogs(r.Context(), s.q, project, records, budget); err != nil {
 		outcome.invalid = uint64(budget.invalid)
 		outcome.dropped = uint64(budget.dropped)
 		// The persistence operation is all-or-nothing for this batch. Rows
@@ -126,7 +130,7 @@ func (s *Server) handleNativeLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.rejected()})
 }
 
-func (s *Server) persistLogs(ctx context.Context, project *generated.Project, records []ingest.LogRecord, budget *ingestBudget) error {
+func (s *Server) persistLogs(ctx context.Context, q *generated.Queries, project *generated.Project, records []ingest.LogRecord, budget *ingestBudget) error {
 	// Spend the request's row budget first: an OTLP export nests
 	// resource -> scope -> record, so the byte cap alone leaves the row count
 	// unbounded. See maxIngestRecords.
@@ -151,7 +155,7 @@ func (s *Server) persistLogs(ctx context.Context, project *generated.Project, re
 			ObservedAt: pgtype.Timestamptz{Time: rec.ObservedAt, Valid: true},
 		})
 	}
-	_, err := s.q.InsertLogs(ctx, params)
+	_, err := q.InsertLogs(ctx, params)
 	return err
 }
 

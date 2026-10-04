@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -23,7 +24,6 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		outcome.record("span")
 		recordIngestRequest("otlp", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -42,13 +42,19 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		outcome.invalid = 1
 		receiptStatus = http.StatusBadRequest
+		s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", receiptStatus)
 		writeErr(w, http.StatusBadRequest, "invalid OTLP traces payload")
 		return
 	}
 	receipt.setReceived(len(spans))
 	requestOutcome = ""
 	budget := newIngestBudget()
-	stored, err := s.persistSpans(r.Context(), project, spans, budget)
+	stored := 0
+	err = s.commitOTLPPayload(r.Context(), receipt, budget, func(ctx context.Context, q *generated.Queries) error {
+		var persistErr error
+		stored, persistErr = s.persistSpans(ctx, q, project, spans, budget)
+		return persistErr
+	})
 	if err != nil {
 		outcome.invalid = uint64(budget.invalid)
 		outcome.dropped = uint64(budget.dropped)
@@ -56,8 +62,9 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 		// admitted by the budget were not durably accepted when it failed.
 		outcome.failed = uint64(len(spans)) - outcome.invalid - outcome.dropped
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "persist spans", err)
+		w.Header().Set("Retry-After", "1")
+		slog.Error("otlp traces acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
 	// Report rows that were actually admitted to the bounded request budget.
@@ -70,9 +77,9 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, otlpResponse(budget.rejected(), otlpRejectedSpans))
 }
 
-func (s *Server) persistSpans(ctx context.Context, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) (int, error) {
+func (s *Server) persistSpans(ctx context.Context, q *generated.Queries, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) (int, error) {
 	spans = spans[:budget.take(len(spans))]
-	return persistSpansWithQueries(ctx, s.q, project, spans)
+	return persistSpansWithQueries(ctx, q, project, spans)
 }
 
 // persistSpansWithQueries lets Sentry envelopes use the same sanitization and

@@ -203,14 +203,22 @@ telemetry is persisted. It contains only the authenticated organization/project,
 a sanitized or generated request ID, signal/protocol, counts, final HTTP status,
 outcome, retryability, and timing; request bodies and credentials are never
 stored. If the start write is unavailable, Flare returns `503` so the sender
-can retry without an untracked acceptance. Completion writes use a short
-detached deadline and remain diagnostic best-effort. The rows provide
-request-level audit and reconciliation evidence; they are not per-event payload
-copies.
+can retry without an untracked acceptance. Completion writes on the remaining
+paths use a short detached deadline and remain diagnostic best-effort. The
+rows provide request-level audit and reconciliation evidence; they are not
+per-event payload copies.
 For replayed Sentry items, `accepted_count` includes items already accepted in
 an earlier request, while `persisted_count` counts only writes by this request.
 Native metric batches are a stricter exception to the completion-write rule:
 their point rows and terminal receipt commit in one transaction before `200`.
+OTLP logs, spans, and metrics now have the same transaction boundary: a `200`
+means their accepted rows and completed receipt committed together. A
+transaction that rolls back returns `503` with `Retry-After: 1` and leaves no
+new payload rows. The started receipt can remain `in_progress`; if a commit
+result is ambiguous, a `503` may mean the payload and receipt already
+committed. OTLP has no stable request-level replay key, so a
+collector retry after an ambiguous `503` can still duplicate rows. This
+transaction boundary does not provide OTLP at-most-once delivery.
 
 Do not use a `200` response or `configured: true` as proof that an outbound
 provider accepted a request. The readiness body intentionally omits secrets and
@@ -227,7 +235,6 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 | Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | Successfully persisted issue events include a durable alert-evaluation job. `new_issue`, `regression`, and `spike` rules run from that job. A transient failure of any supported envelope item rolls back the batch and returns `503`. Within hot-tier retention, exact replays are deduplicated and an item ID reused with changed bytes returns `409`. HTTP `200` can include invalid items or capped spans, so inspect `accepted`, `persisted`, `deduplicated`, `invalid`, `dropped`, `span_dropped`, and the correlation ID. |
 | OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. Native metric rows and their terminal receipt commit together before `200`. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
-
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
 | Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | Failed transitions page immediately; the watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors. New slugs are capped and quiet, unconfigured monitors are pruned after 30 days. |
 | External SaaS and app connectors | `POST /api/{projectID}/connector-attempts` with `X-Flare-Key` (or `sentry_key`) | A bridge in any web, Flutter, backend, or vendor app can submit one bounded provider/operation/channel result plus optional `quota_remaining`, `retry_after_ms`, and observed `sync_lag_ms` integers. Flare stores it with `client_reported` provenance and no registered installation ID; it is a caller assertion, not proof that a provider call happened. | `connector_error_rate` and `connector_quota` rules can page on this series only when `connector_source_kind` is explicitly `client_reported`. The request accepts only safe bounded tokens, `ok`/`error`, an HTTP status class or safe error code, elapsed milliseconds, and bounded provider hints; response bodies, URLs, credentials, and user data are rejected by the contract. |

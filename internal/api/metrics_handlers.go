@@ -34,7 +34,6 @@ func (s *Server) handleOTLPMetrics(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		outcome.record("metric")
 		recordIngestRequest("otlp", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -53,21 +52,25 @@ func (s *Server) handleOTLPMetrics(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		outcome.invalid = 1
 		receiptStatus = http.StatusBadRequest
+		s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", receiptStatus)
 		writeErr(w, http.StatusBadRequest, "invalid OTLP metrics payload")
 		return
 	}
 	receipt.setReceived(len(records))
 	requestOutcome = ""
 	budget := newIngestBudget()
-	if err := s.persistMetrics(r.Context(), project, records, budget); err != nil {
+	if err := s.commitOTLPPayload(r.Context(), receipt, budget, func(ctx context.Context, q *generated.Queries) error {
+		return s.persistMetrics(ctx, q, project, records, budget)
+	}); err != nil {
 		outcome.invalid = uint64(budget.invalid)
 		outcome.dropped = uint64(budget.dropped)
 		// The persistence operation is all-or-nothing for this batch. Rows
 		// admitted by the budget were not durably accepted when it failed.
 		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "persist metrics", err)
+		w.Header().Set("Retry-After", "1")
+		slog.Error("otlp metrics acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
 	outcome.accepted = uint64(len(records) - budget.rejected())
@@ -155,7 +158,7 @@ func (s *Server) handleNativeMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) persistMetrics(ctx context.Context, project *generated.Project, records []ingest.MetricRecord, budget *ingestBudget) error {
+func (s *Server) persistMetrics(ctx context.Context, q *generated.Queries, project *generated.Project, records []ingest.MetricRecord, budget *ingestBudget) error {
 	// Keep the spend at this persistence boundary: the structural row-cap
 	// guard scans every persist* method for a direct budget.take call.
 	records = records[:budget.take(len(records))]
@@ -163,7 +166,7 @@ func (s *Server) persistMetrics(ctx context.Context, project *generated.Project,
 	if len(params) == 0 {
 		return nil
 	}
-	_, err := s.q.InsertMetrics(ctx, params)
+	_, err := q.InsertMetrics(ctx, params)
 	return err
 }
 
