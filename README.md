@@ -24,6 +24,8 @@ pluggable `Store` interface.
 
 For endpoint setup, health semantics, provider-specific signals, and known
 monitoring limits, see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
+For product rollout order and live acceptance evidence, see
+[docs/ACCEPTANCE_PLAN.md](docs/ACCEPTANCE_PLAN.md).
 
 Copyable integration starters live under [`examples/flutter`](examples/flutter/)
 and [`examples/backend`](examples/backend/). They cover Flutter runtime,
