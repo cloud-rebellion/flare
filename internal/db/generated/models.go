@@ -475,6 +475,15 @@ type Monitor struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type NativeMetricAcceptance struct {
+	OrgID       string             `json:"org_id"`
+	ProjectID   string             `json:"project_id"`
+	KeyHash     string             `json:"key_hash"`
+	PayloadHash string             `json:"payload_hash"`
+	ReceiptID   string             `json:"receipt_id"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
 type NativeSymbolArtifact struct {
 	ID               string             `json:"id"`
 	ProjectID        string             `json:"project_id"`

@@ -165,6 +165,9 @@ func run() error {
 	// the fenced queue; a saturated or restarting process cannot discard an
 	// accepted event's issue-alert handoff.
 	go srv.RunIssueAlertEvaluations(ctx)
+	// Native metric retry keys expire after seven days. Each replica removes a
+	// bounded batch of expired identities without touching retained receipts.
+	go srv.RunNativeMetricAcceptancePrune(ctx)
 
 	// Watchdog: periodic anomaly + silence detection (the "abnormal behavior"
 	// alerts that cannot ride on ingest). Best-effort; shares alert channels.

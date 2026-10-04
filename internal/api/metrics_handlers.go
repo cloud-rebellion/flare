@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -79,13 +80,10 @@ func (s *Server) handleOTLPMetrics(w http.ResponseWriter, r *http.Request) {
 // handleNativeMetrics ingests a bare JSON array of metric points (or {"metrics":[...]}).
 func (s *Server) handleNativeMetrics(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
-	var receipt *ingestReceipt
-	receiptStatus := http.StatusOK
 	requestOutcome := "rejected"
 	defer func() {
 		outcome.record("metric")
 		recordIngestRequest("native", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -95,45 +93,83 @@ func (s *Server) handleNativeMetrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "metrics", "native", &outcome, &requestOutcome, &receiptStatus)
-	if receipt == nil {
+	keyHash, err := nativeMetricKeyHash(r)
+	if err != nil {
+		outcome.invalid = 1
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	records, err := ingest.ParseNativeMetrics(body)
 	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
+		// A malformed request did not accept a signal. The compatibility
+		// receipt records its rejection without claiming a successful write.
+		if receipt := s.beginIngestReceipt(r.Context(), w, r, project, "metrics", "native"); receipt != nil {
+			receipt.setReceived(1)
+			s.finishIngestReceipt(r.Context(), receipt, outcome, "rejected", http.StatusBadRequest)
+		}
 		writeErr(w, http.StatusBadRequest, "invalid metrics payload")
 		return
 	}
-	receipt.setReceived(len(records))
-	requestOutcome = ""
-	budget := newIngestBudget()
-	if err := s.persistMetrics(r.Context(), project, records, budget); err != nil {
-		outcome.invalid = uint64(budget.invalid)
-		outcome.dropped = uint64(budget.dropped)
-		// The persistence operation is all-or-nothing for this batch. Rows
-		// admitted by the budget were not durably accepted when it failed.
-		outcome.failed = uint64(len(records)) - outcome.invalid - outcome.dropped
+	receipt := newIngestReceipt(w, r, project, "metrics", "native")
+	if receipt == nil || s.pool == nil {
+		outcome.failed = uint64(len(records))
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		slogError(w, "persist metrics", err)
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
-	outcome.accepted = uint64(len(records) - budget.rejected())
-	outcome.invalid = uint64(budget.invalid)
-	outcome.dropped = uint64(budget.dropped)
-	budget.report(project.ID, "metrics")
-	writeJSON(w, http.StatusOK, map[string]int{"accepted": len(records) - budget.rejected()})
+	receipt.setReceived(len(records))
+	budget := newIngestBudget()
+	params := metricInsertParams(project, records[:budget.take(len(records))], budget)
+	result, replay, err := s.acceptNativeMetricBatch(r.Context(), receipt, keyHash, metricPayloadHash(body), params, budget)
+	if err != nil {
+		if err == errNativeMetricKeyConflict {
+			outcome.invalid = 1
+			writeErr(w, http.StatusConflict, "Idempotency-Key was already used for different metric payload bytes")
+			return
+		}
+		outcome.invalid = uint64(budget.invalid)
+		outcome.dropped = uint64(budget.dropped)
+		// No prepared row survived a failed transaction. Keep validation and
+		// cap rejections distinct from rows that failed to commit.
+		outcome.failed = uint64(len(records) - budget.rejected())
+		requestOutcome = "failed"
+		w.Header().Set("Retry-After", "1")
+		// PostgreSQL COPY errors may quote a client-supplied metric label or
+		// value. Log only a fixed failure class at this ingest boundary.
+		slog.Error("native metric acceptance transaction failed", "project_id", project.ID)
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
+		return
+	}
+	if replay {
+		w.Header().Set("Idempotency-Replayed", "true")
+		outcome.deduplicated = uint64(result.Accepted)
+	} else {
+		outcome.accepted = uint64(result.Accepted)
+		outcome.invalid = uint64(result.Invalid)
+		outcome.dropped = uint64(result.Dropped)
+		budget.report(project.ID, "metrics")
+	}
+	requestOutcome = result.Outcome
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) persistMetrics(ctx context.Context, project *generated.Project, records []ingest.MetricRecord, budget *ingestBudget) error {
-	// Spend the request's row budget first. See maxIngestRecords.
+	// Keep the spend at this persistence boundary: the structural row-cap
+	// guard scans every persist* method for a direct budget.take call.
 	records = records[:budget.take(len(records))]
-	records = finiteMetricRows(records, budget)
-	if len(records) == 0 {
+	params := metricInsertParams(project, records, budget)
+	if len(params) == 0 {
 		return nil
 	}
+	_, err := s.q.InsertMetrics(ctx, params)
+	return err
+}
+
+func metricInsertParams(project *generated.Project, records []ingest.MetricRecord, budget *ingestBudget) []generated.InsertMetricsParams {
+	// Both callers spend the request's row budget before constructing rows.
+	records = finiteMetricRows(records, budget)
 	params := make([]generated.InsertMetricsParams, 0, len(records))
 	for _, m := range records {
 		params = append(params, generated.InsertMetricsParams{
@@ -147,11 +183,7 @@ func (s *Server) persistMetrics(ctx context.Context, project *generated.Project,
 			ObservedAt: pgtype.Timestamptz{Time: m.ObservedAt, Valid: true},
 		})
 	}
-	if len(params) == 0 {
-		return nil
-	}
-	_, err := s.q.InsertMetrics(ctx, params)
-	return err
+	return params
 }
 
 // metricRowsForPersistence applies the request row cap and rejects non-finite

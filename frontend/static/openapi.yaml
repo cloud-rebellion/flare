@@ -503,6 +503,56 @@ paths:
                       attributes: { type: object }
       responses:
         "200": { description: Accepted }
+  /api/{projectID}/metrics:
+    post:
+      tags: [Ingest]
+      summary: Native metric batch ingest with optional idempotent retries
+      description: >
+        Commits metric rows and a terminal ingest receipt in one PostgreSQL
+        transaction before HTTP 200. A client that supplies Idempotency-Key
+        must reuse the same key and exact decompressed JSON body bytes for
+        retries. A same-key replay returns the original counts and receipt_id
+        with Idempotency-Replayed: true; changed bytes return 409. Keys are
+        project-scoped and retained for seven days. Keyless requests remain
+        supported but an ambiguous retry may create duplicate metric points.
+        OTLP metrics use a separate endpoint and do not have this key contract.
+      security: [{ flareKey: [] }]
+      parameters:
+        - { name: projectID, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: false, description: "Opaque per-batch token; reuse with identical decoded body bytes on retries. Only its SHA-256 hash is stored.", schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { type: array, items: { type: object } }
+                - { type: object, required: [metrics], properties: { metrics: { type: array, items: { type: object } } } }
+      responses:
+        "200":
+          description: Terminal receipt and point counts, including original counts on a keyed replay
+          headers:
+            Idempotency-Replayed: { description: Present as true on a keyed replay, schema: { type: string, enum: ['true'] } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, rejected, dropped, receipt_id]
+                properties:
+                  accepted: { type: integer, format: int64, minimum: 0, description: Points newly stored by the original request }
+                  rejected: { type: integer, format: int64, minimum: 0, description: Invalid plus capped points }
+                  dropped: { type: integer, format: int64, minimum: 0, description: Points over the per-request row cap }
+                  receipt_id: { type: string, description: Durable tenant-scoped ingest receipt ID }
+        "400": { description: Malformed JSON or invalid idempotency token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: Invalid or wrong-project ingest key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Idempotency key reused with different decoded body bytes, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503":
+          description: No confirmed acceptance; retry with the same key and exact body bytes
+          headers:
+            Retry-After: { description: Retry delay in seconds, schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/{projectID}/connector-attempts:
     post:
       tags: [Ingest]
