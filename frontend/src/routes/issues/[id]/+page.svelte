@@ -12,8 +12,18 @@
   let issue = $state<Issue | null>(null);
   let events = $state<IssueEvent[]>([]);
   let error = $state<string | null>(null);
+  let eventsLoading = $state(true);
+  let eventsError = $state<string | null>(null);
+  let selectedEventIndex = $state(0);
 
-  const latest = $derived(events[0] ?? null);
+  // The API returns at most 50 occurrences, newest first. Keep the index in
+  // the fetched set so the stack and trace link always describe the same event.
+  const selectedEvent = $derived(events[selectedEventIndex] ?? null);
+
+  function receivedAtLabel(value: string): string {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  }
 
   $effect(() => {
     if (session.loaded && !session.user) goto('/login', { replaceState: true });
@@ -27,9 +37,15 @@
       // appeared right after someone pressed the button, and viewers (who
       // cannot run triage at all) could never see it.
       triage = issue.ai_triage ?? '';
-      events = await api.issueEvents(id);
+      try {
+        events = await api.issueEvents(id);
+      } catch (err) {
+        eventsError = err instanceof ApiError ? err.message : 'Failed to load occurrences';
+      }
     } catch (err) {
       error = err instanceof ApiError ? err.message : 'Failed to load issue';
+    } finally {
+      eventsLoading = false;
     }
   });
 
@@ -182,35 +198,62 @@
     </p>
   {/if}
 
-  {#if latest}
-    <h2 class="mt-8 mb-2 text-sm font-medium text-zinc-300">Latest event</h2>
-    {#if latest.trace_id && issue}
+  <section class="mt-8" aria-label="Issue occurrences">
+    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h2 class="text-sm font-medium text-zinc-300">Occurrences</h2>
+        {#if events.length > 0}
+          <p class="mt-1 text-xs text-zinc-500">Showing the {events.length} most recent stored occurrence{events.length === 1 ? '' : 's'}, newest first.</p>
+        {/if}
+      </div>
+      {#if events.length > 1}
+        <label class="flex items-center gap-2 text-xs text-zinc-400" for="issue-occurrence">
+          Occurrence
+          <select id="issue-occurrence" bind:value={selectedEventIndex} class="max-w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200">
+            {#each events as event, index (event.id)}
+              <option value={index}>#{index + 1} · {receivedAtLabel(event.received_at)}{event.release ? ` · ${event.release}` : ''}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+    </div>
+
+    {#if eventsLoading}
+      <p class="text-sm text-zinc-500">Loading occurrences...</p>
+    {:else if eventsError}
+      <p class="rounded-md border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{eventsError}</p>
+    {:else if events.length === 0}
+      <p class="text-sm text-zinc-500">No stored occurrences are available for this issue.</p>
+    {/if}
+
+  {#if selectedEvent}
+    {#if selectedEvent.trace_id && issue}
       <a
-        href="/projects/{issue.project_id}/traces/{latest.trace_id}"
+        href="/projects/{issue.project_id}/traces/{selectedEvent.trace_id}"
         class="mb-3 inline-flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:border-amber-400/50 hover:text-amber-300"
       >
         <span class="text-zinc-500">In trace</span>
-        <span class="font-mono">{latest.trace_id.slice(0, 16)}</span>
+        <span class="font-mono">{selectedEvent.trace_id.slice(0, 16)}</span>
         <span aria-hidden="true">&rarr;</span>
         <span>View trace</span>
       </a>
     {/if}
-    {#if latest.exception_value || latest.message}
+    {#if selectedEvent.exception_value || selectedEvent.message}
       <p class="mb-4 rounded-md border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-sm text-zinc-300">
-        {latest.exception_value || latest.message}
+        {selectedEvent.exception_value || selectedEvent.message}
       </p>
     {/if}
 
-    {#if latest.stacktrace && latest.stacktrace.frames.length}
+    {#if selectedEvent.stacktrace && selectedEvent.stacktrace.frames.length}
       <div class="overflow-hidden rounded-lg border border-zinc-800/80">
         <div class="flex items-center gap-2 border-b border-zinc-800/80 bg-zinc-900/40 px-4 py-2 text-xs font-medium text-zinc-400">
           Stack trace
-          {#if latest.stacktrace.frames.some((f) => f.symbolicated)}
+          {#if selectedEvent.stacktrace.frames.some((f) => f.symbolicated)}
             <span class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-400">source-mapped</span>
           {/if}
         </div>
         <ul class="divide-y divide-zinc-800/60 font-mono text-[13px]">
-          {#each [...latest.stacktrace.frames].reverse() as f, i (i)}
+          {#each [...selectedEvent.stacktrace.frames].reverse() as f, i (i)}
             <li class="px-4 py-2 {f.in_app === false ? 'opacity-50' : ''}">
               <div class="flex items-baseline gap-3">
                 <span class="text-amber-300">{f.function || '?'}</span>
@@ -238,12 +281,13 @@
     {/if}
 
     <div class="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-xs text-zinc-500">
-      {#if latest.environment}<span>env <span class="font-mono text-zinc-400">{latest.environment}</span></span>{/if}
-      {#if latest.release}<span>release <span class="font-mono text-zinc-400">{latest.release}</span></span>{/if}
-      {#if latest.platform}<span>platform <span class="font-mono text-zinc-400">{latest.platform}</span></span>{/if}
-      <span>received <span class="font-mono text-zinc-400">{relativeTime(latest.received_at)}</span></span>
+      {#if selectedEvent.environment}<span>env <span class="font-mono text-zinc-400">{selectedEvent.environment}</span></span>{/if}
+      {#if selectedEvent.release}<span>release <span class="font-mono text-zinc-400">{selectedEvent.release}</span></span>{/if}
+      {#if selectedEvent.platform}<span>platform <span class="font-mono text-zinc-400">{selectedEvent.platform}</span></span>{/if}
+      <span>received <span class="font-mono text-zinc-400" title={receivedAtLabel(selectedEvent.received_at)}>{relativeTime(selectedEvent.received_at)}</span></span>
     </div>
   {/if}
+  </section>
 {:else if error}
   <p class="rounded-md border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{error}</p>
 {:else}
