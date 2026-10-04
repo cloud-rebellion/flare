@@ -78,7 +78,10 @@ The BrightCRM native metric pilot reuses one batch key and exact body on retry;
 the Flare candidate commits metric rows and their terminal receipt together
 and replays the result for seven days. Native logs and client connector-attempts
 have the same optional key contract. Sentry envelope items use a project-scoped
-replay ledger; Sentry Store events have an atomic receipt but no replay ledger.
+replay ledger; Sentry Store events with a supplied event ID share that ledger
+and commit it with the event and terminal receipt. Store events without an ID
+remain fresh events on each submission. Replay protection expires with the
+configured hot telemetry retention window and requires byte-identical payloads.
 OTLP rows and their terminal receipt commit atomically, but stock exporters
 cannot supply a new per-batch key through a static header setting. A keyless
 ambiguous retry can duplicate data. A custom OTLP/HTTP sender can retain a
