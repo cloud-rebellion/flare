@@ -43,6 +43,9 @@ func (s *Server) handleRunConnectorSync(w http.ResponseWriter, r *http.Request) 
 			probe = hubspot.New()
 		}
 		worker = connectorsync.NewHubSpotWorker(s.q, s.secrets, probe)
+		if s.hubspotTokens.Pool != nil {
+			worker.ResolveToken = s.hubspotTokens.Resolve
+		}
 	}
 	result, err := worker.Run(r.Context(), orgID, connectionID, "manual:"+id.New())
 	if errors.Is(err, pgx.ErrNoRows) {

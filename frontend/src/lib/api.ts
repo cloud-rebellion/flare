@@ -257,6 +257,8 @@ export const api = {
   projectConnectorQuotaHealth: (pid: string, hours = 24, limit = 100, source: ConnectorSourceKind = 'server_observed') =>
     req<ConnectorQuotaHealth[]>('GET', `/projects/${pid}/connector-quota-health?hours=${hours}&limit=${limit}&source_kind=${source}`),
   connectorConnections: () => req<ConnectorConnection[]>('GET', '/connector-connections'),
+  hubspotOAuthAvailability: () => req<{ available: boolean; scope: string[] }>('GET', '/connectors/hubspot/availability'),
+  startHubspotOAuth: (projectId: string) => req<{ authorization_url: string }>('POST', '/connectors/hubspot/start', { project_id: projectId }),
   connectorConnection: (id: string) => req<ConnectorConnection>('GET', `/connector-connections/${id}`),
   createConnectorConnection: (input: CreateConnectorConnectionInput) =>
     req<ConnectorConnection>('POST', '/connector-connections', input),

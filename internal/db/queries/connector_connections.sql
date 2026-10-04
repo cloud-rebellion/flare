@@ -40,6 +40,7 @@ SET provider = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
   AND provider = $3 AND installation_id = $4
+  AND secret_ciphertext = sqlc.arg(expected_secret_ciphertext)
   AND (NOT sqlc.arg(bind_project)::boolean OR project_id IS NULL OR project_id = sqlc.narg(project_id)::text)
 RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at;

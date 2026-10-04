@@ -910,8 +910,10 @@ array, and an optional `secret`.
 The table is keyed by `(org_id, provider, installation_id)` and every query
 binds the authenticated workspace. An active HubSpot installation must also
 name an existing project in that workspace with `project_id`. This binding is
-returned as metadata and cannot be moved after assignment; use a new
-installation for another project. Provider and `installation_id` are immutable
+returned as metadata. Generic PATCH cannot move it after assignment; an
+explicit HubSpot OAuth re-consent can atomically move the existing installation
+to the administrator's selected project. Historical receipts keep their
+original project. Provider and `installation_id` are immutable in generic PATCH
 so historical receipts keep their meaning. Secrets are encrypted with `FLARE_SECRET_KEY`
 before storage. Responses contain only provider and installation metadata,
 scopes, status, timestamps, and `credential_configured`; they never contain the
@@ -921,7 +923,8 @@ An `active` connection must have a credential. `POST
 /api/connector-connections/{id}/check` supports four fixed-authority probes for
 enabled connections: HubSpot account metadata (`account_details`), GitHub
 `user`, Slack `auth.test`, and OpenAI `models`. It decrypts the credential only at the
-outbound boundary, discards provider bodies, and returns only the outcome, HTTP
+outbound boundary, parses only a bounded HubSpot `portalId` to verify the
+registered account, discards provider bodies, and returns only the outcome, HTTP
 status class, and bounded quota or retry hints. Slack and OpenAI checks are
 on-demand health checks; GitHub, Slack, and OpenAI checks do not persist or expose
 account, workspace content, model records, or messages. The probe emits the
@@ -933,6 +936,41 @@ connection or a server-observed source. A failed durable write is reported
 separately as `receipt_status: unavailable`; a successful provider call alone
 does not prove Flare accepted the receipt. The check does not schedule polling
 or change the administrator's chosen lifecycle status.
+
+### Connect HubSpot with OAuth
+
+The operator first creates a HubSpot developer app with OAuth distribution,
+registers the exact redirect `<BASE_URL>/api/connectors/hubspot/callback`, and
+configures only the `oauth` scope needed for account details. Set the app's
+client ID and confidential client secret as
+`FLARE_HUBSPOT_OAUTH_CLIENT_ID` and `FLARE_HUBSPOT_OAUTH_CLIENT_SECRET` on the
+Flare server; `BASE_URL` must be its public HTTPS origin. Helm installs use
+`hubspotOAuth.clientID` and the `hubspot-oauth-client-secret` Kubernetes Secret
+key. No app credentials are included in the browser bundle. Without both
+operator values and `FLARE_SECRET_KEY`, the install button stays disabled.
+
+A workspace administrator selects a Flare project and clicks **Connect
+HubSpot with OAuth** in Settings. The CSRF-protected start creates a one-time,
+ten-minute transaction bound to that administrator, workspace, project, and a
+Lax browser cookie. Only hashes of the state and cookie are stored. The
+callback requires both values, verifies the administrator still has access,
+and rejects replay or any scope beyond `oauth`. Explicit logout invalidates
+pending transactions. The access and refresh tokens are encrypted at rest;
+the access token is refreshed before expiry and the installation's HubSpot
+account ID is checked against the selected account on health probes. The
+response and receipts never include HubSpot account details or CRM records.
+
+Re-authorizing the same HubSpot account replaces its grant under the same
+connection ID. If the administrator selected another project, the same
+transaction moves the connection and clears its old sync success state;
+historical receipts remain on the prior project. Generic PATCH cannot move or
+replace an OAuth grant or broaden its scopes. Disconnect disables the
+connection, asks HubSpot to revoke the refresh token, and then deletes the
+connection; a failed revocation leaves it disabled for retry. A manual private
+app token connection remains available for sites without OAuth app setup.
+This flow requires a live HubSpot app registration, consent, token refresh,
+revocation, and account probe before production acceptance; local tests use a
+fake provider and do not establish live provider behavior.
 
 Existing connections from before the project-binding migration stay
 organization-owned. Their credentials, sync state, and historical attempts

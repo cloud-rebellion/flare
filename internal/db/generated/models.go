@@ -352,6 +352,17 @@ type GithubConfig struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type HubspotOauthTransaction struct {
+	StateHash  []byte             `json:"state_hash"`
+	CookieHash []byte             `json:"cookie_hash"`
+	OrgID      string             `json:"org_id"`
+	UserID     string             `json:"user_id"`
+	ProjectID  string             `json:"project_id"`
+	StartedAt  pgtype.Timestamptz `json:"started_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
+}
+
 type IngestReceipt struct {
 	ID             string             `json:"id"`
 	RequestID      pgtype.Text        `json:"request_id"`

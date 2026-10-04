@@ -62,6 +62,8 @@ type Server struct {
 	stageVerifier      stageReceiptVerifier
 	stageVerifyLimiter *ratelimit.Limiter
 	hubspotProbe       connectorProbe
+	hubspotOAuth       hubspot.OAuthClient
+	hubspotTokens      hubspot.TokenStore
 	connectorProbes    connectorcheck.Registry
 	hubspotSync        *connectorsync.HubSpotWorker
 	connectorScheduler *connectorsync.Scheduler
@@ -327,8 +329,14 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 	queries := generated.New(pool)
 	secretCipher := secretbox.New(cfg.SecretKey)
 	hubspotClient := hubspot.New()
+	hubspotOAuth := hubspot.OAuthClient{
+		ClientID: cfg.HubSpotOAuthClientID, ClientSecret: cfg.HubSpotOAuthClientSecret,
+		RedirectURI: strings.TrimRight(cfg.BaseURL, "/") + "/api/connectors/hubspot/callback",
+	}
+	hubspotTokens := hubspot.TokenStore{Pool: pool, Cipher: secretCipher, Client: hubspotOAuth}
 	connectorProbes := newConnectorProbeRegistry(hubspotClient)
 	hubspotWorker := connectorsync.NewHubSpotWorker(queries, secretCipher, hubspotClient)
+	hubspotWorker.ResolveToken = hubspotTokens.Resolve
 	srv := &Server{
 		q:                          queries,
 		pool:                       pool,
@@ -346,6 +354,8 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 		stageVerifier:              stagereceipt.NewClient(cfg.StageVerifyPeerIP),
 		stageVerifyLimiter:         ratelimit.New(30, time.Minute),
 		hubspotProbe:               hubspotClient,
+		hubspotOAuth:               hubspotOAuth,
+		hubspotTokens:              hubspotTokens,
 		connectorProbes:            connectorProbes,
 		hubspotSync:                hubspotWorker,
 		connectorScheduler:         connectorsync.NewScheduler(queries, hubspotWorker),

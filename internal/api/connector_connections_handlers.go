@@ -17,6 +17,7 @@ import (
 
 	"github.com/bright-interaction/flare/internal/connectorcheck"
 	"github.com/bright-interaction/flare/internal/db/generated"
+	"github.com/bright-interaction/flare/internal/hubspot"
 	"github.com/bright-interaction/flare/internal/id"
 	"github.com/bright-interaction/flare/internal/integration"
 )
@@ -264,6 +265,10 @@ func (s *Server) handleCreateConnectorConnection(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, "an active connection requires a secret")
 		return
 	}
+	if values.provider == "hubspot" && strings.HasPrefix(secret, "flare:hubspot:oauth:v1:") {
+		writeErr(w, http.StatusBadRequest, "reserved HubSpot credential format")
+		return
+	}
 	secretCiphertext, err := s.encryptConnectorSecret(secret)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "connector credential encryption is unavailable")
@@ -385,6 +390,28 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The following conditional UPDATE checks this exact value. A concurrent
+	// OAuth conversion or refresh cannot be overwritten by a stale admin PATCH.
+	ciphertext, readErr := s.q.GetConnectorConnectionSecret(ctx, generated.GetConnectorConnectionSecretParams{ID: idParam, OrgID: org})
+	if readErr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
+		return
+	}
+	if values.provider == "hubspot" && (supplied || req.Scopes != nil || values.status == "revoked" || current.Status == "revoked") {
+		_, _, oauthGrant, decodeErr := hubspot.DecodeOAuthCredential(s.secrets, ciphertext)
+		if decodeErr != nil {
+			writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
+			return
+		}
+		if oauthGrant && (supplied || req.Scopes != nil || values.status == "revoked" || current.Status == "revoked") {
+			writeErr(w, http.StatusConflict, "OAuth credentials and grants cannot be changed manually; disconnect or reconnect HubSpot")
+			return
+		}
+		if strings.HasPrefix(secret, "flare:hubspot:oauth:v1:") {
+			writeErr(w, http.StatusBadRequest, "reserved HubSpot credential format")
+			return
+		}
+	}
 	if supplied {
 		secret, err = s.encryptConnectorSecret(secret)
 		if err != nil {
@@ -403,6 +430,7 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		ID: idParam, OrgID: org, Provider: values.provider, InstallationID: values.installationID,
 		InstallationName: values.installationName, Status: values.status, Scopes: values.scopes,
 		SecretCiphertext: secret, ReplaceSecret: supplied,
+		ExpectedSecretCiphertext: ciphertext,
 		BindProject: bindProject, ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
 	})
 	if err != nil {
@@ -422,6 +450,23 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleDeleteConnectorConnection(w http.ResponseWriter, r *http.Request) {
+	if s.hubspotTokens.Pool != nil {
+		refreshToken, oauthGrant, err := s.hubspotTokens.DisableForDisconnect(r.Context(), orgIDFrom(r.Context()), chi.URLParam(r, "id"))
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusNotFound, "connector connection not found")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "connector could not be disconnected")
+			return
+		}
+		if oauthGrant {
+			if err := s.hubspotOAuth.Revoke(r.Context(), refreshToken); err != nil {
+				writeErr(w, http.StatusServiceUnavailable, "HubSpot revocation is pending; retry disconnect")
+				return
+			}
+		}
+	}
 	rows, err := s.q.DeleteConnectorConnection(r.Context(), generated.DeleteConnectorConnectionParams{ID: chi.URLParam(r, "id"), OrgID: orgIDFrom(r.Context())})
 	if err != nil {
 		slogError(w, "delete connector connection", err)
@@ -465,26 +510,27 @@ func (s *Server) handleCheckConnectorConnection(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusBadRequest, "connector connection has no credential")
 		return
 	}
-	ciphertext, err := s.q.GetConnectorConnectionSecret(ctx, generated.GetConnectorConnectionSecretParams{ID: connectionID, OrgID: org})
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeErr(w, http.StatusNotFound, "connector connection not found")
-		return
+	var secret string
+	if row.Provider == "hubspot" && s.hubspotTokens.Pool != nil {
+		secret, err = s.hubspotTokens.Resolve(ctx, org, connectionID)
+	} else {
+		var ciphertext string
+		ciphertext, err = s.q.GetConnectorConnectionSecret(ctx, generated.GetConnectorConnectionSecretParams{ID: connectionID, OrgID: org})
+		if err == nil && s.secrets != nil {
+			secret, err = s.secrets.Decrypt(ciphertext)
+		} else if err == nil {
+			err = errors.New("connector credential cipher unavailable")
+		}
 	}
 	if err != nil {
-		slogError(w, "get connector connection credential", err)
-		return
-	}
-	if s.secrets == nil {
 		writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
 		return
 	}
-	secret, err := s.secrets.Decrypt(ciphertext)
-	if err != nil {
-		slogError(w, "decrypt connector connection credential", err)
-		writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
-		return
+	probeCtx := integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: row.ProjectID.String, ConnectionID: connectionID})
+	if row.Provider == "hubspot" {
+		probeCtx = hubspot.WithExpectedAccountID(probeCtx, row.InstallationID)
 	}
-	result, probeErr := adapter.Probe.Check(integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: row.ProjectID.String, ConnectionID: connectionID}), secret)
+	result, probeErr := adapter.Probe.Check(probeCtx, secret)
 	if probeErr != nil && result.Outcome == "" {
 		result.Outcome, result.StatusClass, result.ErrorCode = integration.ClassifyError(probeErr)
 	}

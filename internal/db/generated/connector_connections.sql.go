@@ -227,23 +227,25 @@ SET provider = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
   AND provider = $3 AND installation_id = $4
+  AND secret_ciphertext = $12
   AND (NOT $10::boolean OR project_id IS NULL OR project_id = $11::text)
 RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 `
 
 type UpdateConnectorConnectionParams struct {
-	ID               string          `json:"id"`
-	OrgID            string          `json:"org_id"`
-	Provider         string          `json:"provider"`
-	InstallationID   string          `json:"installation_id"`
-	InstallationName string          `json:"installation_name"`
-	Status           string          `json:"status"`
-	Scopes           json.RawMessage `json:"scopes"`
-	SecretCiphertext string          `json:"secret_ciphertext"`
-	ReplaceSecret    bool            `json:"replace_secret"`
-	BindProject      bool            `json:"bind_project"`
-	ProjectID        pgtype.Text     `json:"project_id"`
+	ID                       string          `json:"id"`
+	OrgID                    string          `json:"org_id"`
+	Provider                 string          `json:"provider"`
+	InstallationID           string          `json:"installation_id"`
+	InstallationName         string          `json:"installation_name"`
+	Status                   string          `json:"status"`
+	Scopes                   json.RawMessage `json:"scopes"`
+	SecretCiphertext         string          `json:"secret_ciphertext"`
+	ReplaceSecret            bool            `json:"replace_secret"`
+	BindProject              bool            `json:"bind_project"`
+	ProjectID                pgtype.Text     `json:"project_id"`
+	ExpectedSecretCiphertext string          `json:"expected_secret_ciphertext"`
 }
 
 type UpdateConnectorConnectionRow struct {
@@ -273,6 +275,7 @@ func (q *Queries) UpdateConnectorConnection(ctx context.Context, arg UpdateConne
 		arg.ReplaceSecret,
 		arg.BindProject,
 		arg.ProjectID,
+		arg.ExpectedSecretCiphertext,
 	)
 	var i UpdateConnectorConnectionRow
 	err := row.Scan(

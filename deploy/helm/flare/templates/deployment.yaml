@@ -63,6 +63,15 @@ spec:
               value: "8080"
             - name: BASE_URL
               value: {{ .Values.baseURL | quote }}
+            {{- if .Values.hubspotOAuth.clientID }}
+            - name: FLARE_HUBSPOT_OAUTH_CLIENT_ID
+              value: {{ .Values.hubspotOAuth.clientID | quote }}
+            - name: FLARE_HUBSPOT_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flare.secretName" . }}
+                  key: hubspot-oauth-client-secret
+            {{- end }}
             - name: RETENTION_DAYS
               value: {{ .Values.retentionDays | quote }}
             {{- if .Values.allowDropWithoutExport }}

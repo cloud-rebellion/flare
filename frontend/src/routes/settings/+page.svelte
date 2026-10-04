@@ -53,6 +53,9 @@
   let connectorScopes = $state('crm.objects.contacts.read');
   let connectorSecret = $state('');
   let connectorBusy = $state(false);
+  let hubspotOAuthAvailable = $state(false);
+  let hubspotOAuthBusy = $state(false);
+  let hubspotOAuthResult = $state<string | null>(null);
   let connectorChecks = $state<Record<string, ConnectorCheckResult | 'busy'>>({});
   let connectorRuns = $state<Record<string, ConnectorSyncRun | 'busy'>>({});
   const isAdmin = $derived(session.user?.role === 'admin' || session.user?.role === 'owner');
@@ -168,6 +171,8 @@
 
   async function load() {
     mcpUrl = `${location.origin}/api/mcp`;
+    const oauthResult = new URLSearchParams(location.search).get('hubspot');
+    hubspotOAuthResult = oauthResult === 'connected' ? 'HubSpot account connected.' : oauthResult === 'moved' ? 'HubSpot account connected to the selected project.' : oauthResult ? 'HubSpot connection could not be completed. Please try again or ask an administrator to review the configuration.' : null;
     try {
       channels = await api.channels();
       // Needed to render channel routing. Any authenticated role can list
@@ -191,6 +196,7 @@
         aiAutoTriage = ai.auto_triage;
         aiBudget = ai.triage_daily_budget;
         connectorConnections = await api.connectorConnections();
+        hubspotOAuthAvailable = (await api.hubspotOAuthAvailability()).available;
       }
     } catch (err) {
       error = err instanceof ApiError ? err.message : 'Failed to load settings';
@@ -390,6 +396,19 @@
       error = err instanceof ApiError ? err.message : 'Failed to connect provider';
     } finally {
       connectorBusy = false;
+    }
+  }
+
+  async function connectHubSpotOAuth() {
+    if (!connectorProjectId || !hubspotOAuthAvailable) return;
+    hubspotOAuthBusy = true;
+    error = null;
+    try {
+      const { authorization_url } = await api.startHubspotOAuth(connectorProjectId);
+      location.assign(authorization_url);
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Could not start HubSpot connection';
+      hubspotOAuthBusy = false;
     }
   }
 
@@ -938,11 +957,25 @@
   </form>
 
   <h2 class="mt-14 text-xl font-semibold tracking-tight">SaaS connectors</h2>
+  {#if hubspotOAuthResult}
+    <p class="mb-4 text-sm text-amber-300" role="status">{hubspotOAuthResult}</p>
+  {/if}
   <p class="mt-1 mb-6 max-w-2xl text-sm text-zinc-500">
     Register a provider installation for bounded health checks. Credentials are write-only and encrypted at rest;
     Flare stores only connection metadata and payload-free health receipts. Supported checks are HubSpot account health,
     GitHub <code>user</code>, Slack <code>auth.test</code>, and OpenAI <code>models</code>; synchronization remains HubSpot-only.
   </p>
+
+  <div class="mb-5 flex flex-wrap items-center gap-3 rounded-md border border-zinc-800/80 bg-zinc-900/40 px-4 py-3">
+    <button onclick={connectHubSpotOAuth} disabled={!hubspotOAuthAvailable || !connectorProjectId || hubspotOAuthBusy}
+      class="rounded-md bg-amber-400 px-3.5 py-2 text-sm font-medium text-zinc-950 disabled:opacity-60">
+      {hubspotOAuthBusy ? 'Opening HubSpot...' : 'Connect HubSpot with OAuth'}
+    </button>
+    <span class="text-xs text-zinc-500">Choose a project below first. HubSpot will ask you to approve account health access only.</span>
+    {#if !hubspotOAuthAvailable}
+      <span class="text-xs text-zinc-500">An operator must configure the HubSpot app before OAuth is available.</span>
+    {/if}
+  </div>
 
   <form onsubmit={connectConnector} class="mb-6 flex flex-wrap items-end gap-3 border-b border-zinc-800/80 pb-8">
     <div class="flex flex-col gap-1.5">

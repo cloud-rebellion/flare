@@ -1,10 +1,11 @@
 // Package hubspot contains the bounded health probe for a HubSpot
-// installation. It deliberately reads account metadata only; the response
-// body is discarded so CRM records and account details never enter Flare.
+// installation. It reads only the bounded account ID needed to verify that a
+// credential belongs to the registered installation.
 package hubspot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,14 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type expectedAccountKey struct{}
+
+// WithExpectedAccountID binds a probe to the installation ID stored in Flare.
+// A missing identity fails closed even when HubSpot returns HTTP 200.
+func WithExpectedAccountID(ctx context.Context, installationID string) context.Context {
+	return context.WithValue(ctx, expectedAccountKey{}, installationID)
+}
+
 // New returns the production HubSpot client. The provider authority is fixed
 // to api.hubapi.com; connection credentials are supplied only per call.
 func New() Client {
@@ -48,8 +57,8 @@ func New() Client {
 }
 
 // Check performs a read-only account-details request using an OAuth/private
-// app token. It drains and discards a bounded response body for connection
-// reuse. Errors contain only a stable code and status class, never provider
+// app token. It parses a bounded portalId without retaining account fields.
+// Errors contain only a stable code and status class, never provider
 // response text or the bearer token.
 func (c Client) Check(ctx context.Context, token string) (result Result, err error) {
 	startedAt := time.Now().UTC()
@@ -108,12 +117,29 @@ func (c Client) Check(ctx context.Context, token string) (result Result, err err
 		return result, errors.New("hubspot probe request failed")
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
+	body, bodyErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	result.QuotaRemaining = quotaRemaining(resp.Header)
 	result.RetryAfterMS = retryAfterMS(resp.Header.Get("Retry-After"))
 	result.StatusClass = statusClass(resp.StatusCode)
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		expected, _ := ctx.Value(expectedAccountKey{}).(string)
+		if !validAccountID(expected) {
+			result.Outcome, result.ErrorCode = "error", "invalid_config"
+			return result, errors.New("hubspot installation identity is unavailable")
+		}
+		var details struct {
+			PortalID json.RawMessage `json:"portalId"`
+		}
+		if bodyErr != nil || len(body) > maxResponseBytes || json.Unmarshal(body, &details) != nil ||
+			!validAccountID(string(details.PortalID)) {
+			result.Outcome, result.ErrorCode = "error", "invalid_response"
+			return result, errors.New("hubspot account identity is invalid")
+		}
+		if string(details.PortalID) != expected {
+			result.Outcome, result.ErrorCode = "error", "account_mismatch"
+			return result, errors.New("hubspot account does not match installation")
+		}
 		result.Outcome = "ok"
 		result.ErrorCode = ""
 		return result, nil
@@ -130,6 +156,14 @@ func (c Client) Check(ctx context.Context, token string) (result Result, err err
 		result.ErrorCode = "provider_error"
 		return result, fmt.Errorf("hubspot request returned %s", result.StatusClass)
 	}
+}
+
+func validAccountID(value string) bool {
+	if value == "" || len(value) > 19 || value[0] == '0' {
+		return false
+	}
+	accountID, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && accountID > 0 && strconv.FormatInt(accountID, 10) == value
 }
 
 func newHTTPClient() *http.Client {

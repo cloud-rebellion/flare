@@ -1559,6 +1559,60 @@ paths:
                 ai_triage_mode: { type: string, enum: [failed, stuck], description: "project-scoped payload-free AI receipt mode; failed counts terminal failures and stuck counts started receipts older than the bounded window" }
       responses:
         "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/AlertRule" } } } }
+  /api/connectors/hubspot/availability:
+    get:
+      tags: [Integrations]
+      summary: Show whether administrator-led HubSpot OAuth is configured
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: Availability and the sole requested scope
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available, scope]
+                properties:
+                  available: { type: boolean }
+                  scope: { type: array, items: { type: string, enum: [oauth] } }
+  /api/connectors/hubspot/start:
+    post:
+      tags: [Integrations]
+      summary: Begin a browser-bound HubSpot consent (admin session and CSRF)
+      description: "A one-time state and Lax browser cookie bind a ten-minute transaction to the administrator, workspace and selected project. Requires server-side HubSpot app credentials and FLARE_SECRET_KEY."
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project_id]
+              properties:
+                project_id: { type: string, description: "Project in the caller's workspace to receive this account connection." }
+      responses:
+        "200":
+          description: Fixed HubSpot consent destination with one-time state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorization_url]
+                properties:
+                  authorization_url: { type: string, format: uri }
+        "400": { description: Invalid project }
+        "403": { description: Human admin session required }
+        "503": { description: OAuth configuration or storage unavailable }
+  /api/connectors/hubspot/callback:
+    get:
+      tags: [Integrations]
+      summary: Complete one HubSpot consent redirect
+      description: "Requires the one-time state and matching browser cookie. Consumes state, exchanges a code server-side, verifies the admin's current access and exact oauth scope, then redirects to Settings with a bounded outcome code. No provider payload is returned."
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: false, schema: { type: string } }
+      responses:
+        "303": { description: Redirected to Settings with bounded result code }
   /api/connector-connections:
     get:
       tags: [Integrations]
@@ -1601,7 +1655,7 @@ paths:
     patch:
       tags: [Integrations]
       summary: Update connector connection metadata or rotate its credential (admin)
-      description: "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only. Set project_id once to assign a historical org-only installation; provider, installation_id, and an existing project binding are immutable."
+      description: "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only. Set project_id once to assign a historical org-only installation; provider, installation_id, and an existing project binding are immutable here. OAuth credentials and scopes require a new HubSpot consent."
       security: [{ session: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
@@ -1623,12 +1677,12 @@ paths:
       summary: Disconnect a connector connection (admin)
       security: [{ session: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
-      responses: { "204": { description: Deleted }, "404": { description: Not found } }
+      responses: { "204": { description: Deleted; a HubSpot OAuth refresh grant was revoked first }, "404": { description: Not found }, "503": { description: Provider revocation failed; connection remains disabled for retry } }
   /api/connector-connections/{id}/check:
     post:
       tags: [Integrations]
       summary: Run a bounded connector health check (admin)
-      description: "Runs one fixed-authority adapter: HubSpot account metadata, GitHub user, Slack auth.test, or OpenAI models. Provider response bodies and credentials are discarded; the result contains bounded status and rate-limit hints and emits a tenant-scoped connector attempt."
+      description: "Runs one fixed-authority adapter: HubSpot account metadata, GitHub user, Slack auth.test, or OpenAI models. HubSpot parses only bounded portalId and requires it to equal the registered installation ID before recording ok. Provider response bodies and credentials are discarded; the result contains bounded status and rate-limit hints and emits a tenant-scoped connector attempt."
       security: [{ session: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       responses:

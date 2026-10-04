@@ -47,6 +47,9 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
 		r.With(csrfMW).Get("/csrf", s.handleCSRFToken)
+		// HubSpot's cross-site consent return cannot carry Flare's Strict
+		// session cookie; the one-time Lax transaction cookie binds it instead.
+		r.Get("/connectors/hubspot/callback", s.handleHubSpotOAuthCallback)
 
 		// Ingest: authenticated by the DSN public key, not the session, so
 		// these sit outside CSRF and requireAuth. Sentry-wire compatible.
@@ -104,6 +107,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				// Reads: any authenticated role (viewer+).
 				r.Get("/overview", s.handleOverview)
 				r.Get("/projects", s.handleListProjects)
+				r.Get("/connectors/hubspot/availability", s.handleHubSpotOAuthAvailability)
 				r.Get("/projects/{id}", s.handleGetProject)
 				r.Get("/projects/by-dsn/{dsnID}", s.handleGetProjectByDsnID)
 				r.Get("/projects/{id}/issues", s.handleListIssues)
@@ -234,6 +238,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Put("/projects/{id}/stage-verifier", s.handleSetStageVerifierBinding)
 					r.Delete("/projects/{id}/stage-verifier", s.handleDeleteStageVerifierBinding)
 					r.Post("/connector-connections", s.handleCreateConnectorConnection)
+					r.Post("/connectors/hubspot/start", s.handleHubSpotOAuthStart)
 					r.Get("/connector-connections/{id}", s.handleGetConnectorConnection)
 					r.Patch("/connector-connections/{id}", s.handleUpdateConnectorConnection)
 					r.Delete("/connector-connections/{id}", s.handleDeleteConnectorConnection)

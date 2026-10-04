@@ -57,6 +57,7 @@ type Connection struct {
 	ID                   string
 	OrgID                string
 	ProjectID            string
+	InstallationID       string
 	Provider             string
 	Status               string
 	CredentialConfigured bool
@@ -83,7 +84,7 @@ func (s SQLConnectionStore) Get(ctx context.Context, orgID, connectionID string)
 		return Connection{}, err
 	}
 	return Connection{
-		ID: row.ID, OrgID: row.OrgID, ProjectID: row.ProjectID.String, Provider: row.Provider, Status: row.Status,
+		ID: row.ID, OrgID: row.OrgID, ProjectID: row.ProjectID.String, InstallationID: row.InstallationID, Provider: row.Provider, Status: row.Status,
 		CredentialConfigured: row.CredentialConfigured,
 	}, nil
 }
@@ -108,6 +109,9 @@ type HubSpotWorker struct {
 	Connections ConnectionStore
 	Cipher      *secretbox.Cipher
 	Probe       HubSpotProbe
+	// ResolveToken refreshes OAuth grants before a probe. The legacy encrypted
+	// static-token path below remains available for manual installations.
+	ResolveToken func(context.Context, string, string) (string, error)
 
 	// These fields are overridable in tests. Production uses the defaults.
 	Now             func() time.Time
@@ -217,16 +221,20 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithTimeout(ctx, runTimeout)
 	defer cancel()
-	scopedCtx := integration.WithScope(runCtx, integration.Scope{OrgID: orgID, ProjectID: conn.ProjectID, ConnectionID: connectionID})
+	scopedCtx := hubspot.WithExpectedAccountID(integration.WithScope(runCtx, integration.Scope{OrgID: orgID, ProjectID: conn.ProjectID, ConnectionID: connectionID}), conn.InstallationID)
 
-	secretCiphertext, err := w.Connections.Secret(runCtx, orgID, connectionID)
-	if err != nil {
-		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "credential_unavailable", err)
+	var token string
+	if w.ResolveToken != nil {
+		token, err = w.ResolveToken(runCtx, orgID, connectionID)
+	} else {
+		var secretCiphertext string
+		secretCiphertext, err = w.Connections.Secret(runCtx, orgID, connectionID)
+		if err == nil && w.Cipher != nil {
+			token, err = w.Cipher.Decrypt(secretCiphertext)
+		} else if err == nil {
+			err = errors.New("credential cipher unavailable")
+		}
 	}
-	if w.Cipher == nil {
-		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "credential_unavailable", errors.New("credential cipher unavailable"))
-	}
-	token, err := w.Cipher.Decrypt(secretCiphertext)
 	if err != nil || token == "" {
 		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "invalid_config", errors.New("credential unavailable"))
 	}

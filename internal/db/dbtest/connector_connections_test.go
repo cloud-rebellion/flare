@@ -3,7 +3,10 @@ package dbtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -14,7 +17,7 @@ import (
 // secret, update, and delete queries remain tenant-scoped in the real schema.
 func TestConnectorConnectionQueriesAreTenantScoped(t *testing.T) {
 	ctx := context.Background()
-	_, q := newPool(t)
+	pool, q := newPool(t)
 	orgA, _ := seedProject(t, ctx, q)
 	orgB, _ := seedProject(t, ctx, q)
 
@@ -56,7 +59,7 @@ func TestConnectorConnectionQueriesAreTenantScoped(t *testing.T) {
 	updated, err := q.UpdateConnectorConnection(ctx, generated.UpdateConnectorConnectionParams{
 		ID: created.ID, OrgID: orgA, Provider: "hubspot", InstallationID: "install-1",
 		InstallationName: "Production EU", Status: "paused", Scopes: json.RawMessage(`["crm.read","crm.write"]`),
-		SecretCiphertext: secret,
+		SecretCiphertext: secret, ExpectedSecretCiphertext: secret,
 	})
 	if err != nil {
 		t.Fatalf("update connector connection: %v", err)
@@ -67,6 +70,25 @@ func TestConnectorConnectionQueriesAreTenantScoped(t *testing.T) {
 	secretAfter, err := q.GetConnectorConnectionSecret(ctx, generated.GetConnectorConnectionSecretParams{ID: created.ID, OrgID: orgA})
 	if err != nil || secretAfter != secret {
 		t.Fatalf("secret changed during metadata update = %q/%v", secretAfter, err)
+	}
+	// A generic PATCH can read a manual credential just before an OAuth
+	// callback converts the row. Its stale snapshot must not overwrite the
+	// freshly encrypted grant, scopes, or status.
+	if _, err := pool.Exec(ctx, `UPDATE connector_connections SET secret_ciphertext='enc:v1:new-oauth-grant'
+		WHERE id=$1 AND org_id=$2`, created.ID, orgA); err != nil {
+		t.Fatal(err)
+	}
+	_, err = q.UpdateConnectorConnection(ctx, generated.UpdateConnectorConnectionParams{
+		ID: created.ID, OrgID: orgA, Provider: "hubspot", InstallationID: "install-1",
+		InstallationName: "stale PATCH", Status: "active", Scopes: json.RawMessage(`["crm.read","crm.write"]`),
+		SecretCiphertext: "other-token", ReplaceSecret: true, ExpectedSecretCiphertext: secret,
+	})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("stale PATCH changed a newer grant: %v", err)
+	}
+	var savedSecret, savedName string
+	if err := pool.QueryRow(ctx, `SELECT secret_ciphertext,installation_name FROM connector_connections WHERE id=$1`, created.ID).Scan(&savedSecret, &savedName); err != nil || savedSecret != "enc:v1:new-oauth-grant" || savedName != "Production EU" {
+		t.Fatalf("stale PATCH result = %q/%q err=%v", savedSecret, savedName, err)
 	}
 	if deleted, err := q.DeleteConnectorConnection(ctx, generated.DeleteConnectorConnectionParams{ID: created.ID, OrgID: orgB}); err != nil || deleted != 0 {
 		t.Fatalf("cross-tenant delete = %d/%v", deleted, err)

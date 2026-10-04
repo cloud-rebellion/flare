@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -38,6 +39,10 @@ type Config struct {
 	// bounded poll cadence when enabled.
 	ConnectorSyncEnabled  bool
 	ConnectorSyncInterval time.Duration
+	// OAuth app registration is operator-owned. Empty values disable the
+	// self-service HubSpot install flow; no workspace user supplies them.
+	HubSpotOAuthClientID     string
+	HubSpotOAuthClientSecret string
 
 	// Cold-tier Parquet. Local dir by default (self-host friendly); S3/MinIO opt-in.
 	ParquetDir string
@@ -118,22 +123,24 @@ func (c Config) EmailEnabled() bool { return c.SMTPHost != "" && c.SMTPFrom != "
 
 func Load() (Config, error) {
 	c := Config{
-		Environment:           env("ENVIRONMENT", "development"),
-		Port:                  env("PORT", "8080"),
-		BaseURL:               env("BASE_URL", "http://localhost:8080"),
-		DatabaseURL:           env("DATABASE_URL", ""),
-		DBMaxConns:            int32(envInt("DB_MAX_CONNS", 20)),
-		DBMinConns:            int32(envInt("DB_MIN_CONNS", 2)),
-		RetentionDays:         envInt("RETENTION_DAYS", 30),
-		IngestRatePerMin:      envInt("INGEST_RATE_PER_MIN", 1200),
-		ConnectorSyncEnabled:  isTrue(env("FLARE_CONNECTOR_SYNC_ENABLED", "")),
-		ConnectorSyncInterval: envDuration("FLARE_CONNECTOR_SYNC_INTERVAL", 5*time.Minute),
-		ParquetDir:            env("FLARE_PARQUET_DIR", "data/parquet"),
-		S3Endpoint:            env("FLARE_PARQUET_S3_ENDPOINT", ""),
-		S3Bucket:              env("FLARE_PARQUET_S3_BUCKET", "flare"),
-		S3AccessKey:           env("FLARE_PARQUET_S3_ACCESS_KEY", ""),
-		S3SecretKey:           env("FLARE_PARQUET_S3_SECRET_KEY", ""),
-		S3Region:              env("FLARE_PARQUET_S3_REGION", "us-east-1"),
+		Environment:              env("ENVIRONMENT", "development"),
+		Port:                     env("PORT", "8080"),
+		BaseURL:                  env("BASE_URL", "http://localhost:8080"),
+		DatabaseURL:              env("DATABASE_URL", ""),
+		DBMaxConns:               int32(envInt("DB_MAX_CONNS", 20)),
+		DBMinConns:               int32(envInt("DB_MIN_CONNS", 2)),
+		RetentionDays:            envInt("RETENTION_DAYS", 30),
+		IngestRatePerMin:         envInt("INGEST_RATE_PER_MIN", 1200),
+		ConnectorSyncEnabled:     isTrue(env("FLARE_CONNECTOR_SYNC_ENABLED", "")),
+		ConnectorSyncInterval:    envDuration("FLARE_CONNECTOR_SYNC_INTERVAL", 5*time.Minute),
+		HubSpotOAuthClientID:     env("FLARE_HUBSPOT_OAUTH_CLIENT_ID", ""),
+		HubSpotOAuthClientSecret: env("FLARE_HUBSPOT_OAUTH_CLIENT_SECRET", ""),
+		ParquetDir:               env("FLARE_PARQUET_DIR", "data/parquet"),
+		S3Endpoint:               env("FLARE_PARQUET_S3_ENDPOINT", ""),
+		S3Bucket:                 env("FLARE_PARQUET_S3_BUCKET", "flare"),
+		S3AccessKey:              env("FLARE_PARQUET_S3_ACCESS_KEY", ""),
+		S3SecretKey:              env("FLARE_PARQUET_S3_SECRET_KEY", ""),
+		S3Region:                 env("FLARE_PARQUET_S3_REGION", "us-east-1"),
 		// Fail CLOSED: any spelling other than an explicit false keeps TLS on.
 		// Comparing against "true" meant "TRUE", "1" or a typo silently sent
 		// object-storage credentials in the clear.
@@ -164,6 +171,16 @@ func Load() (Config, error) {
 
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("DATABASE_URL is required")
+	}
+	if (c.HubSpotOAuthClientID == "") != (c.HubSpotOAuthClientSecret == "") {
+		return c, fmt.Errorf("FLARE_HUBSPOT_OAUTH_CLIENT_ID and FLARE_HUBSPOT_OAUTH_CLIENT_SECRET must be configured together")
+	}
+	if c.HubSpotOAuthClientID != "" {
+		base, err := url.Parse(c.BaseURL)
+		if err != nil || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.Path != "" ||
+			(base.Scheme != "https" && !(base.Scheme == "http" && !c.IsProduction() && (base.Hostname() == "localhost" || base.Hostname() == "127.0.0.1"))) {
+			return c, fmt.Errorf("BASE_URL must be an HTTPS origin (or localhost HTTP in development) when HubSpot OAuth is enabled")
+		}
 	}
 
 	// In production every secret must be explicitly set. Auth is never optional.

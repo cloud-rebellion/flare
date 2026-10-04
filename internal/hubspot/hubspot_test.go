@@ -29,7 +29,7 @@ func TestCheckSuccessRecordsOnlyBoundedHints(t *testing.T) {
 	integration.SetRecorder(func(_ context.Context, attempt integration.Attempt) { got = attempt })
 	defer integration.SetRecorder(nil)
 	client := Client{baseURL: "https://api.hubapi.com", httpClient: &http.Client{Transport: transport}}
-	result, err := client.Check(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), token)
+	result, err := client.Check(WithExpectedAccountID(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), "123"), token)
 	if err != nil || result.Outcome != "ok" || result.StatusClass != "2xx" || result.ReceiptStatus != "accepted" {
 		t.Fatalf("success result = %#v, err %v", result, err)
 	}
@@ -91,12 +91,41 @@ func TestCheckKeepsProviderOutcomeWhenReceiptPersistenceFails(t *testing.T) {
 	client := Client{
 		baseURL: "https://api.hubapi.com",
 		httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return fakeResponse(http.StatusOK, http.Header{}, `{}`), nil
+			return fakeResponse(http.StatusOK, http.Header{}, `{"portalId":123}`), nil
 		})},
 	}
-	result, err := client.Check(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), "token")
+	result, err := client.Check(WithExpectedAccountID(integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"}), "123"), "token")
 	if err != nil || result.Outcome != "ok" || result.ReceiptStatus != "unavailable" {
 		t.Fatalf("provider outcome changed by receipt failure: result=%#v err=%v", result, err)
+	}
+}
+
+func TestCheckRejectsUnverifiedAccountBeforeReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name, expected, body, code string
+	}{
+		{"missing expected", "", `{"portalId":123}`, "invalid_config"},
+		{"wrong account", "456", `{"portalId":123,"email":"private@example.test"}`, "account_mismatch"},
+		{"missing portal", "123", `{}`, "invalid_response"},
+		{"string portal", "123", `{"portalId":"123"}`, "invalid_response"},
+		{"oversize", "123", strings.Repeat("x", maxResponseBytes+1), "invalid_response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got integration.Attempt
+			integration.SetRecorder(func(_ context.Context, attempt integration.Attempt) { got = attempt })
+			defer integration.SetRecorder(nil)
+			client := Client{baseURL: "https://api.hubapi.com", httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return fakeResponse(http.StatusOK, http.Header{}, tc.body), nil
+			})}}
+			ctx := integration.WithScope(context.Background(), integration.Scope{OrgID: "org-test", ConnectionID: "connection-test"})
+			result, err := client.Check(WithExpectedAccountID(ctx, tc.expected), "token")
+			if err == nil || result.Outcome != "error" || result.ErrorCode != tc.code || got.Outcome != "error" || got.ErrorCode != tc.code {
+				t.Fatalf("result=%#v err=%v receipt=%#v", result, err, got)
+			}
+			if strings.Contains(err.Error(), "private@example.test") || strings.Contains(got.ErrorCode, "private@example.test") {
+				t.Fatal("provider account payload escaped")
+			}
+		})
 	}
 }
 

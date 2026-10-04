@@ -231,6 +231,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// A HubSpot consent started in another tab has a Lax callback cookie even
+	// after the Strict session ends. Revoke pending server-side state as well as
+	// the browser cookie so a same-browser callback cannot finish after logout.
+	s.clearHubSpotTx(w)
+	if uid, org := s.sessions.GetString(r.Context(), "user_id"), s.sessions.GetString(r.Context(), "org_id"); uid != "" && org != "" && s.pool != nil {
+		if _, err := s.pool.Exec(r.Context(), `DELETE FROM hubspot_oauth_transactions
+			WHERE user_id=$1 AND org_id=$2 AND consumed_at IS NULL`, uid, org); err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "logout could not invalidate pending connections")
+			return
+		}
+	}
 	if err := s.sessions.Destroy(r.Context()); err != nil {
 		slogError(w, "destroy session", err)
 		return

@@ -23,6 +23,11 @@ stageVerifier:
   url: ""
   peerIP: ""
 
+# Optional operator-owned HubSpot developer app. Register the exact
+# <baseURL>/api/connectors/hubspot/callback redirect and grant only oauth.
+hubspotOAuth:
+  clientID: ""
+
 # Days telemetry is kept in Postgres before export-to-Parquet + drop.
 retentionDays: 30
 
@@ -42,6 +47,9 @@ secrets:
   # Generate: openssl rand -base64 32
   # Treat as permanent: rotating it makes existing encrypted values unreadable.
   secretKey: ""
+  # Required only when hubspotOAuth.clientID is set. Existing Secret users
+  # instead provide the hubspot-oauth-client-secret key there.
+  hubspotOAuthClientSecret: ""
   # Provide a pre-created Secret instead of the values above. It must hold
   # keys: session-key, csrf-key, secret-key, database-url (and optionally
   # smtp-password).

@@ -63,6 +63,25 @@ func TestProductionLoadsWithAllSecrets(t *testing.T) {
 	}
 }
 
+func TestHubSpotOAuthRequiresPairedCredentialsAndPublicHTTPS(t *testing.T) {
+	prodEnv(t, "")
+	t.Setenv("BASE_URL", "https://flare.example")
+	t.Setenv("FLARE_HUBSPOT_OAUTH_CLIENT_ID", "app-client")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FLARE_HUBSPOT_OAUTH_CLIENT_SECRET") {
+		t.Fatalf("unpaired OAuth app credential accepted: %v", err)
+	}
+	t.Setenv("FLARE_HUBSPOT_OAUTH_CLIENT_SECRET", "server-secret")
+	t.Setenv("BASE_URL", "http://flare.example")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HTTPS origin") {
+		t.Fatalf("insecure OAuth callback origin accepted: %v", err)
+	}
+	t.Setenv("BASE_URL", "https://flare.example")
+	cfg, err := Load()
+	if err != nil || cfg.HubSpotOAuthClientID != "app-client" || cfg.HubSpotOAuthClientSecret != "server-secret" {
+		t.Fatalf("valid OAuth app configuration rejected: %v", err)
+	}
+}
+
 // TestSignupIsClosedByDefault locks the default. POST /api/auth/register is the
 // self-host first-run path and users.sql has carried the CountUsers bootstrap
 // check since it was written; the route shipped ungated anyway, so anyone could
