@@ -17,7 +17,9 @@ green tests are necessary evidence, but they are not live acceptance.
    public Flare route and runner egress are verified.
 3. Merge and deploy Flare. Require migrations, `/readyz` JSON with the expected
    source commit and release, a public shell, a real stored event and ingest
-   receipt, and a query for that same tenant and project.
+   receipt, and a query for that same tenant and project. Arm an independent
+   outside-in probe and paging destination for Flare itself; an unavailable
+   Flare database cannot reliably page through Flare's own workers.
 4. Roll out each first-party app through its own product branch. Supply its
    public DSN, environment, and immutable release at build time. Send a benign
    browser or backend canary and verify the accepted event and receipt in Flare.
@@ -40,6 +42,7 @@ green tests are necessary evidence, but they are not live acceptance.
 | Backend | A running process sends an error, trace, service heartbeat, and an explicit request-success or business metric. Confirm durable acceptance, tenant scope, SLO query and alert, release freshness, and a missing-heartbeat alert after shutdown. |
 | SaaS | A registered installation has a server-observed, project- or organization-scoped identity. Verify account/auth, quota or rate-limit, failed operation, and last successful sync using provider responses; client-reported observations remain separately labeled and cannot impersonate the installation. |
 | Business | A confidential project key posts an idempotent payload-free check and receipt. Verify an error changes the business-health query and alert while a public DSN cannot submit that check. |
+| Flare control plane | An independent monitor sees public readiness and a canary's ingest-to-query journey, while a private scrape checks receipt failures and queue backlogs. A test alert reaches its actual email/webhook destination. A restored snapshot boots Flare and decrypts a harmless test secret. |
 | AI and release | A fresh triage receipt produces a bounded evidence digest. A human session approves the proposed source revision. Stage-owned proof verifies CI for source `P`, merge from `P` to `M`, deployment of `M`, and a distinct post-cutover public synthetic observation of `M`; unverified claims do not advance. |
 
 ## Current proof boundary (2026-10-04)
