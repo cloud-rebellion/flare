@@ -2,6 +2,7 @@ package connectorsync
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestHubSpotWorkerClaimsChecksAndCompletesWithoutPayload(t *testing.T) {
 		connection: Connection{ID: "conn-1", OrgID: "org-1", Provider: "hubspot", Status: "active", CredentialConfigured: true},
 		secret:     "hs-token",
 	}
-	probe := &fakeHubSpotProbe{result: hubspot.Result{Outcome: "ok", StatusClass: "2xx"}}
+	probe := &fakeHubSpotProbe{result: hubspot.Result{Outcome: "ok", StatusClass: "2xx", ReceiptStatus: "accepted"}}
 	worker := &HubSpotWorker{
 		States: states, Connections: connections, Cipher: secretbox.New(""), Probe: probe,
 		Now: func() time.Time { return now }, LeaseFor: 10 * time.Second,
@@ -34,7 +35,7 @@ func TestHubSpotWorkerClaimsChecksAndCompletesWithoutPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !got.Claimed || got.Skipped || got.Outcome != "ok" || got.StatusClass != "2xx" {
+	if !got.Claimed || got.Skipped || got.Outcome != "ok" || got.StatusClass != "2xx" || got.ReceiptStatus != "accepted" {
 		t.Fatalf("result = %#v", got)
 	}
 	if states.completeOutcome != "ok" || states.completeNext == nil || !states.completeNext.Equal(now.Add(15*time.Minute)) {
@@ -114,6 +115,28 @@ func TestHubSpotWorkerCompletesCredentialFailureWithBoundedCode(t *testing.T) {
 	got, err := worker.Run(context.Background(), "org-1", "conn-1", "worker-a")
 	if err != nil || got.ErrorCode != "invalid_config" || states.completeOutcome != "error" || states.completeErrorCode != "invalid_config" {
 		t.Fatalf("credential failure = %#v err %v complete=%q/%q", got, err, states.completeOutcome, states.completeErrorCode)
+	}
+}
+
+func TestHubSpotWorkerPreflightReceiptFailureRemainsSeparate(t *testing.T) {
+	states := &fakeStateStore{claimed: State{ID: "sync-1"}}
+	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}, secret: "enc:v1:broken"}
+	worker := &HubSpotWorker{States: states, Connections: connections, Cipher: secretbox.New("correct-key")}
+	receiptCalls := 0
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receiptCalls++
+		if a.Scope.OrgID != "org-1" || a.Scope.ConnectionID != "conn-1" || a.Channel != "worker" || a.Outcome != "error" || a.ErrorCode != "invalid_config" {
+			t.Fatalf("preflight receipt = %#v", a)
+		}
+		return errors.New("storage-secret")
+	})
+	t.Cleanup(func() { integration.SetRecorder(nil) })
+	got, err := worker.Run(context.Background(), "org-1", "conn-1", "worker-a")
+	if err != nil || got.Outcome != "error" || got.ErrorCode != "invalid_config" || got.ReceiptStatus != "unavailable" {
+		t.Fatalf("provider and receipt result = %#v, %v", got, err)
+	}
+	if receiptCalls != 1 || states.completeOutcome != "error" || states.completeErrorCode != "invalid_config" {
+		t.Fatalf("receipt calls = %d, worker completion = %q/%q", receiptCalls, states.completeOutcome, states.completeErrorCode)
 	}
 }
 

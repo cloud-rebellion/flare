@@ -1,13 +1,17 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
 )
 
@@ -78,5 +82,68 @@ func TestOIDCOutboundCallsRecordBoundedIntegrationMetrics(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("OIDC value leaked into metrics: %q\n%s", forbidden, body)
 		}
+	}
+}
+
+func TestOIDCReceiptFailureDoesNotRepeatAuthenticationCalls(t *testing.T) {
+	previousClient, previousLogger := httpClient, slog.Default()
+	t.Cleanup(func() {
+		httpClient = previousClient
+		slog.SetDefault(previousLogger)
+		integration.SetRecorder(nil)
+	})
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	issuer := "https://receipt-oidc-issuer.example"
+	discMu.Lock()
+	delete(discCache, issuer)
+	discMu.Unlock()
+	providerCalls := map[string]int{}
+	httpClient = &http.Client{Transport: oidcRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		providerCalls[r.URL.Path]++
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			return oidcResponse(http.StatusOK, `{"authorization_endpoint":"https://receipt-oidc-issuer.example/authorize","token_endpoint":"https://receipt-oidc-issuer.example/token","userinfo_endpoint":"https://receipt-oidc-issuer.example/userinfo"}`), nil
+		case "/token":
+			return oidcResponse(http.StatusOK, `{"access_token":"access-secret"}`), nil
+		case "/userinfo":
+			return oidcResponse(http.StatusOK, `{"sub":"subject-1","email":"person@example.com","email_verified":true}`), nil
+		default:
+			t.Fatalf("unexpected provider path %q", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	receiptCalls := map[string]int{}
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receiptCalls[a.Operation]++
+		if a.Scope.OrgID != "org-1" || a.Provider != "oidc" || a.Outcome != "ok" {
+			t.Fatalf("OIDC receipt = %#v", a)
+		}
+		return errors.New("storage-secret")
+	})
+	ctx := integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"})
+	provider, err := Discover(ctx, issuer)
+	if err != nil {
+		t.Fatalf("discover changed by receipt failure: %v", err)
+	}
+	token, err := provider.Exchange(ctx, "client-id", "client-secret", "code-secret", "https://flare.example/callback")
+	if err != nil || token != "access-secret" {
+		t.Fatalf("exchange changed by receipt failure: token=%q err=%v", token, err)
+	}
+	info, err := provider.FetchUserInfo(ctx, token)
+	if err != nil || info == nil || info.Subject != "subject-1" {
+		t.Fatalf("userinfo changed by receipt failure: %#v, %v", info, err)
+	}
+	for path, operation := range map[string]string{
+		"/.well-known/openid-configuration": "discover",
+		"/token":                            "exchange",
+		"/userinfo":                         "fetch_userinfo",
+	} {
+		if providerCalls[path] != 1 || receiptCalls[operation] != 1 {
+			t.Fatalf("path %s / operation %s: provider calls=%d receipt calls=%d", path, operation, providerCalls[path], receiptCalls[operation])
+		}
+	}
+	if strings.Count(logs.String(), "receipt_status=unavailable") != 3 || strings.Contains(logs.String(), "storage-secret") || strings.Contains(logs.String(), "client-secret") || strings.Contains(logs.String(), "access-secret") {
+		t.Fatalf("receipt failure logs must use fixed status: %s", logs.String())
 	}
 }

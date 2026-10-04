@@ -121,6 +121,11 @@ func (s *Scheduler) RunOnce(ctx context.Context) (SchedulerRun, error) {
 		} else if run.Claimed {
 			result.Claimed++
 		}
+		if run.ReceiptStatus != "" && run.ReceiptStatus != "accepted" {
+			// Keep receipt persistence separate from the provider outcome. A
+			// scheduler must not rerun the provider call to repair missing evidence.
+			slog.Warn("connector receipt not accepted", "provider", "hubspot", "operation", HubSpotAccountDetailsOperation, "receipt_status", run.ReceiptStatus)
+		}
 	}
 	return result, nil
 }

@@ -1,13 +1,17 @@
 package github
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
 )
 
@@ -76,5 +80,39 @@ func TestCreateIssueRecordsBoundedIntegrationMetrics(t *testing.T) {
 		if strings.Contains(out, forbidden) {
 			t.Fatalf("GitHub value leaked into metrics: %q\n%s", forbidden, out)
 		}
+	}
+}
+
+func TestCreateIssueReceiptFailurePreservesProviderSuccess(t *testing.T) {
+	previousClient, previousLogger := httpClient, slog.Default()
+	t.Cleanup(func() {
+		httpClient = previousClient
+		slog.SetDefault(previousLogger)
+		integration.SetRecorder(nil)
+	})
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	providerCalls, receiptCalls := 0, 0
+	httpClient = &http.Client{Transport: githubRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return githubResponse(http.StatusCreated, `{"html_url":"https://github.com/acme/app/issues/1"}`), nil
+	})}
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receiptCalls++
+		if a.Provider != "github" || a.Operation != "create_issue" || a.Outcome != "ok" || a.Scope.OrgID != "org-1" {
+			t.Fatalf("unexpected receipt attempt: %#v", a)
+		}
+		return errors.New("storage-secret")
+	})
+	ctx := integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"})
+	url, err := CreateIssue(ctx, "token-secret", "acme/app", "title", "body")
+	if err != nil || url != "https://github.com/acme/app/issues/1" {
+		t.Fatalf("provider result = %q, %v", url, err)
+	}
+	if providerCalls != 1 || receiptCalls != 1 {
+		t.Fatalf("provider calls = %d, receipt calls = %d", providerCalls, receiptCalls)
+	}
+	if !strings.Contains(logs.String(), "receipt_status=unavailable") || strings.Contains(logs.String(), "storage-secret") || strings.Contains(logs.String(), "token-secret") {
+		t.Fatalf("receipt failure log must use fixed status: %s", logs.String())
 	}
 }

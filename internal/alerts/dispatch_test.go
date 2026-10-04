@@ -1,13 +1,17 @@
 package alerts
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
 )
 
@@ -97,5 +101,34 @@ func TestDispatchRecordsBoundedIntegrationMetrics(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("untrusted alert value became a metric label: %q\n%s", forbidden, body)
 		}
+	}
+}
+
+func TestDispatchOneReceiptFailureDoesNotRedeliverOrMaskOutcome(t *testing.T) {
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+		integration.SetRecorder(nil)
+	})
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	receiptCalls, deliveryCalls := 0, 0
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receiptCalls++
+		if a.Scope.OrgID != "org-1" || a.Scope.ProjectID != "project-1" || a.Provider != "alerts" || a.Outcome != "ok" {
+			t.Fatalf("alert receipt = %#v", a)
+		}
+		return errors.New("storage-secret")
+	})
+	d := NewDispatcher(nil)
+	d.Recorder = func(context.Context, string, string, error) { deliveryCalls++ }
+	if err := d.DispatchOne(context.Background(), Channel{ID: "channel-1", OrgID: "org-1", Type: "log"}, Notification{ProjectID: "project-1"}); err != nil {
+		t.Fatalf("delivery outcome changed by receipt failure: %v", err)
+	}
+	if receiptCalls != 1 || deliveryCalls != 1 {
+		t.Fatalf("receipt calls = %d, delivery calls = %d", receiptCalls, deliveryCalls)
+	}
+	if !strings.Contains(logs.String(), "receipt_status=unavailable") || strings.Contains(logs.String(), "storage-secret") {
+		t.Fatalf("receipt failure log must use fixed status: %s", logs.String())
 	}
 }

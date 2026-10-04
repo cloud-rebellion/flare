@@ -17,15 +17,16 @@ import (
 // durable state projection only; provider response bodies, credentials, cursor
 // bytes, worker IDs, and organization IDs never cross this API boundary.
 type connectorSyncRunResponse struct {
-	Operation   string     `json:"operation"`
-	State       string     `json:"state"`
-	Outcome     string     `json:"outcome,omitempty"`
-	StatusClass string     `json:"status_class,omitempty"`
-	ErrorCode   string     `json:"error_code,omitempty"`
-	Claimed     bool       `json:"claimed"`
-	Skipped     bool       `json:"skipped"`
-	SkipReason  string     `json:"skip_reason,omitempty"`
-	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
+	Operation     string     `json:"operation"`
+	State         string     `json:"state"`
+	Outcome       string     `json:"outcome,omitempty"`
+	StatusClass   string     `json:"status_class,omitempty"`
+	ErrorCode     string     `json:"error_code,omitempty"`
+	ReceiptStatus string     `json:"receipt_status,omitempty"`
+	Claimed       bool       `json:"claimed"`
+	Skipped       bool       `json:"skipped"`
+	SkipReason    string     `json:"skip_reason,omitempty"`
+	NextRunAt     *time.Time `json:"next_run_at,omitempty"`
 }
 
 // handleRunConnectorSync executes one bounded HubSpot health sync. It is an
@@ -76,7 +77,7 @@ func (s *Server) handleRunConnectorSync(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, status, connectorSyncRunResponse{
 		Operation: connectorsync.HubSpotAccountDetailsOperation,
 		State:     result.State.Status, Outcome: result.Outcome, StatusClass: result.StatusClass,
-		ErrorCode: result.ErrorCode, Claimed: result.Claimed, Skipped: result.Skipped,
+		ErrorCode: result.ErrorCode, ReceiptStatus: result.ReceiptStatus, Claimed: result.Claimed, Skipped: result.Skipped,
 		SkipReason: result.SkipReason, NextRunAt: receiptTimestamp(result.State.NextRunAt),
 	})
 }

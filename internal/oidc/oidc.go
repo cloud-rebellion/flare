@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"github.com/bright-interaction/flare/internal/netguard"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -100,11 +101,14 @@ func Discover(ctx context.Context, issuer string) (provider *Provider, err error
 		}
 		metrics.RecordIntegration("oidc", "discover", "http", outcome, time.Since(started))
 		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "discover", Channel: "http",
 			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
 			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		if receiptErr != nil {
+			slog.Warn("connector receipt not accepted", "provider", "oidc", "operation", "discover", "receipt_status", integration.ReceiptStatus(receiptErr))
+		}
 	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -168,11 +172,14 @@ func (p *Provider) Exchange(ctx context.Context, clientID, clientSecret, code, r
 		}
 		metrics.RecordIntegration("oidc", "exchange", "http", outcome, time.Since(started))
 		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "exchange", Channel: "http",
 			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
 			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		if receiptErr != nil {
+			slog.Warn("connector receipt not accepted", "provider", "oidc", "operation", "exchange", "receipt_status", integration.ReceiptStatus(receiptErr))
+		}
 	}()
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
@@ -229,11 +236,14 @@ func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (info 
 		}
 		metrics.RecordIntegration("oidc", "fetch_userinfo", "http", outcome, time.Since(started))
 		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "oidc", Operation: "fetch_userinfo", Channel: "http",
 			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
 			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		if receiptErr != nil {
+			slog.Warn("connector receipt not accepted", "provider", "oidc", "operation", "fetch_userinfo", "receipt_status", integration.ReceiptStatus(receiptErr))
+		}
 	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

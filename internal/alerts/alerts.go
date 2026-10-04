@@ -163,12 +163,15 @@ func (d *Dispatcher) send(ctx context.Context, ch Channel, n Notification) error
 	elapsed := time.Since(started)
 	recordDeliveryMetric(ch, err, elapsed)
 	outcome, statusClass, errorCode := integration.ClassifyError(err)
-	integration.Record(ctx, integration.Attempt{
+	receiptErr := integration.RecordResult(ctx, integration.Attempt{
 		Scope:    integration.Scope{OrgID: ch.OrgID, ProjectID: n.ProjectID},
 		Provider: "alerts", Operation: "dispatch", Channel: ch.Type,
 		Outcome: outcome, StatusClass: statusClass, ErrorCode: errorCode,
 		Elapsed: elapsed, AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 	})
+	if receiptErr != nil {
+		slog.Warn("connector receipt not accepted", "provider", "alerts", "operation", "dispatch", "receipt_status", integration.ReceiptStatus(receiptErr))
+	}
 	return err
 }
 

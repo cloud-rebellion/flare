@@ -134,9 +134,12 @@ type RunResult struct {
 	Outcome     string
 	StatusClass string
 	ErrorCode   string
-	Claimed     bool
-	Skipped     bool
-	SkipReason  string
+	// ReceiptStatus reports the separate connector-attempt persistence result.
+	// A failed receipt never changes the provider outcome or repeats the probe.
+	ReceiptStatus string
+	Claimed       bool
+	Skipped       bool
+	SkipReason    string
 }
 
 // Run performs one bounded HubSpot account-details sync. A busy lease is a
@@ -235,6 +238,7 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 		probeResult.Outcome, probeResult.StatusClass, probeResult.ErrorCode = integration.ClassifyError(probeErr)
 	}
 	result.Outcome, result.StatusClass, result.ErrorCode = probeResult.Outcome, probeResult.StatusClass, probeResult.ErrorCode
+	result.ReceiptStatus = probeResult.ReceiptStatus
 	next := w.nextRunAt(probeResult)
 	completed, completeErr := w.complete(ctx, result, orgID, connectionID, workerID, probeResult.Outcome, probeResult.ErrorCode, &next)
 	if completeErr != nil {
@@ -250,10 +254,11 @@ func (w *HubSpotWorker) completeFailure(ctx context.Context, result RunResult, o
 	result.ErrorCode = code
 	// The probe was not reached, so emit the same payload-free connector receipt
 	// shape as the provider adapter would have emitted.
-	integration.Record(integration.WithScope(ctx, integration.Scope{OrgID: orgID, ConnectionID: connectionID}), integration.Attempt{
+	receiptErr := integration.RecordResult(integration.WithScope(ctx, integration.Scope{OrgID: orgID, ConnectionID: connectionID}), integration.Attempt{
 		Provider: "hubspot", Operation: HubSpotAccountDetailsOperation, Channel: "worker", Outcome: "error", ErrorCode: code,
 		AttemptedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(),
 	})
+	result.ReceiptStatus = integration.ReceiptStatus(receiptErr)
 	next := w.nextRunAt(hubspot.Result{Outcome: "error", ErrorCode: code})
 	return w.complete(ctx, result, orgID, connectionID, workerID, "error", code, &next)
 }

@@ -1,13 +1,17 @@
 package ai
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
 )
 
@@ -65,5 +69,35 @@ func TestCompleteRecordsBoundedIntegrationMetrics(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("AI value leaked into metrics: %q\n%s", forbidden, body)
 		}
+	}
+}
+
+func TestCompleteReceiptFailurePreservesModelReply(t *testing.T) {
+	previousLogger := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+		integration.SetRecorder(nil)
+	})
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	providerCalls, receiptCalls := 0, 0
+	client := &Client{http: &http.Client{Transport: aiRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		providerCalls++
+		return aiResponse(http.StatusOK, `{"choices":[{"message":{"content":"model reply"}}]}`), nil
+	})}}
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receiptCalls++
+		if a.Scope.OrgID != "org-1" || a.Provider != "ai" || a.Operation != "complete" || a.Outcome != "ok" {
+			t.Fatalf("model receipt = %#v", a)
+		}
+		return errors.New("storage-secret")
+	})
+	ctx := integration.WithScope(context.Background(), integration.Scope{OrgID: "org-1"})
+	reply, err := client.Complete(ctx, Config{BaseURL: "https://ai.example", APIKey: "key-secret", Model: "test"}, "system", "user")
+	if err != nil || reply != "model reply" || providerCalls != 1 || receiptCalls != 1 {
+		t.Fatalf("reply = %q, err = %v, provider calls = %d, receipt calls = %d", reply, err, providerCalls, receiptCalls)
+	}
+	if !strings.Contains(logs.String(), "receipt_status=unavailable") || strings.Contains(logs.String(), "storage-secret") || strings.Contains(logs.String(), "key-secret") {
+		t.Fatalf("receipt failure log must use fixed status: %s", logs.String())
 	}
 }

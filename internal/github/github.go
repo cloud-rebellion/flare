@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -36,11 +37,14 @@ func CreateIssue(ctx context.Context, token, repo, title, body string) (htmlURL 
 		}
 		metrics.RecordIntegration("github", "create_issue", "http", outcome, time.Since(started))
 		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: integration.ScopeFrom(ctx), Provider: "github", Operation: "create_issue", Channel: "http",
 			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
 			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		if receiptErr != nil {
+			slog.Warn("connector receipt not accepted", "provider", "github", "operation", "create_issue", "receipt_status", integration.ReceiptStatus(receiptErr))
+		}
 	}()
 	payload, err := json.Marshal(map[string]string{"title": title, "body": body})
 	if err != nil {

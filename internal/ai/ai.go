@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 
 	"github.com/bright-interaction/flare/internal/integration"
@@ -86,11 +87,14 @@ func (c *Client) Complete(ctx context.Context, cfg Config, system, user string) 
 		metrics.RecordIntegration("ai", "complete", format, outcome, time.Since(started))
 		receiptOutcome, statusClass, errorCode := integration.ClassifyError(err)
 		scope := integration.ScopeFrom(ctx)
-		integration.Record(ctx, integration.Attempt{
+		receiptErr := integration.RecordResult(ctx, integration.Attempt{
 			Scope: scope, Provider: "ai", Operation: "complete", Channel: format,
 			Outcome: receiptOutcome, StatusClass: statusClass, ErrorCode: errorCode,
 			Elapsed: time.Since(started), AttemptedAt: startedAt, CompletedAt: time.Now().UTC(),
 		})
+		if receiptErr != nil {
+			slog.Warn("connector receipt not accepted", "provider", "ai", "operation", "complete", "receipt_status", integration.ReceiptStatus(receiptErr))
+		}
 	}()
 	reqCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
