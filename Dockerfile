@@ -20,7 +20,7 @@ COPY frontend/ .
 # as build arguments because Vite/SvelteKit embeds them in the browser bundle.
 ARG FLARE_DSN=""
 ARG FLARE_ENVIRONMENT=production
-ARG FLARE_RELEASE=development
+ARG FLARE_RELEASE=v0.4.0
 ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
     PUBLIC_FLARE_ENVIRONMENT=${FLARE_ENVIRONMENT} \
     PUBLIC_FLARE_RELEASE=${FLARE_RELEASE}
@@ -29,7 +29,7 @@ RUN bun run build
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.6-bookworm AS backend
 WORKDIR /app
-ARG FLARE_RELEASE=development
+ARG FLARE_RELEASE=v0.4.0
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential gcc g++ \
     && rm -rf /var/lib/apt/lists/*

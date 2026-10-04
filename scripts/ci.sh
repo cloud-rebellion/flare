@@ -179,7 +179,17 @@ helm_release_identity_check() {
     echo "Helm deployment does not pass image.tag through FLARE_RELEASE" >&2
     return 1
   }
-  echo "Helm release identity is pinned to $release (image tag, appVersion, FLARE_RELEASE)"
+  [ "$(grep -cF -- "ARG FLARE_RELEASE=$release" Dockerfile)" -eq 2 ] || {
+    echo "Dockerfile build stages do not both default to VERSION ($release)" >&2
+    return 1
+  }
+  for compose in docker-compose.yml deploy/docker-compose.yml; do
+    [ "$(grep -cF -- "FLARE_RELEASE: \"\${FLARE_RELEASE:-$release}\"" "$compose")" -eq 2 ] || {
+      echo "$compose build and runtime release defaults do not both match VERSION ($release)" >&2
+      return 1
+    }
+  done
+  echo "Release identity is pinned to $release (Helm, Dockerfile, Compose build and runtime)"
 }
 
 # The dashboard is not a separate deliverable: cmd/server does //go:embed all:frontend/build,
