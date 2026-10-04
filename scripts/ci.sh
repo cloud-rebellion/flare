@@ -216,7 +216,10 @@ browser_rum_check() {
     return 0
   fi
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/flare-rum-ci.XXXXXX")"
-  trap 'rm -rf "$tmp"' RETURN
+  # RETURN traps run with nounset still enabled, and the trap otherwise leaks
+  # into the caller after this helper returns. Remove it after the first run
+  # and tolerate the local name being out of scope on shells that re-fire it.
+  trap 'rm -rf -- "${tmp:-}"; trap - RETURN' RETURN
   for file in "${files[@]}"; do
     bun build "$file" --target browser --outfile "$tmp/$(basename "$(dirname "$(dirname "$file")")").js" >/dev/null || {
       echo "browser bridge failed to transpile: $file" >&2
