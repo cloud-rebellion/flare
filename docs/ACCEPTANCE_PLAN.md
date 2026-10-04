@@ -34,6 +34,7 @@ green tests are necessary evidence, but they are not live acceptance.
 
 | Class | Acceptance evidence |
 | --- | --- |
+| Frontend build | Exact-commit CI passes syntax/type checks and a production bundle build. A real browser loads and executes that bundle, reaches a signed-in route, and reports a deliberate handled and unhandled canary. Static checks catch build-time syntax failures; HTTP asset availability alone does not prove browser execution. |
 | Browser | A deployed release reports an uncaught error or rejection, failed request, and bounded performance/realtime series. The event, release, route template, and ingest receipt appear only in its project. A matching private source map resolves a minified frame without transmitting an arbitrary route or signing token. |
 | Flutter | A real Android/iOS/web build reports framework, zone, handled, and returned HTTP errors with one release. Offline retry does not duplicate a logical event; the server receipt confirms acceptance. Upload and validate matching Dart/native symbols and prove frame resolution where supported. |
 | Backend | A running process sends an error, trace, service heartbeat, and an explicit request-success or business metric. Confirm durable acceptance, tenant scope, SLO query and alert, release freshness, and a missing-heartbeat alert after shutdown. |
@@ -63,8 +64,11 @@ DSNs and provider connections still need deployed configuration and canaries.
 HubSpot's initial account probe and explicit project binding exist locally;
 legacy installations require an admin to bind them, while consent and broader
 provider workflows require separate account authorization. The BrightCRM
-native metric pilot can duplicate a delta after an ambiguous HTTP failure, so
-its delivery is not yet an exactly-once metric contract. Native-symbol upload
+native metric pilot reuses one batch key and exact body on retry; the matching
+Flare candidate commits metric rows and the terminal receipt together and
+replays the result for seven days. Older Flare servers, keyless senders, and a
+BrightCRM process restart before delivery still need separate failure handling.
+Native-symbol upload
 acceptance does not itself prove frame resolution. Stage's public synthetic
 verifies the shell, immutable assets, readiness, and release identity, while a
 signed-in browser journey remains an additional live acceptance check. The
