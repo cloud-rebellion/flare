@@ -138,6 +138,51 @@ class FlareFrameTiming {
 typedef FlareMetricSink = FutureOr<void> Function(FlareMetricPoint point);
 typedef FlareConnectorSink = FutureOr<void> Function(FlareConnectorAttempt attempt);
 
+/// A retry item containing only a normalized health signal. Transport errors,
+/// response bodies, endpoint URLs, and DSN credentials are never included.
+class FlareDeliveryFailure {
+  const FlareDeliveryFailure.metric(FlareMetricPoint point)
+      : metric = point,
+        connectorAttempt = null;
+
+  const FlareDeliveryFailure.connector(FlareConnectorAttempt attempt)
+      : metric = null,
+        connectorAttempt = attempt;
+
+  final FlareMetricPoint? metric;
+  final FlareConnectorAttempt? connectorAttempt;
+}
+
+typedef FlareDeliveryFailureHandler = FutureOr<void> Function(
+    FlareDeliveryFailure failure);
+
+/// Checks the native metric endpoint's persistence acknowledgement.
+/// An HTTP success with a lower accepted count is a failed delivery.
+bool flareMetricResponseAccepted(int statusCode, String body, int sentCount) {
+  if (statusCode != 200 || sentCount < 1 || sentCount > maxFlareMetricBatch) {
+    return false;
+  }
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is! Map<String, dynamic>) return false;
+    final accepted = decoded['accepted'];
+    return accepted is int && accepted == sentCount;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Checks the native connector-attempt endpoint's persistence acknowledgement.
+bool flareConnectorResponseAccepted(int statusCode, String body) {
+  if (statusCode != 202) return false;
+  try {
+    final decoded = jsonDecode(body);
+    return decoded is Map<String, dynamic> && decoded['accepted'] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Produces bounded metric JSON for the native metric endpoint.
 ///
 /// The native API accepts either an array or `{"metrics": [...]}`. The latter
@@ -200,11 +245,14 @@ class FlareDsn {
 /// queue. Pass the same build `environment` and `release` values used by the
 /// Sentry event SDK; they are copied as bounded labels onto every metric so a
 /// threshold cannot mix staging and production builds. Reporter failures are
-/// swallowed so telemetry cannot break the app.
+/// sent to [onDeliveryFailure] as normalized retry items, then swallowed so
+/// telemetry cannot break the app. The callback must persist a bounded queue;
+/// its own errors are also swallowed and cannot be recovered by this helper.
 class FlareHealthReporter {
   FlareHealthReporter({
     this.metricSink,
     this.connectorSink,
+    this.onDeliveryFailure,
     DateTime Function()? now,
     String? environment,
     String? release,
@@ -213,6 +261,7 @@ class FlareHealthReporter {
 
   final FlareMetricSink? metricSink;
   final FlareConnectorSink? connectorSink;
+  final FlareDeliveryFailureHandler? onDeliveryFailure;
   final DateTime Function() _now;
   // Keep the build identity on every native health metric. The Sentry event
   // path already carries environment/release, but metrics are a separate
@@ -310,15 +359,16 @@ class FlareHealthReporter {
   Future<void> _metric(String name, num value) async {
     final sink = metricSink;
     if (sink == null) return;
+    final point = FlareMetricPoint(
+      name: name,
+      value: value,
+      labels: _metricLabels,
+      observedAt: _now(),
+    );
     try {
-      await sink(FlareMetricPoint(
-        name: name,
-        value: value,
-        labels: _metricLabels,
-        observedAt: _now(),
-      ));
+      await sink(point);
     } catch (_) {
-      // A health transport must never surface as an application failure.
+      await _deliveryFailed(FlareDeliveryFailure.metric(point));
     }
   }
 
@@ -328,7 +378,17 @@ class FlareHealthReporter {
     try {
       await sink(attempt);
     } catch (_) {
-      // The caller owns retries and offline persistence.
+      await _deliveryFailed(FlareDeliveryFailure.connector(attempt));
+    }
+  }
+
+  Future<void> _deliveryFailed(FlareDeliveryFailure failure) async {
+    final handler = onDeliveryFailure;
+    if (handler == null) return;
+    try {
+      await handler(failure);
+    } catch (_) {
+      // A broken offline queue must not become an application failure.
     }
   }
 }

@@ -77,6 +77,59 @@ void main() {
     expect(FlareDsn.parse('https://bad key@flare.example/12345'), isNull);
   });
 
+  test('native response checks reject partial and malformed acknowledgements', () {
+    expect(flareMetricResponseAccepted(200, '{"accepted":1}', 1), isTrue);
+    expect(flareMetricResponseAccepted(200, '{"accepted":1}', 2), isFalse);
+    expect(flareMetricResponseAccepted(202, '{"accepted":1}', 1), isFalse);
+    expect(flareMetricResponseAccepted(200, '{"accepted":1.0}', 1), isFalse);
+    expect(flareMetricResponseAccepted(200, '{"accepted":true}', 1), isFalse);
+    expect(flareMetricResponseAccepted(200, '<html>ok</html>', 1), isFalse);
+    expect(flareConnectorResponseAccepted(202, '{"accepted":true}'), isTrue);
+    expect(flareConnectorResponseAccepted(200, '{"accepted":true}'), isFalse);
+    expect(flareConnectorResponseAccepted(202, '{"accepted":false}'), isFalse);
+    expect(flareConnectorResponseAccepted(202, '{"accepted":1}'), isFalse);
+    expect(flareConnectorResponseAccepted(202, 'not json'), isFalse);
+  });
+
+  test('failed sinks send only normalized retry items to the app queue', () async {
+    final failed = <FlareDeliveryFailure>[];
+    final reporter = FlareHealthReporter(
+      metricSink: (_) async => throw StateError('Bearer private-metric-secret'),
+      connectorSink: (_) async => throw StateError('Bearer private-connector-secret'),
+      onDeliveryFailure: (failure) {
+        failed.add(failure);
+      },
+    );
+
+    await reporter.recordLifecycle('resume?email=alice@example.com');
+    final result = await reporter.trackApi<int>(
+      'GET /orders/12345678901234567890?email=alice@example.com',
+      () async => 42,
+    );
+
+    expect(result, 42);
+    expect(failed.where((failure) => failure.metric != null), hasLength(2));
+    expect(failed.where((failure) => failure.connectorAttempt != null), hasLength(1));
+    final retried = jsonEncode(<Object>[
+      for (final failure in failed)
+        if (failure.metric != null) failure.metric!.toJson()
+        else failure.connectorAttempt!.toJson(),
+    ]);
+    expect(retried, isNot(contains('alice@example.com')));
+    expect(retried, isNot(contains('private-metric-secret')));
+    expect(retried, isNot(contains('private-connector-secret')));
+    expect(retried, isNot(contains('12345678901234567890')));
+  });
+
+  test('offline queue callback errors cannot change a successful API result', () async {
+    final reporter = FlareHealthReporter(
+      metricSink: (_) => throw StateError('metric transport failed'),
+      connectorSink: (_) => throw StateError('connector transport failed'),
+      onDeliveryFailure: (_) => throw StateError('offline queue failed'),
+    );
+    expect(await reporter.trackApi<int>('sync', () async => 7), 7);
+  });
+
   test('reporter emits bounded frame and API health without surfacing sink errors', () async {
     final metrics = <FlareMetricPoint>[];
     final attempts = <FlareConnectorAttempt>[];

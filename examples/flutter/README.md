@@ -196,25 +196,35 @@ import 'flare_health.dart';
 import 'flare_flutter_health.dart';
 
 final dsn = FlareDsn.parse(const String.fromEnvironment('FLARE_SENTRY_DSN'));
+// appOfflineQueue is your app's bounded, persistent queue. It stores only the
+// normalized metric or connector attempt in FlareDeliveryFailure, never the
+// DSN, HTTP response, exception, or credentials.
 final health = FlareHealthReporter(
   // Keep these byte-for-byte aligned with initializeFlareObservability below.
   // They become bounded metric labels for release-specific thresholds.
   environment: const String.fromEnvironment('FLARE_ENV', defaultValue: 'development'),
   release: const String.fromEnvironment('FLARE_RELEASE'),
   metricSink: dsn == null ? null : (point) async {
-    await http.post(
+    final response = await http.post(
       dsn.metricEndpoint,
       headers: {'content-type': 'application/json'},
       body: encodeFlareMetricBatch([point]),
-    );
+    ).timeout(const Duration(seconds: 5));
+    if (!flareMetricResponseAccepted(response.statusCode, response.body, 1)) {
+      throw const FormatException('metric delivery was not accepted');
+    }
   },
   connectorSink: dsn == null ? null : (attempt) async {
-    await http.post(
+    final response = await http.post(
       dsn.connectorEndpoint,
       headers: {'content-type': 'application/json'},
       body: encodeFlareConnectorAttempt(attempt),
-    );
+    ).timeout(const Duration(seconds: 5));
+    if (!flareConnectorResponseAccepted(response.statusCode, response.body)) {
+      throw const FormatException('connector delivery was not accepted');
+    }
   },
+  onDeliveryFailure: (failure) => appOfflineQueue.enqueue(failure),
 );
 
 Future<void> main() async {
@@ -236,9 +246,18 @@ against the authenticated workspace before storing the attempt. The operation
 is reduced to a stable token;
 request URLs, response bodies, exception messages, credentials, and user data
 never enter these signals. A failed transport is swallowed so telemetry cannot
-break the app, and the application's HTTP layer owns batching, retry, and
-offline persistence. Report that queue with
-`health.recordOfflineQueueDepth(queue.length)` after bounded changes (the
+break the app. The sample checks HTTP 200 with `accepted == 1` for its one
+metric and HTTP 202 with `accepted == true` for a connector attempt. Those
+responses acknowledge the signal write; they do not prove the separate ingest
+receipt completion was written. A timeout can occur after Flare commits, so a
+retry may create another signal. The `onDeliveryFailure` callback receives only
+the normalized signal, not the transport exception, response body, URL, or DSN.
+Implement `appOfflineQueue.enqueue` with bounded persistent storage and replay
+with backoff using the same response checks. Queue failures are also swallowed
+to keep telemetry from breaking the app; monitor the queue's own health through
+app diagnostics. If the DSN is absent, sinks are disabled and no failed item is
+queued. Report queue depth with
+`health.recordOfflineQueueDepth(appOfflineQueue.length)` after bounded changes (the
 helper caps it at 10,000). `environment` and `release` are sanitized into
 bounded `environment` and `release` labels on every metric (for example,
 `mobile-app@1.8.0+42` becomes `mobile-app@1.8.0_42`); use those exact normalized
