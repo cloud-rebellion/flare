@@ -48,17 +48,20 @@ green tests are necessary evidence, but they are not live acceptance.
 ## Current proof boundary (2026-10-04)
 
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
-plan are local release candidates. Combined Flare PostgreSQL 16 API and query
-tests through migration 080, focused Go tests, frontend type check/build,
-pinned SQL generation, and the backup Bash fixture have passed locally. Newer
-Sentry, native-log, client connector-attempt, OTLP, and native-symbol paths have
-focused PostgreSQL 16 rollback, concurrency, and scope tests on their isolated
-branches; run one integrated test pass against the final combined candidate
-before asking Stage to merge it. A hidden-source-map build moved 45 JavaScript
-maps to a private build directory and left zero maps in the served frontend
-directory. The build manifest binds each public asset to its private map and
-the compiled DSN project identity. Stage's matching-map upload gate is local
-and disabled by default. None of these checks establishes production capture.
+plan are local release candidates. On the combined Flare tree through migration
+085, a focused PostgreSQL 16 API suite passed for Sentry Store/envelope replay,
+native logs, client connector attempts, OTLP, monitor admission/outbox, native
+symbols, and HubSpot consent/refresh/revocation. A separate tenant-scope query
+test passed against a fresh PostgreSQL 16 database. Go compilation, frontend
+type check and production build, pinned SQL generation, and OpenAPI YAML/JSON
+parity also passed. The Sentry atomic suite was updated to count the Store
+event's new replay claim; its first integrated run exposed the stale expected
+count, and the rerun passed. The backup Bash fixture passed locally. A
+hidden-source-map build moved 45 JavaScript maps to a private build directory
+and left zero maps in the served frontend directory. The build manifest binds
+each public asset to its private map and the compiled DSN project identity.
+Stage's matching-map upload gate is local and disabled by default. None of
+these checks establishes production capture.
 
 The live backup unit was observed failing on the removed `hephaestus-core`
 container, and a Stage verified-bundle off-host snapshot was missing; repair
@@ -68,14 +71,21 @@ networkless regression fixture. That fixture checks the restore procedure; it
 does not prove a Flare boot or secret decryption from a real restored snapshot.
 
 The ten first-party browser bridges are source-wired, but public bundle
-sampling did not prove an active Flare DSN or event receipt. Their opaque asset
-IDs still need app-specific rollout and a live upload/resolution canary. A
+sampling did not prove an active Flare DSN or event receipt. Their app builds
+also lack a demonstrated private-map artifact and most Compose releases still
+default to `development`; each app needs exact build-time release injection,
+private map delivery, and an event and bundled-frame resolution canary on its
+own product branch. Bright Hub (`portal`) is the first candidate because it has
+a managed deployment and rollback, but its Stage `NoFlareProject` setting
+must be reconciled before promotion. A
 Flutter starter has framework, zone, platform, HTTP, frame, and metric hooks,
 but no production Flutter app repository or Dart/Flutter build has been
 selected. Backend DSNs and provider connections still need deployed
 configuration and canaries. HubSpot's account probe and explicit project
-binding exist locally; legacy installations require an admin to bind them,
-while user consent and token refresh require a separately verified app flow.
+binding exist locally. Browser-bound OAuth consent, encrypted refresh, and
+provider revocation are implemented and tested; a real HubSpot app registration,
+consent, account probe, and alert remain unverified. Legacy installations still
+require an admin to bind them.
 
 The BrightCRM native metric pilot reuses one batch key and exact body on retry;
 the Flare candidate commits metric rows and their terminal receipt together
@@ -98,7 +108,10 @@ resolution.
 The public Flare `/metrics` probe currently returns the SPA shell at the live
 hostname, so a successful HTTP status is not a scrape. Stage's public
 synthetic verifies the shell, immutable assets, readiness, and release
-identity, while a signed-in browser journey remains an additional live
+identity. Its new opt-in Chromium mode also exercises the anonymous login
+form and emits a distinct version 3 browser receipt; the runtime could not be
+run against a local Docker daemon, so it remains disabled pending a real
+post-cutover trial. A signed-in browser journey remains an additional live
 acceptance check. The exact external receipt verifier requires a scoped Stage
 profile and live proof; no caller-provided success flag is sufficient.
 
