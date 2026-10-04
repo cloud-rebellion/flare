@@ -52,6 +52,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	var budget *ingestBudget
 	var droppedEvents, droppedTransactions, droppedOther uint64
 	var receipt *ingestReceipt
+	var receiptCommitAttempted bool
 	receiptStatus := http.StatusOK
 	requestOutcome := "rejected"
 	defer func() {
@@ -70,7 +71,9 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 		total.add(spanOutcome)
 		total.add(otherOutcome)
 		recordIngestRequest("sentry", total, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, total, requestOutcome, receiptStatus)
+		if !receiptCommitAttempted {
+			s.finishIngestReceipt(r.Context(), receipt, total, requestOutcome, receiptStatus)
+		}
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -166,6 +169,16 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "no valid event or transaction")
 			return
 		}
+		// An empty but valid envelope has no payload transaction. Still close its
+		// receipt before acknowledging the request.
+		receiptCommitAttempted = true
+		if err := completeIngestReceipt(r.Context(), s.q, receipt, ingestOutcome{}, "", http.StatusOK); err != nil {
+			requestOutcome = "failed"
+			receiptStatus = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "1")
+			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "telemetry acceptance is temporarily unavailable")
+			return
+		}
 		writeEnvelopeResult(w, http.StatusOK, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
 		return
 	}
@@ -175,6 +188,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	var tx pgx.Tx
 	var qtx *generated.Queries
 	var lastID string
+	var receiptOutcome, receiptTransactions, receiptSpans, receiptOther ingestOutcome
 	committedEvents := make([]ingestedEvent, 0, validEvents)
 	if s.pool != nil {
 		tx, err = s.pool.Begin(r.Context())
@@ -238,6 +252,25 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The 200 boundary includes the terminal receipt and every accepted item,
+	// including replay claims. A receipt failure rolls all of them back.
+	receiptOutcome = eventOutcome
+	receiptOutcome.dropped += droppedEvents
+	receiptTransactions = transactionOutcome
+	receiptTransactions.dropped += droppedTransactions
+	receiptSpans = spanOutcome
+	receiptSpans.dropped = uint64(budget.dropped)
+	receiptOther = otherOutcome
+	receiptOther.dropped += droppedOther
+	receiptOutcome.add(receiptTransactions)
+	receiptOutcome.add(receiptSpans)
+	receiptOutcome.add(receiptOther)
+	if err = completeIngestReceipt(r.Context(), qtx, receipt, receiptOutcome, "", http.StatusOK); err != nil {
+		goto storeFailed
+	}
+	// A commit error can be ambiguous. Never replace an accepted receipt with
+	// a deferred failure update if Postgres committed before the error arrived.
+	receiptCommitAttempted = true
 	if err = tx.Commit(r.Context()); err != nil {
 		goto storeFailed
 	}
@@ -307,12 +340,15 @@ func writeEnvelopeResult(w http.ResponseWriter, status int, eventID string, rece
 func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
 	var receipt *ingestReceipt
+	var receiptCommitAttempted bool
 	receiptStatus := http.StatusOK
 	requestOutcome := "rejected"
 	defer func() {
 		outcome.record("event")
 		recordIngestRequest("sentry", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+		if !receiptCommitAttempted {
+			s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
+		}
 	}()
 	project, ok := s.authIngest(w, r)
 	if !ok {
@@ -327,7 +363,8 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	receipt.setReceived(1)
-	eid, err := s.ingestOne(r.Context(), project, body)
+	eid, committedOrAmbiguous, err := s.ingestOneWithReceipt(r.Context(), project, body, receipt)
+	receiptCommitAttempted = committedOrAmbiguous
 	if err != nil {
 		// Distinguish a client PARSE failure from a server-side store/DB failure.
 		// Sentry SDKs treat 4xx as "malformed, drop it" and only retry on 5xx, so
@@ -344,6 +381,7 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		requestOutcome = "failed"
 		receiptStatus = http.StatusServiceUnavailable
 		slog.Warn("store event failed", "project_id", project.ID, "error", err)
+		w.Header().Set("Retry-After", "1")
 		writeErr(w, http.StatusServiceUnavailable, "could not store event")
 		return
 	}
@@ -382,6 +420,34 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	}
 	s.afterIngestOne(project, result)
 	return result.eventID, nil
+}
+
+// ingestOneWithReceipt is the public /store/ acceptance boundary. Internal
+// security events continue to use ingestOne; externally accepted events need
+// their terminal receipt in the same transaction as the event and alert queue.
+// The bool means commit was attempted, so a deferred failed update must not
+// overwrite an accepted receipt if the commit outcome is ambiguous.
+func (s *Server) ingestOneWithReceipt(ctx context.Context, project *generated.Project, raw []byte, receipt *ingestReceipt) (string, bool, error) {
+	if s.pool == nil {
+		return "", false, errors.New("event transaction unavailable")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("begin event transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := s.ingestOneInTx(ctx, project, raw, tx)
+	if err != nil {
+		return "", false, err
+	}
+	if err := completeIngestReceipt(ctx, s.q.WithTx(tx), receipt, ingestOutcome{accepted: 1}, "", http.StatusOK); err != nil {
+		return "", false, fmt.Errorf("complete event acceptance receipt: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", true, fmt.Errorf("commit event and receipt: %w", err)
+	}
+	s.afterIngestOne(project, result)
+	return result.eventID, true, nil
 }
 
 type ingestedEvent struct {

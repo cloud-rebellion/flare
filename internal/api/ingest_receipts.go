@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -108,6 +109,18 @@ func (s *Server) finishIngestReceipt(ctx context.Context, receipt *ingestReceipt
 	if receipt == nil || s.q == nil {
 		return
 	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ingestReceiptTimeout)
+	defer cancel()
+	_ = completeIngestReceipt(writeCtx, s.q, receipt, outcome, forced, status)
+}
+
+// completeIngestReceipt can use a transaction-bound query set so a successful
+// Sentry response commits its payload, replay claims, and terminal receipt as
+// one unit. Rejected requests still use finishIngestReceipt after responding.
+func completeIngestReceipt(ctx context.Context, q *generated.Queries, receipt *ingestReceipt, outcome ingestOutcome, forced string, status int) error {
+	if receipt == nil || q == nil {
+		return errors.New("ingest receipt store unavailable")
+	}
 	if status < http.StatusContinue || status > 599 {
 		status = http.StatusInternalServerError
 	}
@@ -117,9 +130,7 @@ func (s *Server) finishIngestReceipt(ctx context.Context, receipt *ingestReceipt
 	}
 	result = canonicalReceiptOutcome(result)
 	retryable := result == "failed"
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ingestReceiptTimeout)
-	defer cancel()
-	_, err := s.q.CompleteIngestReceipt(writeCtx, generated.CompleteIngestReceiptParams{
+	_, err := q.CompleteIngestReceipt(ctx, generated.CompleteIngestReceiptParams{
 		ID:             receipt.id,
 		OrgID:          receipt.orgID,
 		ProjectID:      receipt.projectID,
@@ -136,6 +147,7 @@ func (s *Server) finishIngestReceipt(ctx context.Context, receipt *ingestReceipt
 	if err != nil {
 		recordIngestReceiptFailure("complete", receipt)
 	}
+	return err
 }
 
 func (r *ingestReceipt) setReceived(n int) {
