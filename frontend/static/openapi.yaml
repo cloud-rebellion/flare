@@ -85,7 +85,7 @@ components:
         status: { type: string, enum: [ok] }
     HealthResponse:
       type: object
-      required: [status, release, db, analytics, retention, connector_receipts, email, workers, queue]
+      required: [status, release, db, analytics, retention, connector_receipts, email, workers, queue, automation_outbox]
       properties:
         status: { type: string, enum: [ok, degraded] }
         release: { type: string, minLength: 1, description: "Release identity built into the running API image." }
@@ -142,6 +142,17 @@ components:
             queued: { type: integer, minimum: 0 }
             durable: { type: boolean }
             drop_on_full: { type: boolean }
+        automation_outbox:
+          type: object
+          description: "Global, payload-free status for queued automation webhook notices. HTTP 200 with state degraded still accepts ingest; it does not prove that a receiver started work."
+          required: [state, pending, due, leased, dead, oldest_due_seconds]
+          properties:
+            state: { type: string, enum: [unconfigured, healthy, degraded, unavailable] }
+            pending: { type: integer, format: int64, minimum: 0 }
+            due: { type: integer, format: int64, minimum: 0 }
+            leased: { type: integer, format: int64, minimum: 0 }
+            dead: { type: integer, format: int64, minimum: 0 }
+            oldest_due_seconds: { type: integer, format: int64, minimum: 0 }
     AnalyticsHealthResponse:
       type: object
       description: Global payload-free cold-tier exporter telemetry; no tenant IDs or provider payloads.

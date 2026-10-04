@@ -5162,7 +5162,8 @@
           "connector_receipts",
           "email",
           "workers",
-          "queue"
+          "queue",
+          "automation_outbox"
         ],
         "properties": {
           "status": {
@@ -5297,6 +5298,54 @@
               },
               "drop_on_full": {
                 "type": "boolean"
+              }
+            }
+          },
+          "automation_outbox": {
+            "type": "object",
+            "description": "Global, payload-free status for queued automation webhook notices. HTTP 200 with state degraded still accepts ingest; it does not prove that a receiver started work.",
+            "required": [
+              "state",
+              "pending",
+              "due",
+              "leased",
+              "dead",
+              "oldest_due_seconds"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unconfigured",
+                  "healthy",
+                  "degraded",
+                  "unavailable"
+                ]
+              },
+              "pending": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "due": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "leased": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "dead": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "oldest_due_seconds": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
               }
             }
           },

@@ -41,7 +41,10 @@ The signature covers the exact bytes delivered, using
 `HMAC-SHA256(signing_secret, timestamp + "." + raw_body)`. A receiver must
 compare the digest in constant time and reject timestamps outside a five-minute
 replay window. It should also deduplicate an accepted timestamp/body or its
-derived delivery key before starting downstream work.
+derived delivery key before starting downstream work. Queued sends preserve
+the exact body across retries and use a fresh timestamp and signature for
+each attempt. A receiver can use the SHA-256 of the verified raw body as its
+durable deduplication key; the timestamp itself changes on retry.
 
 The body is the fixed `flare.automation.v1` schema:
 
@@ -81,7 +84,10 @@ actor; Flare records stage receipts, while the worker and the deployment system
 remain responsible for any separately authorized CI/deploy/synthetic actions.
 
 Delivery health is visible through the channel's last-attempt/last-success
-fields and the existing alerts integration metrics. Treat a non-2xx response or
-timeout as a delivery failure; retry accepted signed notices idempotently on the
-receiver, and do not blindly retry a notice rejected for an invalid or stale
-signature.
+fields, alerts integration metrics, and aggregate `automation_outbox` state on
+`/readyz`. The outbox retries non-2xx responses and timeouts with the same
+body, up to its bounded attempt limit. A receiver must deduplicate
+before starting work because a lost response can cause a successful notice to
+be sent again. A dead outbox row requires operator attention. The ingest alert
+evaluation path still uses a bounded background pool before enqueue, so a
+successful ingest response does not yet guarantee a queued notice.

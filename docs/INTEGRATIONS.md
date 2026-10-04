@@ -650,9 +650,15 @@ redirects. SMTP has bounded connection and send deadlines and enforces the
 configured TLS mode. Channel records include `last_attempt_at`, `last_ok_at`,
 and `last_error`. The **Send test** action exercises the real destination and
 updates those fields; an automation webhook test requires a selected project
-and sends a distinct `test` event. Dispatch fans out concurrently and records
-the last delivery result. Alert claims are not released after a failed send,
-so a failed attempt alone does not guarantee a retry.
+and sends a distinct `test` event. Ordinary email, Slack, and webhook sends
+remain best effort and record their last delivery result. For automation
+webhooks, watchdog, missing-monitor, and spike claims commit with a bounded
+PostgreSQL notice. The outbox retries failed sends with a stable signed body,
+fences concurrent workers, and checks that the channel is still enabled and
+routed to the project before each attempt. `/readyz` and `/api/health` expose
+aggregate pending, due, leased, and dead counts. Issue-alert evaluation and
+failed check-in alert scheduling still enter a bounded background pool before
+enqueue; an ingest HTTP 200 alone does not prove an automation notice exists.
 
 The workspace limits enabled channels to 25 (100 stored). The private
 `/metrics` endpoint records bounded alert-channel attempts and latency by
