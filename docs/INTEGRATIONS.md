@@ -197,28 +197,29 @@ non-`202` response also increments `errors`; a post-authentication `401`
 increments `denied`. Unknown, expired, or already revoked keys cannot be
 attributed to an active tenant credential.
 
-After DSN authentication and body framing, each Sentry, OTLP, native, and
-connector ingest request must start a durable `ingest_receipts` row before any
-telemetry is persisted. It contains only the authenticated organization/project,
-a sanitized or generated request ID, signal/protocol, counts, final HTTP status,
-outcome, retryability, and timing; request bodies and credentials are never
-stored. If the start write is unavailable, Flare returns `503` so the sender
-can retry without an untracked acceptance. Completion writes on the remaining
-paths use a short detached deadline and remain diagnostic best-effort. The
-rows provide request-level audit and reconciliation evidence; they are not
-per-event payload copies.
+After DSN authentication and body framing, accepted Sentry Store/envelope,
+OTLP, native log/metric, and client connector-attempt requests commit their
+payload and terminal `ingest_receipts` row together before returning success.
+The same boundary applies to authenticated business checks and native symbol
+uploads. A keyed request creates its provisional receipt in that transaction;
+keyless paths may create an `in_progress` receipt earlier. If the transactional
+receipt write fails, Flare returns `503` and rolls back that request's payload.
+Rejected requests may still have a diagnostic best-effort completion write.
+Receipts contain only the authenticated organization/project, a sanitized or
+generated request ID, signal/protocol, counts, final HTTP status, outcome,
+retryability, and timing; request bodies and credentials are never stored.
+They provide request-level audit and reconciliation evidence, not per-event
+payload copies.
 For replayed Sentry items, `accepted_count` includes items already accepted in
 an earlier request, while `persisted_count` counts only writes by this request.
-Native metric batches are a stricter exception to the completion-write rule:
-their point rows and terminal receipt commit in one transaction before `200`.
-OTLP logs, spans, and metrics now have the same transaction boundary: a `200`
-means their accepted rows and completed receipt committed together. A
+OTLP logs, spans, and metrics follow that transaction boundary: a `200` means
+their accepted rows and completed receipt committed together. A
 transaction that rolls back returns `503` with `Retry-After: 1` and leaves no
-new payload rows. The started receipt can remain `in_progress`; if a commit
-result is ambiguous, a `503` may mean the payload and receipt already
-committed. OTLP has no stable request-level replay key, so a
-collector retry after an ambiguous `503` can still duplicate rows. This
-transaction boundary does not provide OTLP at-most-once delivery.
+new payload rows. For a keyless request, the started receipt can remain
+`in_progress`; if a commit result is ambiguous, a `503` may mean the payload
+and receipt already committed. Standard OTLP exporters have no dynamic batch
+key, so a retry after an ambiguous result can still duplicate rows. Custom
+senders can use the optional per-batch key described below.
 
 Do not use a `200` response or `configured: true` as proof that an outbound
 provider accepted a request. The readiness body intentionally omits secrets and
