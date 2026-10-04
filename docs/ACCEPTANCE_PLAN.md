@@ -210,6 +210,18 @@ independent SMTP route. Its offline tests passed, but it is disabled and has
 not been installed on an independent host or proven to reach an inbox. A
 separate deadman must cover loss of that host or its timer.
 
+The Reactor candidate accepts a signed, project-bound Flare notice and starts
+a durable run, but it does not yet fetch fresh incident evidence or prepare a
+code fix. Its current authoring path activates newly registered workflows,
+and a signal token alone does not authenticate a human reviewer. A safe
+remediation workflow must be reviewed before activation, fetch evidence from
+a fixed Flare origin, bind a proposed source commit to that evidence, and
+require Flare's authenticated human `review:approved` receipt before CI.
+Keep proposal workers out of Stage merge and deploy tools: a product-scoped
+Stage merge can schedule production deployment. Stage-owned exact CI, merge,
+deploy, and post-cutover synthetic receipts must then verify the same source
+and image chain. No end-to-end AI remediation run has been accepted.
+
 Keep the rollout ledger explicit: `local`, `pushed`, `exact CI`, `merged`,
 `deployed`, `live accepted`, and `restored` are separate states for every
 product and integration.
