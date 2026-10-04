@@ -115,6 +115,13 @@ post-cutover trial. A signed-in browser journey remains an additional live
 acceptance check. The exact external receipt verifier requires a scoped Stage
 profile and live proof; no caller-provided success flag is sufficient.
 
+An ops-only outside-in canary candidate now checks the public `/readyz` against
+an operator-pinned release, posts an idempotent native log, reads its retained
+receipt and exact log from a dedicated project, and alerts through an
+independent SMTP route. Its offline tests passed, but it is disabled and has
+not been installed on an independent host or proven to reach an inbox. A
+separate deadman must cover loss of that host or its timer.
+
 Keep the rollout ledger explicit: `local`, `pushed`, `exact CI`, `merged`,
 `deployed`, `live accepted`, and `restored` are separate states for every
 product and integration.
