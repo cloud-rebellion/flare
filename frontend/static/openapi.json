@@ -3866,7 +3866,7 @@
           "Native symbols"
         ],
         "summary": "Upload a native symbol artifact",
-        "description": "Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. Flutter Dart symbols receive a bounded container validation at upload; the response includes the durable validation_status. Upload acceptance does not claim frame symbolication.",
+        "description": "Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. A 201 includes receipt_id after the artifact and terminal receipt commit together. Flutter Dart symbols receive bounded upload-time container validation. Upload acceptance does not claim frame symbolication.",
         "security": [
           {
             "apiKey": []
@@ -3944,6 +3944,16 @@
           },
           "400": {
             "description": "Invalid artifact metadata or encoding",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Acceptance transaction failed; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -5694,6 +5704,10 @@
           "size": {
             "type": "integer",
             "format": "int64"
+          },
+          "receipt_id": {
+            "type": "string",
+            "description": "Returned only by a successful upload after the artifact and terminal tenant/project receipt commit together"
           },
           "created_at": {
             "type": "string",

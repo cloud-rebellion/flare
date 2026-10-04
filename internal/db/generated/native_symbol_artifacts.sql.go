@@ -54,6 +54,48 @@ func (q *Queries) DeleteNativeSymbolArtifact(ctx context.Context, arg DeleteNati
 	return result.RowsAffected(), nil
 }
 
+const getNativeSymbolArtifactQuota = `-- name: GetNativeSymbolArtifactQuota :one
+SELECT count(*)::bigint AS artifacts,
+       coalesce(sum(size), 0)::bigint AS bytes,
+       coalesce(max(size) FILTER (
+         WHERE release = $3 AND platform = $4 AND format = $5 AND name = $6
+       ), 0)::bigint AS existing_bytes
+FROM native_symbol_artifacts
+WHERE project_id = $1 AND org_id = $2
+`
+
+type GetNativeSymbolArtifactQuotaParams struct {
+	ProjectID string `json:"project_id"`
+	OrgID     string `json:"org_id"`
+	Release   string `json:"release"`
+	Platform  string `json:"platform"`
+	Format    string `json:"format"`
+	Name      string `json:"name"`
+}
+
+type GetNativeSymbolArtifactQuotaRow struct {
+	Artifacts     int64 `json:"artifacts"`
+	Bytes         int64 `json:"bytes"`
+	ExistingBytes int64 `json:"existing_bytes"`
+}
+
+// One snapshot of total use and the overwrite target. Deletes need not take
+// the uploader's project lock because a concurrent delete can only reduce
+// actual use; separate reads could subtract an already-deleted target twice.
+func (q *Queries) GetNativeSymbolArtifactQuota(ctx context.Context, arg GetNativeSymbolArtifactQuotaParams) (*GetNativeSymbolArtifactQuotaRow, error) {
+	row := q.db.QueryRow(ctx, getNativeSymbolArtifactQuota,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Release,
+		arg.Platform,
+		arg.Format,
+		arg.Name,
+	)
+	var i GetNativeSymbolArtifactQuotaRow
+	err := row.Scan(&i.Artifacts, &i.Bytes, &i.ExistingBytes)
+	return &i, err
+}
+
 const listNativeSymbolArtifactMetadataForRelease = `-- name: ListNativeSymbolArtifactMetadataForRelease :many
 SELECT id, release, platform, format, name, digest, size, validation_status, created_at
 FROM native_symbol_artifacts

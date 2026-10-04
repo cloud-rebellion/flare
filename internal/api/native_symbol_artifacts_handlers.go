@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -58,6 +61,9 @@ type nativeSymbolArtifactResponse struct {
 	Name     string `json:"name"`
 	Digest   string `json:"digest"`
 	Size     int64  `json:"size"`
+	// Present only on a successful upload, after the artifact and terminal
+	// acceptance receipt have committed together.
+	ReceiptID string `json:"receipt_id,omitempty"`
 	// ValidationStatus records what Flare proved about the retained bytes at
 	// upload time. It is independent from native frame symbolication, which is
 	// still explicitly unresolved until a format-specific resolver is enabled.
@@ -79,19 +85,15 @@ type nativeSymbolHealthResponse struct {
 // an artifact must not make Flare claim that a crash is symbolicated.
 func (s *Server) handleUploadNativeSymbolArtifact(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
-	var receipt *ingestReceipt
-	receiptStatus := http.StatusCreated
 	requestOutcome := "rejected"
 	defer func() {
 		outcome.record("symbols")
 		recordIngestRequest("native", outcome, requestOutcome)
-		s.finishIngestReceipt(r.Context(), receipt, outcome, requestOutcome, receiptStatus)
 	}()
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxNativeSymbolRequestBytes))
 	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusRequestEntityTooLarge
 		writeErr(w, http.StatusRequestEntityTooLarge, "symbol artifact request is too large")
 		return
 	}
@@ -100,21 +102,18 @@ func (s *Server) handleUploadNativeSymbolArtifact(w http.ResponseWriter, r *http
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid symbol artifact request")
 		return
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err != io.EOF {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, "invalid symbol artifact request")
 		return
 	}
 	normalized, content, err := normalizeNativeSymbolUpload(req)
 	if err != nil {
 		outcome.invalid = 1
-		receiptStatus = http.StatusBadRequest
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -126,73 +125,129 @@ func (s *Server) handleUploadNativeSymbolArtifact(w http.ResponseWriter, r *http
 		ID: chi.URLParam(r, "id"), OrgScope: orgIDFrom(r.Context()),
 	})
 	if err != nil {
-		receiptStatus = http.StatusNotFound
 		writeErr(w, http.StatusNotFound, "project not found")
 		return
 	}
-	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "symbols", "native", &outcome, &requestOutcome, &receiptStatus)
-	if receipt == nil {
+	receipt := newIngestReceipt(w, r, project, "symbols", "native")
+	if receipt == nil || s.pool == nil {
+		outcome.failed = 1
+		requestOutcome = "failed"
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
 	receipt.setReceived(1)
-
-	existing, err := s.q.NativeSymbolArtifactExists(r.Context(), generated.NativeSymbolArtifactExistsParams{
-		ProjectID: project.ID, OrgID: project.OrgID,
-		Release: normalized.Release, Platform: normalized.Platform,
-		Format: normalized.Format, Name: normalized.Name,
-	})
-	if err != nil {
-		slogError(w, "check native symbol artifact", err)
-		outcome.failed = 1
-		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
-		return
-	}
-	if !existing {
-		used, err := s.q.CountNativeSymbolArtifactsByProject(r.Context(), generated.CountNativeSymbolArtifactsByProjectParams{
-			ProjectID: project.ID, OrgID: project.OrgID,
-		})
-		if err != nil {
-			slogError(w, "count native symbol artifacts", err)
-			outcome.failed = 1
-			requestOutcome = "failed"
-			receiptStatus = http.StatusServiceUnavailable
-			return
-		}
-		if used.Artifacts >= maxNativeSymbolArtifacts || used.Bytes+int64(len(content)) > maxNativeSymbolStorageBytes {
-			outcome.invalid = 1
-			receiptStatus = http.StatusInsufficientStorage
-			writeErr(w, http.StatusInsufficientStorage, "this project has reached its native symbol storage limit")
-			return
-		}
-	}
-
-	// Register the release as a deploy marker if this is the first signal for
-	// it. The artifact write remains the durable acceptance gate; a release
-	// registry hiccup must not discard an otherwise valid symbol artifact.
-	_ = s.q.UpsertRelease(r.Context(), generated.UpsertReleaseParams{
-		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID, Version: normalized.Release,
-	})
 	digest := sha256.Sum256(content)
 	validationStatus := nativeSymbolValidationStatus(normalized.Platform, normalized.Format, content)
-	row, err := s.q.UpsertNativeSymbolArtifact(r.Context(), generated.UpsertNativeSymbolArtifactParams{
+	artifact := generated.UpsertNativeSymbolArtifactParams{
 		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID,
 		Release: normalized.Release, Platform: normalized.Platform,
 		Format: normalized.Format, Name: normalized.Name,
 		Digest: hex.EncodeToString(digest[:]), Size: int64(len(content)), Content: content,
 		ValidationStatus: validationStatus,
-	})
+	}
+	row, quotaExceeded, err := s.acceptNativeSymbolArtifact(r.Context(), receipt, artifact)
 	if err != nil {
-		slogError(w, "upsert native symbol artifact", err)
+		// An uncertain commit is a retryable failure. Never claim a 201 or
+		// complete a detached receipt after the transaction has failed.
+		slog.Error("native symbol acceptance transaction failed", "project_id", project.ID)
 		outcome.failed = 1
 		requestOutcome = "failed"
-		receiptStatus = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "1")
+		writeErr(w, http.StatusServiceUnavailable, "telemetry acceptance is temporarily unavailable")
 		return
 	}
+	if quotaExceeded {
+		outcome.invalid = 1
+		writeErr(w, http.StatusInsufficientStorage, "this project has reached its native symbol storage limit")
+		return
+	}
+	// Keep the release marker best-effort and after the artifact commit. A
+	// registry hiccup cannot turn retained symbols into a failed upload.
+	_ = s.q.UpsertRelease(r.Context(), generated.UpsertReleaseParams{
+		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID, Version: normalized.Release,
+	})
 	outcome.accepted = 1
 	requestOutcome = ""
 	s.audit(r.Context(), "native-symbol.upload", row.Release+"/"+row.Platform+"/"+row.Format+"/"+row.Name)
-	writeJSON(w, http.StatusCreated, toNativeSymbolArtifactResponse(row))
+	response := toNativeSymbolArtifactResponse(row)
+	response.ReceiptID = receipt.id
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// acceptNativeSymbolArtifact is the 201 boundary. The project row lock
+// serializes quota checks across replicas, including replacements that grow an
+// existing artifact. The retained bytes and terminal receipt commit together.
+func (s *Server) acceptNativeSymbolArtifact(parent context.Context, receipt *ingestReceipt, artifact generated.UpsertNativeSymbolArtifactParams) (*generated.UpsertNativeSymbolArtifactRow, bool, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() {
+		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
+		defer done()
+		_ = tx.Rollback(cleanup)
+	}()
+	var projectID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id=$1 AND org_id=$2 FOR UPDATE`, receipt.projectID, receipt.orgID).Scan(&projectID); err != nil {
+		return nil, false, err
+	}
+	qtx := generated.New(tx)
+	used, err := qtx.GetNativeSymbolArtifactQuota(ctx, generated.GetNativeSymbolArtifactQuotaParams{
+		ProjectID: receipt.projectID, OrgID: receipt.orgID,
+		Release: artifact.Release, Platform: artifact.Platform, Format: artifact.Format, Name: artifact.Name,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	nextCount := used.Artifacts
+	if used.ExistingBytes == 0 {
+		nextCount++
+	}
+	if nextCount > maxNativeSymbolArtifacts || used.Bytes-used.ExistingBytes+artifact.Size > maxNativeSymbolStorageBytes {
+		if err := insertTerminalNativeSymbolReceipt(ctx, qtx, receipt, false); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, err
+		}
+		return nil, true, nil
+	}
+	row, err := qtx.UpsertNativeSymbolArtifact(ctx, artifact)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := insertTerminalNativeSymbolReceipt(ctx, qtx, receipt, true); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, err
+	}
+	return row, false, nil
+}
+
+func insertTerminalNativeSymbolReceipt(ctx context.Context, q *generated.Queries, receipt *ingestReceipt, accepted bool) error {
+	now := time.Now().UTC()
+	params := generated.InsertIngestReceiptParams{
+		ID: receipt.id, RequestID: receipt.requestID, OrgID: receipt.orgID, ProjectID: receipt.projectID,
+		Pillar: receipt.pillar, Protocol: receipt.protocol, ReceivedCount: receipt.received,
+		ReceivedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		CompletedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	}
+	if accepted {
+		params.AcceptedCount = 1
+		params.PersistedCount = 1
+		params.Outcome = "accepted"
+		params.HttpStatus = http.StatusCreated
+	} else {
+		params.RejectedCount = 1
+		params.Outcome = "rejected"
+		params.HttpStatus = http.StatusInsufficientStorage
+	}
+	_, err := q.InsertIngestReceipt(ctx, params)
+	return err
 }
 
 func (s *Server) handleListNativeSymbolArtifacts(w http.ResponseWriter, r *http.Request) {

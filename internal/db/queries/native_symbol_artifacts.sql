@@ -33,6 +33,18 @@ SELECT EXISTS (
       AND release = $3 AND platform = $4 AND format = $5 AND name = $6
 ) AS exists;
 
+-- name: GetNativeSymbolArtifactQuota :one
+-- One snapshot of total use and the overwrite target. Deletes need not take
+-- the uploader's project lock because a concurrent delete can only reduce
+-- actual use; separate reads could subtract an already-deleted target twice.
+SELECT count(*)::bigint AS artifacts,
+       coalesce(sum(size), 0)::bigint AS bytes,
+       coalesce(max(size) FILTER (
+         WHERE release = $3 AND platform = $4 AND format = $5 AND name = $6
+       ), 0)::bigint AS existing_bytes
+FROM native_symbol_artifacts
+WHERE project_id = $1 AND org_id = $2;
+
 -- name: ListNativeSymbolArtifactMetadataForRelease :many
 -- Read-path status is deliberately metadata-only. The symbol bytes remain in
 -- the native artifact table and are never copied into issue, MCP, or AI

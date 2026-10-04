@@ -322,6 +322,7 @@ components:
         name: { type: string, description: "bounded artifact basename" }
         digest: { type: string, description: "SHA-256 digest of the decoded artifact bytes" }
         size: { type: integer, format: int64 }
+        receipt_id: { type: string, description: "Returned only by a successful upload after the artifact and terminal tenant/project receipt commit together" }
         validation_status: { type: string, enum: [not_checked, recognized, invalid, unsupported], description: "durable upload-time container validation outcome; does not imply frame symbolication" }
         created_at: { type: string, format: date-time }
     ConnectorConnection:
@@ -881,7 +882,7 @@ paths:
     post:
       tags: [Native symbols]
       summary: Upload a native symbol artifact
-      description: Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. Flutter Dart symbols receive a bounded container validation at upload; the response includes the durable validation_status. Upload acceptance does not claim frame symbolication.
+      description: Stores one bounded base64-wrapped Dart symbols, ProGuard, Breakpad, dSYM, or ELF artifact. A 201 includes receipt_id after the artifact and terminal receipt commit together. Flutter Dart symbols receive bounded upload-time container validation. Upload acceptance does not claim frame symbolication.
       security: [{ apiKey: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
       requestBody:
@@ -900,6 +901,7 @@ paths:
       responses:
         "201": { description: Uploaded, content: { application/json: { schema: { $ref: "#/components/schemas/NativeSymbolArtifact" } } } }
         "400": { description: Invalid artifact metadata or encoding, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Acceptance transaction failed; retry, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "507": { description: Project artifact quota reached, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/projects/{id}/symbol-artifacts/{artifactID}:
     delete:

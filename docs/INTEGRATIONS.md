@@ -478,8 +478,13 @@ release boundary with `POST /api/projects/{id}/symbol-artifacts`. The endpoint
 accepts a bounded JSON body with `release`, `platform` (`flutter`, `android`, or
 `ios`), `format` (`dart_symbols`, `proguard`, `breakpad`, `dsym`, or `elf`), a
 basename `name`, and `content_base64`. Use a member API key in CI; the upload
-is tenant-scoped, records an ingest receipt, and returns only metadata and a
-server-computed SHA-256 digest. For example:
+is tenant-scoped and returns only metadata, a `receipt_id`, and a
+server-computed SHA-256 digest. A `201` means the artifact and terminal
+tenant/project ingest receipt committed together. Uploads for one project
+serialize the quota check, including the byte delta of a replacement. A
+retryable `503` does not claim acceptance; a request retried after an
+ambiguous response upserts by release/platform/format/name and may create a
+second acceptance receipt. For example:
 
 ```bash
 artifact_b64=$(base64 < build/symbols/app.android-arm64.symbols | tr -d '\n')
