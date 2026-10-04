@@ -270,6 +270,8 @@ func automationWebhookEvent(reason string) string {
 		return "deploy_acceptance"
 	case "rollback":
 		return "rollback"
+	case "test":
+		return "test"
 	}
 	lower := strings.ToLower(strings.TrimSpace(reason))
 	for prefix, event := range map[string]string{

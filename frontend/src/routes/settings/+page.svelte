@@ -22,6 +22,7 @@
   let channels = $state<Channel[] | null>(null);
   let projects = $state<Project[] | null>(null);
   let testResult = $state<Record<string, { ok: boolean; error?: string } | 'busy'>>({});
+  let testProjectIds = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
   let type = $state('log');
   let url = $state('');
@@ -482,14 +483,27 @@
     }
   }
 
-  async function testChannel(chId: string) {
-    testResult[chId] = 'busy';
+  function testableProjects(ch: Channel): Project[] {
+    return (projects ?? []).filter((project) => !ch.project_ids?.length || ch.project_ids.includes(project.id));
+  }
+
+  async function testChannel(ch: Channel) {
+    const eligible = testableProjects(ch);
+    const selected = testProjectIds[ch.id];
+    const projectId = ch.type === 'automation_webhook'
+      ? (eligible.find((project) => project.id === selected) ?? eligible[0])?.id
+      : undefined;
+    if (ch.type === 'automation_webhook' && !projectId) {
+      testResult[ch.id] = { ok: false, error: 'Create or route a project before testing this webhook' };
+      return;
+    }
+    testResult[ch.id] = 'busy';
     try {
-      testResult[chId] = await api.testChannel(chId);
+      testResult[ch.id] = await api.testChannel(ch.id, projectId);
       // Refresh so the persistent delivery status (dot + last error) updates.
       channels = await api.channels();
     } catch (err) {
-      testResult[chId] = { ok: false, error: err instanceof ApiError ? err.message : 'Test failed' };
+      testResult[ch.id] = { ok: false, error: err instanceof ApiError ? err.message : 'Test failed' };
     }
   }
 
@@ -623,6 +637,20 @@
         {#if ch.config?.to}<span class="truncate font-mono text-xs text-zinc-500">{String(ch.config.to)}</span>{/if}
         {#if ch.config?.webhook_url}<span class="truncate font-mono text-xs text-zinc-500">{String(ch.config.webhook_url)}</span>{/if}
         <div class="ml-auto flex shrink-0 items-center gap-3">
+          {#if ch.type === 'automation_webhook'}
+            <select
+              aria-label="Project for automation webhook test"
+              value={testProjectIds[ch.id] || testableProjects(ch)[0]?.id || ''}
+              onchange={(event) => (testProjectIds[ch.id] = event.currentTarget.value)}
+              class="max-w-44 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-300"
+            >
+              {#each testableProjects(ch) as project (project.id)}
+                <option value={project.id}>{project.name}</option>
+              {:else}
+                <option value="">No routed project</option>
+              {/each}
+            </select>
+          {/if}
           {#if res === 'busy'}
             <span class="text-xs text-zinc-500">Sending...</span>
           {:else if res?.ok}
@@ -631,7 +659,7 @@
             <span class="max-w-56 truncate text-xs text-rose-400" title={res.error}>Failed: {res.error}</span>
           {/if}
           <button
-            onclick={() => testChannel(ch.id)}
+            onclick={() => testChannel(ch)}
             disabled={res === 'busy'}
             class="text-xs text-zinc-500 transition-colors hover:text-amber-400 disabled:opacity-50"
           >

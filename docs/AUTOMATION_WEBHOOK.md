@@ -34,7 +34,8 @@ headers:
 * `X-Flare-Automation-Timestamp`: Unix seconds as a decimal string.
 * `X-Flare-Automation-Signature`: `sha256=` followed by an HMAC-SHA256 digest.
 * `X-Flare-Automation-Event`: one bounded event name such as `new_issue`,
-  `regression`, `spike`, `service`, or `alert`.
+  `regression`, `spike`, `service`, or `alert`. A channel test uses `test`;
+  receivers must acknowledge it without starting remediation.
 
 The signature covers the exact bytes delivered, using
 `HMAC-SHA256(signing_secret, timestamp + "." + raw_body)`. A receiver must
@@ -59,6 +60,10 @@ It intentionally contains no issue title, culprit, stack trace, log text,
 telemetry attributes, credentials, or model output. A watchdog event without a
 grouped issue keeps `issue_id` as an empty string and remains routable by
 `project_id`.
+
+The channel test API requires an explicit project in the channel's routing
+scope. It sends the same signed envelope with `event: "test"`, so operators can
+verify delivery without creating an incident workflow.
 
 ## Worker follow-up
 

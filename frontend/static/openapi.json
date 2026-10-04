@@ -1621,6 +1621,62 @@
         }
       }
     },
+    "/api/channels/{id}/test": {
+      "post": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "Send a channel test",
+        "description": "An automation_webhook test requires a project_id routed to this channel and sends a signed test event. Receivers should acknowledge it without remediation. Other channel types require no body.",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "project_id": {
+                    "type": "string",
+                    "description": "Required for automation_webhook channels; must be in the channel's project routing scope."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Delivery attempt result, with ok and an optional error"
+          },
+          "400": {
+            "description": "Missing or unrouted project for an automation webhook"
+          },
+          "404": {
+            "description": "Channel or project not found in this workspace"
+          },
+          "429": {
+            "description": "Test send rate limit exceeded"
+          }
+        }
+      }
+    },
     "/api/members": {
       "get": {
         "tags": [

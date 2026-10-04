@@ -77,6 +77,14 @@ func TestAutomationWebhookSendsSignedPayloadWithoutTelemetryText(t *testing.T) {
 }
 
 func TestAutomationWebhookBodyBoundsAndEventVocabulary(t *testing.T) {
+	if got := automationWebhookEvent("Test"); got != "test" {
+		t.Fatalf("channel test event = %q", got)
+	}
+	if body, err := automationWebhookBody(Notification{ProjectID: "project-1", Reason: "Test", EventCount: 1}, time.Now()); err != nil {
+		t.Fatalf("channel test payload: %v", err)
+	} else if !strings.Contains(string(body), `"event":"test"`) {
+		t.Fatalf("channel test payload must be no-op test event: %s", body)
+	}
 	if got := automationWebhookEvent("Spike: 4 events in 15m"); got != "spike" {
 		t.Fatalf("spike event = %q", got)
 	}

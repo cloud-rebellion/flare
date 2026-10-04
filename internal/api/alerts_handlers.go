@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -323,6 +324,38 @@ func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request) {
 		Reason:      "Test",
 		EventCount:  1,
 		URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/settings",
+	}
+	if ch.Type == "automation_webhook" {
+		// The signed automation envelope requires a real project. Require the
+		// operator to select one that belongs to this workspace and is routed
+		// to this channel; never invent a project or let a channel test bypass
+		// the project's routing boundary.
+		var req struct {
+			ProjectID string `json:"project_id"`
+		}
+		if decodeJSON(r, &req) != nil || strings.TrimSpace(req.ProjectID) == "" {
+			writeErr(w, http.StatusBadRequest, "project_id is required for an automation webhook test")
+			return
+		}
+		project, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{
+			ID: req.ProjectID, OrgScope: ch.OrgID,
+		})
+		if err != nil {
+			writeErr(w, http.StatusNotFound, "project not found")
+			return
+		}
+		routed, err := s.q.ListChannelProjects(r.Context(), ch.ID)
+		if err != nil {
+			slogError(w, "get automation test channel routing", err)
+			return
+		}
+		if len(routed) > 0 && !slices.Contains(routed, project.ID) {
+			writeErr(w, http.StatusBadRequest, "channel is not routed to the selected project")
+			return
+		}
+		n.ProjectID = project.ID
+		n.ProjectName = project.Name
+		n.URL = strings.TrimRight(s.cfg.BaseURL, "/") + "/projects/" + project.ID
 	}
 	if derr := s.dispatcher.DispatchOne(r.Context(), alerts.Channel{
 		ID: ch.ID, OrgID: ch.OrgID, Type: ch.Type, Config: s.decryptChannelConfig(ch.Type, ch.Config),

@@ -278,7 +278,9 @@ export const api = {
   channels: () => req<Channel[]>('GET', '/channels'),
   createChannel: (type: string, config: Record<string, unknown>) =>
     req<Channel>('POST', '/channels', { type, config }),
-  testChannel: (id: string) => req<{ ok: boolean; error?: string }>('POST', `/channels/${id}/test`),
+  testChannel: (id: string, projectId?: string) => req<{ ok: boolean; error?: string }>(
+    'POST', `/channels/${id}/test`, projectId ? { project_id: projectId } : undefined
+  ),
   deleteChannel: (id: string) => req<void>('DELETE', `/channels/${id}`),
   /** Mute/unmute a channel, or set its project routing. Omitted fields are
    *  left alone; project_ids: [] means "all projects". */

@@ -647,11 +647,12 @@ Channels are configured per workspace from **Settings** or the channel API:
 
 Outbound HTTP channels use SSRF validation, a 10-second timeout, and disabled
 redirects. SMTP has bounded connection and send deadlines and enforces the
-configured TLS mode. Channel records include `last_attempt_at`,
-`last_completed_at`, `last_ok_at`, `last_error`, and a monotonic attempt
-sequence. The **Send test** action exercises the real destination and updates
-those fields. Dispatch fans out concurrently; a delivery failure is retained
-per channel and an all-channel failure releases the alert claim for retry.
+configured TLS mode. Channel records include `last_attempt_at`, `last_ok_at`,
+and `last_error`. The **Send test** action exercises the real destination and
+updates those fields; an automation webhook test requires a selected project
+and sends a distinct `test` event. Dispatch fans out concurrently and records
+the last delivery result. Alert claims are not released after a failed send,
+so a failed attempt alone does not guarantee a retry.
 
 The workspace limits enabled channels to 25 (100 stored). The private
 `/metrics` endpoint records bounded alert-channel attempts and latency by
