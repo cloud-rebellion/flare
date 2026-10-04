@@ -28,10 +28,13 @@ ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
 RUN if [ -n "${FLARE_COMMIT}" ]; then \
       export PUBLIC_FLARE_RELEASE="${FLARE_RELEASE}+g${FLARE_COMMIT}"; \
     fi; \
-    bun run build --sourcemap hidden && bun scripts/stage-source-maps.mjs
+    bun run build --sourcemap hidden && bun scripts/stage-source-maps.mjs && \
+    bun scripts/write-build-manifest.mjs
 # CI may extract /app/frontend/source-maps from this named stage to upload maps
 # for this exact bundle. They are outside /app/frontend/build, which is the
-# only frontend directory copied into the served image below.
+# only frontend directory copied into the served binary below. The small hash
+# manifest is copied into the final image for exact-bundle verification; map
+# bytes and member credentials never enter that image.
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.6-bookworm AS backend
@@ -64,6 +67,7 @@ RUN apt-get update -qq \
     && groupadd -g 1000 flare && useradd -u 1000 -g flare -m -d /app flare \
     && mkdir -p /app/data/parquet && chown -R flare:flare /app
 COPY --from=backend /flare /usr/local/bin/flare
+COPY --from=frontend /app/frontend/build-manifest.json /app/browser-build-manifest.json
 USER flare
 ENV FLARE_PARQUET_DIR=/app/data/parquet
 EXPOSE 8080
