@@ -48,8 +48,8 @@ green tests are necessary evidence, but they are not live acceptance.
 ## Current proof boundary (2026-10-04)
 
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
-plan are local release candidates. On the combined Flare tree through migration
-085, a focused PostgreSQL 16 API suite passed for Sentry Store/envelope replay,
+plan are local release candidates. The Flare API code through migration 085
+passed a focused PostgreSQL 16 suite for Sentry Store/envelope replay,
 native logs, client connector attempts, OTLP, monitor admission/outbox, native
 symbols, and HubSpot consent/refresh/revocation. A separate tenant-scope query
 test passed against a fresh PostgreSQL 16 database. Go compilation, frontend
@@ -60,8 +60,25 @@ count, and the rerun passed. The backup Bash fixture passed locally. A
 hidden-source-map build moved 45 JavaScript maps to a private build directory
 and left zero maps in the served frontend directory. The build manifest binds
 each public asset to its private map and the compiled DSN project identity.
-Stage's matching-map upload gate is local and disabled by default. None of
-these checks establishes production capture.
+Flare dashboard candidate `5d95f7bdb` fixes its Vite public-env-prefix
+defect. A configured local build now proves that the DSN and full-commit
+release occur in the same shipped JavaScript asset. Its manifest binds the
+browser DSN origin and exact browser release. Focused manifest tests and a
+configured build passed.
+A fixed handled dashboard canary is in a real immutable chunk; its local
+hidden map resolves the generated error to `src/lib/flare-client.ts:362`.
+Nine focused browser-client tests and the frontend type check passed. Four
+older example RUM route-scrubbing assertions still fail unchanged against
+the pre-canary source and need a separate correction before a full green suite.
+Stage's disabled-by-default Flare map gate now requires the origin and browser
+release to match the authenticated project and running image. It compares the
+content-addressed final-image manifest with the live container, probes the
+reviewed browser ingest hostname for exact JSON readiness, and hashes public
+scripts and private-map fallbacks on both reviewed dashboard hosts before any
+upload. It then uploads and reads back both sets of opaque asset names, with
+cleanup before its success receipt. Focused local tests passed. At about 45
+maps per host, a release consumes about 90 of the project's 2,000 artifact
+slots; retention needs review. None of this establishes production capture.
 
 The live backup unit was observed failing on the removed `hephaestus-core`
 container, and a Stage verified-bundle off-host snapshot was missing; repair
@@ -76,18 +93,19 @@ also lack a demonstrated private-map artifact and most Compose releases still
 default to `development`; each app needs exact build-time release injection,
 private map delivery, and an event and bundled-frame resolution canary on its
 own product branch. BrightCRM combined candidate `9a5a3bfbf` and Atomicsite candidate
-`99f5df78c` now prove in configured local builds that a synthetic DSN and full
+`4f01a14a8` now prove in configured local builds that a synthetic DSN and full
 source SHA reach the shipped JavaScript, while 233 and 182 JavaScript maps,
 respectively, stay private. The initial configured builds exposed a real Vite
 env-prefix bug that silently disabled both bridges; the corrected manifest
 builds fail if configured telemetry values are absent from compiled JavaScript.
 The Atomicsite handled canary is compiled into a real immutable chunk; its
 local hidden map resolves the generated error position to
-`src/lib/flare-client.ts:322`. Stage candidate `5b6b0c219` binds both pilot
+`src/lib/flare-client.ts:322`. Stage candidate `ce7b40e80` binds both pilot
 builds to the checked-out commit and provisioned Flare project before image
 build. Its disabled-by-default Atomicsite cutover gate checks the final image,
 private rebuild, running container, and public asset route before authenticated
-map upload and readback. The gate passed focused local tests, but it has not
+map upload and readback. A browser DSN on another host or HTTP is rejected
+before the private build. The gate passed focused local tests, but it has not
 run against a final image or live Flare. A deployed browser event and resolved
 frame, alert delivery, and rollback still need proof. Flare's 2,000-artifact
 per-project quota also needs a retention policy before repeated 182-map
@@ -126,8 +144,11 @@ resolution.
 
 The public Flare `/metrics` probe and `/readyz` currently return the SPA shell
 at the live hostname, so a successful HTTP status is not a scrape or readiness
-proof. Stage's public
-synthetic verifies the shell, immutable assets, readiness, and release
+proof. The preserved Flare `BASE_URL` is `https://flare.example.com`;
+both that hostname and `https://flare.cloudrebellion.tech` currently serve an
+HTML shell at `/readyz`. The new Stage map gate accepts only these reviewed
+browser destinations and requires exact release JSON before upload. Stage's
+public synthetic verifies the shell, immutable assets, readiness, and release
 identity. Its new opt-in Chromium mode also exercises the anonymous login
 form and emits a distinct version 3 browser receipt; the runtime could not be
 run against a local Docker daemon, so it remains disabled pending a real
