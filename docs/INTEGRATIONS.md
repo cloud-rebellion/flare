@@ -359,6 +359,60 @@ not `valid` are excluded from read-time symbolication. The status contains no
 parser message or map bytes, and the endpoint remains organization/project
 scoped.
 
+The dependency-free browser bridge uses an opaque stack-frame asset name:
+`flare-asset-sha256:<SHA-256 of script URL origin + pathname>`. Query strings
+and fragments do not affect the name. Only **same-origin compiled JS assets**
+under SvelteKit `/_app/immutable/{chunks,entry,nodes}/`, Astro `/_astro/`, or
+hashed Vite `/assets/`, `/build/assets/`, and `/static/js/` paths qualify.
+The browser also checks that the URL appears in its script elements or script
+resource timings, so an arbitrary `sourceURL` does not create an asset ID.
+Other URLs, including a `.js` route or cross-origin CDN script, become
+`unknown`. The browser sends the opaque name, line, and column; it never sends
+the script's raw path. This keeps arbitrary route segments out of frame
+filenames while allowing a source map uploaded under the same name and release
+to resolve a minified frame. Page and request URLs remain route templates. The
+bridge needs browser Web Crypto for the hash; without it, errors still report
+but their frames cannot be matched to source maps. A browser that does not
+expose loaded-script evidence also reports the error with `unknown` frames.
+CDN hosted assets need an
+explicit reviewed static-asset policy before the browser bridge can map them.
+
+Name each map from the **public script URL actually loaded by that build** and
+upload the matching map with the same exact release as `PUBLIC_FLARE_RELEASE`
+or `VITE_FLARE_RELEASE`. In the examples below, `FLARE_BROWSER_RELEASE` is that
+exact embedded value; for Flare's Docker build it includes `+g<commit>` when
+`FLARE_COMMIT` is set. Flare's Docker frontend stage builds hidden maps and
+moves every `.map` outside its public `build/` directory to
+`/app/frontend/source-maps/`; the final image only embeds `build/`. CI can
+extract that private directory from the frontend stage for the exact image
+build. An app building outside Docker can run
+`bun run build --sourcemap hidden && bun scripts/stage-source-maps.mjs` from
+`flare/frontend/` and package only `build/`.
+
+To inspect the opaque name for one public script URL, from the `flare/`
+directory:
+
+```bash
+bun examples/browser/source-map-name.mjs "$FLARE_PUBLIC_SCRIPT_URL"
+```
+
+For all maps extracted from the exact bundle, the CI uploader names each
+`.js.map` using its public base URL and requires a matching `201` receipt with
+`parse_status: valid`:
+
+```bash
+bun examples/browser/upload-source-maps.mjs \
+  frontend/source-maps/ "https://app.example/" "https://flare.example/" \
+  "$FLARE_PROJECT_ID" "$FLARE_BROWSER_RELEASE"
+```
+
+Keep the member key in CI, outside browser bundles. Check the upload response
+for `parse_status: valid`, then send a staging error from that exact bundle and
+check its issue event for `symbolicated: true` on the frame. The
+`symbolication-health` coverage count proves only artifact-name selection; it
+does not prove that a source map resolved a position. Existing Sentry SDKs that
+send full script filenames may still use their previous artifact names.
+
 Native/mobile build pipelines can retain their debug artifacts in the same
 release boundary with `POST /api/projects/{id}/symbol-artifacts`. The endpoint
 accepts a bounded JSON body with `release`, `platform` (`flutter`, `android`, or

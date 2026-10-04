@@ -28,7 +28,10 @@ ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
 RUN if [ -n "${FLARE_COMMIT}" ]; then \
       export PUBLIC_FLARE_RELEASE="${FLARE_RELEASE}+g${FLARE_COMMIT}"; \
     fi; \
-    bun run build
+    bun run build --sourcemap hidden && bun scripts/stage-source-maps.mjs
+# CI may extract /app/frontend/source-maps from this named stage to upload maps
+# for this exact bundle. They are outside /app/frontend/build, which is the
+# only frontend directory copied into the served image below.
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.6-bookworm AS backend

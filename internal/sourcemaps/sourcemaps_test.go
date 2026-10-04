@@ -1,7 +1,9 @@
 package sourcemaps
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -47,5 +49,45 @@ func TestSymbolicateUnmatchedFilePassesThrough(t *testing.T) {
 	out := NewResolver().Symbolicate(raw, map[string]string{"app.min.js": miniMap})
 	if string(out) != string(raw) {
 		t.Errorf("unmatched file should pass through unchanged, got %s", out)
+	}
+}
+
+func TestSymbolicateOpaqueBrowserAssetName(t *testing.T) {
+	// The browser hashes origin + pathname, leaving query strings out. The
+	// authenticated CI uploader uses this name for the same release's map.
+	asset := "https://app.example/_app/immutable/chunks/app.BhOPzaDi.js"
+	name := fmt.Sprintf("flare-asset-sha256:%x", sha256.Sum256([]byte(asset)))
+	raw, err := json.Marshal(struct {
+		Frames []Frame `json:"frames"`
+	}{Frames: []Frame{{Filename: name, Function: "view", Lineno: 1, Colno: 0}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := NewResolver().Symbolicate(raw, map[string]string{name: miniMap})
+	var trace struct {
+		Frames []Frame `json:"frames"`
+	}
+	if err := json.Unmarshal(out, &trace); err != nil {
+		t.Fatal(err)
+	}
+	if len(trace.Frames) != 1 || !trace.Frames[0].Symbolicated || trace.Frames[0].Filename != "orig.js" {
+		t.Fatalf("opaque browser frame did not resolve: %+v", trace.Frames)
+	}
+}
+
+func TestOpaqueBrowserColumnUsesOneBasedStackPosition(t *testing.T) {
+	// Generated columns 0 and 1 map to different source lines. Looking up a
+	// browser stack's column 1 as if it were zero-based silently picks line 3.
+	const adjacentMap = `{"version":3,"sources":["orig.js"],"sourcesContent":["first\nskip\nsecond"],"names":[],"mappings":"AAAA,CAEA"}`
+	raw := json.RawMessage(`{"frames":[{"filename":"flare-asset-sha256:abcdef","lineno":1,"colno":1}]}`)
+	out := NewResolver().Symbolicate(raw, map[string]string{"flare-asset-sha256:abcdef": adjacentMap})
+	var trace struct {
+		Frames []Frame `json:"frames"`
+	}
+	if err := json.Unmarshal(out, &trace); err != nil {
+		t.Fatal(err)
+	}
+	if len(trace.Frames) != 1 || !trace.Frames[0].Symbolicated || trace.Frames[0].Lineno != 1 {
+		t.Fatalf("browser column 1 resolved wrong source segment: %+v", trace.Frames)
 	}
 }

@@ -153,10 +153,18 @@ func (r *Resolver) symbolicateFrame(f *Frame, exact, byBase map[string]string) b
 		return false
 	}
 
-	// Source map columns are 0-based; browser stacks are often 1-based. Try the
-	// column as-is, then one to the left, so a small off-by-one still resolves.
-	src, name, line, col, ok := c.Source(f.Lineno, f.Colno)
-	if !ok && f.Colno > 0 {
+	// The dependency-free browser bridge records the 1-based column from a
+	// JavaScript Error.stack. Source maps use 0-based columns. Try the corrected
+	// position first: looking up the raw column can silently choose the NEXT
+	// mapping when two generated segments are adjacent.
+	lookupCol := f.Colno
+	if strings.HasPrefix(f.Filename, "flare-asset-sha256:") && lookupCol > 0 {
+		lookupCol--
+	}
+	src, name, line, col, ok := c.Source(f.Lineno, lookupCol)
+	if !ok && lookupCol != f.Colno {
+		src, name, line, col, ok = c.Source(f.Lineno, f.Colno)
+	} else if !ok && f.Colno > 0 {
 		src, name, line, col, ok = c.Source(f.Lineno, f.Colno-1)
 	}
 	if !ok || src == "" {
