@@ -1019,7 +1019,9 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	releaseVersion := ""
 	serviceName := ""
 	logSeverity := ""
-	usageSurface, usageOperation, usageMeasure := "", "", ""
+	// The database requires usage_measure even for unrelated alert types.
+	// Keep its schema default instead of sending an empty value on INSERT.
+	usageSurface, usageOperation, usageMeasure := "", "", "requests"
 	apiKeyHygieneMode := ""
 	aiTriageMode := ""
 	var err error
@@ -1303,6 +1305,10 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		}
 		if !strings.EqualFold(connection.Provider, connectorProvider) {
 			writeErr(w, http.StatusBadRequest, "connector_connection_id provider does not match connector_provider")
+			return
+		}
+		if !connection.ProjectID.Valid || connection.ProjectID.String != proj.ID {
+			writeErr(w, http.StatusBadRequest, "connector_connection_id is not bound to this project")
 			return
 		}
 	} else if req.Type == "connector_sync_health" {

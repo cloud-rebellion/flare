@@ -732,7 +732,11 @@ Use `GET /api/connector-connections` to list the workspace's connections,
 array, and an optional `secret`.
 
 The table is keyed by `(org_id, provider, installation_id)` and every query
-binds the authenticated workspace. Secrets are encrypted with `FLARE_SECRET_KEY`
+binds the authenticated workspace. An active HubSpot installation must also
+name an existing project in that workspace with `project_id`. This binding is
+returned as metadata and cannot be moved after assignment; use a new
+installation for another project. Provider and `installation_id` are immutable
+so historical receipts keep their meaning. Secrets are encrypted with `FLARE_SECRET_KEY`
 before storage. Responses contain only provider and installation metadata,
 scopes, status, timestamps, and `credential_configured`; they never contain the
 secret, its ciphertext, or the workspace ID. Omitting `secret` on a PATCH keeps
@@ -744,10 +748,26 @@ enabled connections: HubSpot account metadata (`account_details`), GitHub
 outbound boundary, discards provider bodies, and returns only the outcome, HTTP
 status class, and bounded quota or retry hints. Slack and OpenAI checks are
 on-demand health checks; GitHub, Slack, and OpenAI checks do not persist or expose
-account, workspace content, model records, or messages. The probe emits the same tenant-scoped connector attempt Flare uses
-for its health dashboards and records the registered connection ID when the
-call is made through the registry. It does not schedule polling or change the
-administrator's chosen lifecycle status.
+account, workspace content, model records, or messages. The probe emits the
+same tenant-scoped connector attempt Flare uses for its health dashboards and
+records the registered connection ID. For a bound installation, Postgres
+derives the receipt's project from the connection row even if a worker's
+in-memory scope is stale. A public project DSN cannot claim a registered
+connection or a server-observed source. A failed durable write is reported
+separately as `receipt_status: unavailable`; a successful provider call alone
+does not prove Flare accepted the receipt. The check does not schedule polling
+or change the administrator's chosen lifecycle status.
+
+Existing connections from before the project-binding migration stay
+organization-owned. Their credentials, sync state, and historical attempts
+remain intact; older attempts are never retroactively assigned to a project.
+An administrator can bind one using `PATCH
+/api/connector-connections/{id}` with `{"project_id":"<PROJECT_ID>"}`.
+The Settings connector list shows these as **Org-only health** and offers an
+assignment control. Until binding, their new checks and sync attempts appear
+only in the organization health routes. Rules selecting an unbound connection
+remain stored but cannot fire for a project. Review them after binding; a rule
+under another project must be recreated for the bound project.
 
 An administrator or external scheduler can run one bounded HubSpot worker pass
 with `POST /api/connector-connections/{id}/sync`. The pass claims the
@@ -777,6 +797,14 @@ the scheduler without duplicate provider calls. Leave the flag off when an
 external scheduler owns polling and call the explicit `/sync` hook instead.
 Future record syncs must use a separate operation and cursor contract.
 
+For a bound installation, `GET /api/projects/{project_id}/connector-health`
+returns its payload-free `server_observed` attempts, and `GET
+/api/projects/{project_id}/connector-sync-health` returns its durable worker
+state. Both routes check project and workspace ownership; another project in
+the same workspace sees neither series. The organization routes remain useful
+for historical unbound installations. A HubSpot `account_details` pass proves
+only credential and account endpoint health, not contact/deal synchronization.
+
 Create a project alert rule with `type: "connector_sync_health"` to page on
 durable worker state for one registered installation. The rule requires the
 tenant-checked `connector_connection_id`, the exact sync `connector_operation`
@@ -784,8 +812,10 @@ tenant-checked `connector_connection_id`, the exact sync `connector_operation`
 `overdue`. `failed` counts recent terminal failures; `overdue` counts a missed
 `next_run_at` or expired worker lease after the configured `window_minutes`
 grace period. `threshold` is the number of matching states required to fire.
-The alert remains project-routed, while the selected connection and sync state
-are organization-owned; paused or revoked installations are excluded so an
+The alert remains project-routed, and its connection must be bound to that
+exact project. The watchdog repeats the binding check when it evaluates an
+existing rule, so a rule cannot page from another project's installation.
+Paused or revoked installations are excluded so an
 intentional disconnect does not page. The watchdog returns only aggregate
 counts and fixed selector labels, never cursors, credentials, or provider
 payloads.

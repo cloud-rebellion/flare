@@ -18,7 +18,7 @@ func TestHubSpotWorkerClaimsChecksAndCompletesWithoutPayload(t *testing.T) {
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	states := &fakeStateStore{claimed: State{ID: "sync-1", OrgID: "org-1", ConnectionID: "conn-1", Operation: HubSpotAccountDetailsOperation, Status: "running"}}
 	connections := &fakeConnectionStore{
-		connection: Connection{ID: "conn-1", OrgID: "org-1", Provider: "hubspot", Status: "active", CredentialConfigured: true},
+		connection: Connection{ID: "conn-1", OrgID: "org-1", ProjectID: "project-1", Provider: "hubspot", Status: "active", CredentialConfigured: true},
 		secret:     "hs-token",
 	}
 	probe := &fakeHubSpotProbe{result: hubspot.Result{Outcome: "ok", StatusClass: "2xx", ReceiptStatus: "accepted"}}
@@ -44,7 +44,7 @@ func TestHubSpotWorkerClaimsChecksAndCompletesWithoutPayload(t *testing.T) {
 	if probe.token != "hs-token" || connections.secretReads != 1 {
 		t.Fatalf("probe/secret boundary = token %q reads %d", probe.token, connections.secretReads)
 	}
-	if receipt.Provider != "hubspot" || receipt.Scope.OrgID != "org-1" || receipt.Scope.ConnectionID != "conn-1" || receipt.Operation != HubSpotAccountDetailsOperation {
+	if receipt.Provider != "hubspot" || receipt.Scope.OrgID != "org-1" || receipt.Scope.ProjectID != "project-1" || receipt.Scope.ConnectionID != "conn-1" || receipt.Operation != HubSpotAccountDetailsOperation {
 		t.Fatalf("receipt scope = %#v", receipt)
 	}
 	if strings.Contains(receipt.ErrorCode, "hs-token") {
@@ -110,7 +110,7 @@ func TestHubSpotWorkerDoesNotClaimDisabledOrOtherProvider(t *testing.T) {
 
 func TestHubSpotWorkerCompletesCredentialFailureWithBoundedCode(t *testing.T) {
 	states := &fakeStateStore{claimed: State{ID: "sync-1"}}
-	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}, secret: "enc:v1:broken"}
+	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", ProjectID: "project-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}, secret: "enc:v1:broken"}
 	worker := &HubSpotWorker{States: states, Connections: connections, Cipher: secretbox.New("correct-key"), Now: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }}
 	got, err := worker.Run(context.Background(), "org-1", "conn-1", "worker-a")
 	if err != nil || got.ErrorCode != "invalid_config" || states.completeOutcome != "error" || states.completeErrorCode != "invalid_config" {
@@ -120,12 +120,12 @@ func TestHubSpotWorkerCompletesCredentialFailureWithBoundedCode(t *testing.T) {
 
 func TestHubSpotWorkerPreflightReceiptFailureRemainsSeparate(t *testing.T) {
 	states := &fakeStateStore{claimed: State{ID: "sync-1"}}
-	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}, secret: "enc:v1:broken"}
+	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", ProjectID: "project-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}, secret: "enc:v1:broken"}
 	worker := &HubSpotWorker{States: states, Connections: connections, Cipher: secretbox.New("correct-key")}
 	receiptCalls := 0
 	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
 		receiptCalls++
-		if a.Scope.OrgID != "org-1" || a.Scope.ConnectionID != "conn-1" || a.Channel != "worker" || a.Outcome != "error" || a.ErrorCode != "invalid_config" {
+		if a.Scope.OrgID != "org-1" || a.Scope.ProjectID != "project-1" || a.Scope.ConnectionID != "conn-1" || a.Channel != "worker" || a.Outcome != "error" || a.ErrorCode != "invalid_config" {
 			t.Fatalf("preflight receipt = %#v", a)
 		}
 		return errors.New("storage-secret")

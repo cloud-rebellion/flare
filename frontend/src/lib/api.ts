@@ -250,6 +250,8 @@ export const api = {
     req<ClientHealth[]>('GET', `/projects/${pid}/client-health?hours=${hours}&limit=${limit}`),
   connectorSyncHealth: (limit = 100) =>
     req<ConnectorSyncHealth[]>('GET', `/connector-sync-health?limit=${limit}`),
+  projectConnectorSyncHealth: (projectId: string, limit = 100) =>
+    req<ConnectorSyncHealth[]>('GET', `/projects/${projectId}/connector-sync-health?limit=${limit}`),
   connectorQuotaHealth: (hours = 24, limit = 100, source: ConnectorSourceKind = 'server_observed') =>
     req<ConnectorQuotaHealth[]>('GET', `/connector-quota-health?hours=${hours}&limit=${limit}&source_kind=${source}`),
   projectConnectorQuotaHealth: (pid: string, hours = 24, limit = 100, source: ConnectorSourceKind = 'server_observed') =>

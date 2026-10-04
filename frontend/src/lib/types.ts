@@ -115,6 +115,8 @@ export type ConnectorConnectionStatus = 'pending' | 'active' | 'paused' | 'error
 /** Tenant-scoped connector metadata. Credentials are write-only and are never returned. */
 export interface ConnectorConnection {
   id: string;
+  /** Stable project binding for provider health. Absent on historical org-only installations. */
+  project_id?: string;
   provider: string;
   installation_id: string;
   installation_name: string;
@@ -127,6 +129,7 @@ export interface ConnectorConnection {
 
 export interface CreateConnectorConnectionInput {
   provider: string;
+  project_id?: string;
   installation_id: string;
   installation_name?: string;
   status?: ConnectorConnectionStatus;
@@ -136,6 +139,8 @@ export interface CreateConnectorConnectionInput {
 }
 
 export interface UpdateConnectorConnectionInput {
+  /** Set once to assign a historical org-only installation to a project. */
+  project_id?: string;
   provider?: string;
   installation_id?: string;
   installation_name?: string;

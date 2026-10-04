@@ -126,6 +126,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/symbolication-health", s.handleListReleaseSymbolicationHealth)
 				r.Get("/projects/{id}/client-health", s.handleListClientHealth)
 				r.Get("/projects/{id}/connector-health", s.handleListProjectConnectorHealth)
+				r.Get("/projects/{id}/connector-sync-health", s.handleListProjectConnectorSyncHealth)
 				r.Get("/projects/{id}/connector-quota-health", s.handleListProjectConnectorQuotaHealth)
 				r.Get("/projects/{id}/business-health", s.handleListBusinessHealth)
 				r.Get("/projects/{id}/ingest-receipts", s.handleListIngestReceipts)

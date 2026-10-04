@@ -25,6 +25,7 @@ func TestConnectorSourceSeparatesPublicReportsFromServerObservations(t *testing.
 	_, err := s.q.CreateConnectorConnection(ctx, generated.CreateConnectorConnectionParams{
 		ID: connectionID, OrgID: project.OrgID, Provider: "hubspot", InstallationID: "hubspot-test",
 		InstallationName: "Test", Status: "active", Scopes: json.RawMessage(`[]`), SecretCiphertext: "encrypted-test-secret",
+		ProjectID: pgtype.Text{String: project.ID, Valid: true},
 	})
 	if err != nil {
 		t.Fatal(err)

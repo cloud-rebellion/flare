@@ -19,14 +19,24 @@ WITH observations AS (
                WHEN $1::text = 'retry_after_ms' THEN retry_after_ms
                ELSE sync_lag_ms
            END AS value
-    FROM connector_attempts
+    FROM connector_attempts ca
     WHERE COALESCE(project_id, '') = $2::text
       AND org_id = $3::text
       AND source_kind = $4::text
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND provider = $5::text
       AND ($6::text = '' OR operation = $6::text)
       AND ($7::text = '' OR channel = $7::text)
       AND ($8::text = '' OR connection_id = $8::text)
+      AND ($8::text = '' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = $8::text
+            AND c.org_id = $3::text
+            AND c.project_id = $2::text
+      ))
       AND completed_at >= $9
       AND (
           ($1::text = 'quota_remaining' AND quota_remaining IS NOT NULL)
@@ -231,11 +241,15 @@ SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        max(elapsed_ms)::bigint AS max_elapsed_ms,
        max(attempted_at)::timestamptz AS last_attempted_at,
        max(completed_at)::timestamptz AS last_completed_at
-FROM connector_attempts
-WHERE project_id = $1
-  AND org_id = $2
-  AND completed_at >= $3
-  AND source_kind = $5::text
+FROM connector_attempts ca
+WHERE ca.project_id = $1
+  AND ca.org_id = $2
+  AND ca.completed_at >= $3
+  AND ca.source_kind = $5::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
 GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $4
@@ -457,6 +471,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
 ), quota_latest AS (
@@ -468,6 +486,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 ), retry_latest AS (
@@ -479,6 +501,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 ), sync_lag_latest AS (
@@ -490,6 +516,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )

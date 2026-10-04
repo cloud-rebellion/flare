@@ -48,6 +48,8 @@
   let connectorProvider = $state('hubspot');
   let connectorInstallationId = $state('');
   let connectorInstallationName = $state('');
+  let connectorProjectId = $state('');
+  let connectorBindingProjectIds = $state<Record<string, string>>({});
   let connectorScopes = $state('crm.objects.contacts.read');
   let connectorSecret = $state('');
   let connectorBusy = $state(false);
@@ -361,11 +363,16 @@
       error = 'Provider, installation ID, and credential are required.';
       return;
     }
+    if (provider === 'hubspot' && !connectorProjectId) {
+      error = 'Choose a project for HubSpot health and alerts.';
+      return;
+    }
     connectorBusy = true;
     error = null;
     try {
       const connection = await api.createConnectorConnection({
         provider,
+        project_id: connectorProjectId || undefined,
         installation_id: installationId,
         installation_name: connectorInstallationName.trim() || undefined,
         status: 'active',
@@ -381,6 +388,22 @@
       connectorSecret = '';
     } catch (err) {
       error = err instanceof ApiError ? err.message : 'Failed to connect provider';
+    } finally {
+      connectorBusy = false;
+    }
+  }
+
+  async function bindConnectorProject(connection: ConnectorConnection) {
+    const projectId = connectorBindingProjectIds[connection.id];
+    if (!projectId) return;
+    connectorBusy = true;
+    error = null;
+    try {
+      const updated = await api.updateConnectorConnection(connection.id, { project_id: projectId });
+      connectorConnections = (connectorConnections ?? []).map((item) => item.id === connection.id ? updated : item);
+      delete connectorBindingProjectIds[connection.id];
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Could not assign connector project';
     } finally {
       connectorBusy = false;
     }
@@ -923,6 +946,15 @@
 
   <form onsubmit={connectConnector} class="mb-6 flex flex-wrap items-end gap-3 border-b border-zinc-800/80 pb-8">
     <div class="flex flex-col gap-1.5">
+      <label for="connector-project" class="text-xs font-medium text-zinc-400">Project for health</label>
+      <select id="connector-project" bind:value={connectorProjectId} class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60">
+        <option value="">Choose project</option>
+        {#each projects ?? [] as project (project.id)}
+          <option value={project.id}>{project.name}</option>
+        {/each}
+      </select>
+    </div>
+    <div class="flex flex-col gap-1.5">
       <label for="connector-provider" class="text-xs font-medium text-zinc-400">Provider</label>
       <input
         id="connector-provider"
@@ -987,6 +1019,24 @@
           <span class="inline-block h-1.5 w-1.5 rounded-full {connection.status === 'active' ? 'bg-emerald-400' : 'bg-zinc-500'}"></span>
           <span class="text-sm font-medium text-zinc-200">{connection.installation_name || connection.installation_id}</span>
           <span class="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">{connection.provider}</span>
+          <code class="break-all text-[11px] text-zinc-600" title="Connection ID for project alert rules">{connection.id}</code>
+          {#if connection.project_id}
+            <a href="/projects/{connection.project_id}" class="text-xs text-zinc-500 hover:text-amber-400">{projects?.find((project) => project.id === connection.project_id)?.name ?? 'Project assigned'}</a>
+          {:else}
+            <span class="text-xs text-amber-400">Org-only health</span>
+            <select
+              value={connectorBindingProjectIds[connection.id] ?? ''}
+              onchange={(event) => connectorBindingProjectIds[connection.id] = event.currentTarget.value}
+              aria-label="Project for {connection.installation_name || connection.installation_id}"
+              class="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300"
+            >
+              <option value="">Assign project</option>
+              {#each projects ?? [] as project (project.id)}
+                <option value={project.id}>{project.name}</option>
+              {/each}
+            </select>
+            <button onclick={() => bindConnectorProject(connection)} disabled={connectorBusy || !connectorBindingProjectIds[connection.id]} class="text-xs text-amber-400 disabled:opacity-50">Assign</button>
+          {/if}
           <span class="text-xs text-zinc-600">{connection.credential_configured ? 'credential configured' : 'missing credential'}</span>
           <div class="ml-auto flex items-center gap-3">
             {#if check === 'busy'}

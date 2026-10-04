@@ -4,21 +4,21 @@
 
 -- name: CreateConnectorConnection :one
 INSERT INTO connector_connections (
-    id, org_id, provider, installation_id, installation_name, status, scopes, secret_ciphertext
+    id, org_id, provider, installation_id, installation_name, status, scopes, secret_ciphertext, project_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, org_id, provider, installation_id, installation_name, status, scopes,
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, sqlc.narg(project_id)::text)
+RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at;
 
 -- name: ListConnectorConnectionsByOrg :many
-SELECT id, org_id, provider, installation_id, installation_name, status, scopes,
+SELECT id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
        (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 FROM connector_connections
 WHERE org_id = $1
 ORDER BY updated_at DESC, id DESC;
 
 -- name: GetConnectorConnectionByID :one
-SELECT id, org_id, provider, installation_id, installation_name, status, scopes,
+SELECT id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
        (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 FROM connector_connections
 WHERE id = $1 AND org_id = $2;
@@ -36,9 +36,12 @@ SET provider = $3,
     status = $6,
     scopes = $7,
     secret_ciphertext = CASE WHEN sqlc.arg(replace_secret)::boolean THEN $8 ELSE secret_ciphertext END,
+    project_id = CASE WHEN sqlc.arg(bind_project)::boolean THEN sqlc.narg(project_id)::text ELSE project_id END,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
-RETURNING id, org_id, provider, installation_id, installation_name, status, scopes,
+  AND provider = $3 AND installation_id = $4
+  AND (NOT sqlc.arg(bind_project)::boolean OR project_id IS NULL OR project_id = sqlc.narg(project_id)::text)
+RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at;
 
 -- name: DeleteConnectorConnection :execrows

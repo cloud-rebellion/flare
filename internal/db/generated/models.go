@@ -263,6 +263,7 @@ type ConnectorConnection struct {
 	SecretCiphertext string             `json:"secret_ciphertext"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ProjectID        pgtype.Text        `json:"project_id"`
 }
 
 type ConnectorSyncState struct {

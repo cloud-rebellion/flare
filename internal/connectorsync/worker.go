@@ -56,6 +56,7 @@ type DueStateStore interface {
 type Connection struct {
 	ID                   string
 	OrgID                string
+	ProjectID            string
 	Provider             string
 	Status               string
 	CredentialConfigured bool
@@ -82,7 +83,7 @@ func (s SQLConnectionStore) Get(ctx context.Context, orgID, connectionID string)
 		return Connection{}, err
 	}
 	return Connection{
-		ID: row.ID, OrgID: row.OrgID, Provider: row.Provider, Status: row.Status,
+		ID: row.ID, OrgID: row.OrgID, ProjectID: row.ProjectID.String, Provider: row.Provider, Status: row.Status,
 		CredentialConfigured: row.CredentialConfigured,
 	}, nil
 }
@@ -216,18 +217,18 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithTimeout(ctx, runTimeout)
 	defer cancel()
-	scopedCtx := integration.WithScope(runCtx, integration.Scope{OrgID: orgID, ConnectionID: connectionID})
+	scopedCtx := integration.WithScope(runCtx, integration.Scope{OrgID: orgID, ProjectID: conn.ProjectID, ConnectionID: connectionID})
 
 	secretCiphertext, err := w.Connections.Secret(runCtx, orgID, connectionID)
 	if err != nil {
-		return w.completeFailure(ctx, result, orgID, connectionID, workerID, "credential_unavailable", err)
+		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "credential_unavailable", err)
 	}
 	if w.Cipher == nil {
-		return w.completeFailure(ctx, result, orgID, connectionID, workerID, "credential_unavailable", errors.New("credential cipher unavailable"))
+		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "credential_unavailable", errors.New("credential cipher unavailable"))
 	}
 	token, err := w.Cipher.Decrypt(secretCiphertext)
 	if err != nil || token == "" {
-		return w.completeFailure(ctx, result, orgID, connectionID, workerID, "invalid_config", errors.New("credential unavailable"))
+		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "invalid_config", errors.New("credential unavailable"))
 	}
 	probe := w.Probe
 	if probe == nil {
@@ -249,12 +250,12 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 	return completed, nil
 }
 
-func (w *HubSpotWorker) completeFailure(ctx context.Context, result RunResult, orgID, connectionID, workerID, code string, _ error) (RunResult, error) {
+func (w *HubSpotWorker) completeFailure(ctx context.Context, result RunResult, projectID, orgID, connectionID, workerID, code string, _ error) (RunResult, error) {
 	result.Outcome = "error"
 	result.ErrorCode = code
 	// The probe was not reached, so emit the same payload-free connector receipt
 	// shape as the provider adapter would have emitted.
-	receiptErr := integration.RecordResult(integration.WithScope(ctx, integration.Scope{OrgID: orgID, ConnectionID: connectionID}), integration.Attempt{
+	receiptErr := integration.RecordResult(integration.WithScope(ctx, integration.Scope{OrgID: orgID, ProjectID: projectID, ConnectionID: connectionID}), integration.Attempt{
 		Provider: "hubspot", Operation: HubSpotAccountDetailsOperation, Channel: "worker", Outcome: "error", ErrorCode: code,
 		AttemptedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(),
 	})

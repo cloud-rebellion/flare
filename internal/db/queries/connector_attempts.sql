@@ -44,11 +44,15 @@ SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        max(elapsed_ms)::bigint AS max_elapsed_ms,
        max(attempted_at)::timestamptz AS last_attempted_at,
        max(completed_at)::timestamptz AS last_completed_at
-FROM connector_attempts
-WHERE project_id = $1
-  AND org_id = $2
-  AND completed_at >= $3
-  AND source_kind = sqlc.arg(source_kind)::text
+FROM connector_attempts ca
+WHERE ca.project_id = $1
+  AND ca.org_id = $2
+  AND ca.completed_at >= $3
+  AND ca.source_kind = sqlc.arg(source_kind)::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
 GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $4;
@@ -143,6 +147,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
 ), quota_latest AS (
@@ -154,6 +162,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 ), retry_latest AS (
@@ -165,6 +177,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 ), sync_lag_latest AS (
@@ -176,6 +192,10 @@ WITH series AS (
       AND ca.org_id = $2
       AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )
@@ -212,14 +232,24 @@ WITH observations AS (
                WHEN sqlc.arg(metric)::text = 'retry_after_ms' THEN retry_after_ms
                ELSE sync_lag_ms
            END AS value
-    FROM connector_attempts
+    FROM connector_attempts ca
     WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
       AND org_id = sqlc.arg(org_id)::text
       AND source_kind = sqlc.arg(source_kind)::text
+      AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+      ))
       AND provider = sqlc.arg(provider)::text
       AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
       AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)
       AND (sqlc.arg(connection_id)::text = '' OR connection_id = sqlc.arg(connection_id)::text)
+      AND (sqlc.arg(connection_id)::text = '' OR EXISTS (
+          SELECT 1 FROM connector_connections c
+          WHERE c.id = sqlc.arg(connection_id)::text
+            AND c.org_id = sqlc.arg(org_id)::text
+            AND c.project_id = sqlc.arg(project_id)::text
+      ))
       AND completed_at >= sqlc.arg(completed_at)
       AND (
           (sqlc.arg(metric)::text = 'quota_remaining' AND quota_remaining IS NOT NULL)

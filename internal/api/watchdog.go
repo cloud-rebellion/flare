@@ -371,6 +371,7 @@ func (s *Server) watchdogReason(ctx context.Context, rule *generated.ListWatchdo
 	case "connector_sync_health":
 		stats, err := s.q.GetConnectorSyncHealthStats(ctx, generated.GetConnectorSyncHealthStatsParams{
 			OrgID:        rule.OrgID,
+			ProjectID:    rule.ProjectID,
 			ConnectionID: rule.ConnectorConnectionID,
 			Provider:     rule.ConnectorProvider,
 			Operation:    rule.ConnectorOperation,

@@ -44,6 +44,21 @@ WHERE s.org_id = $1
 ORDER BY s.updated_at DESC, s.id DESC
 LIMIT $2;
 
+-- name: ListConnectorSyncHealthByProject :many
+SELECT s.id, s.connection_id, c.provider, c.installation_id, c.installation_name,
+       c.status AS connection_status, s.operation, s.state,
+       (s.cursor_ciphertext <> '') AS cursor_configured, s.cursor_version,
+       s.attempt_count, s.last_started_at, s.last_completed_at,
+       s.last_success_at, s.last_error_code, s.last_sync_lag_ms,
+       s.next_run_at, s.lease_owner <> '' AS lease_active,
+       s.lease_expires_at, s.updated_at
+FROM connector_sync_states s
+JOIN connector_connections c
+  ON c.id = s.connection_id AND c.org_id = s.org_id
+WHERE c.project_id = $1 AND s.org_id = $2
+ORDER BY s.updated_at DESC, s.id DESC
+LIMIT $3;
+
 -- The built-in scheduler intentionally scans only active HubSpot installations
 -- with a configured credential. A missing state is due immediately; a stored
 -- next_run_at controls the cadence, while an expired lease is due for recovery.

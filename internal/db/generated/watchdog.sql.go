@@ -157,15 +157,25 @@ func (q *Queries) GetAPIKeyHygieneStats(ctx context.Context, arg GetAPIKeyHygien
 const getConnectorErrorRateStats = `-- name: GetConnectorErrorRateStats :one
 SELECT count(*)::bigint AS attempts,
        count(*) FILTER (WHERE outcome = 'error')::bigint AS error_count
-FROM connector_attempts
+FROM connector_attempts ca
 WHERE COALESCE(project_id, '') = $1::text
   AND org_id = $2::text
   AND source_kind = $3::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
   AND provider = $4::text
   AND ($5::text = '' OR operation = $5::text)
   AND ($6::text = '' OR channel = $6::text)
   AND ($7::text = '' OR error_code = $7::text)
   AND ($8::text = '' OR connection_id = $8::text)
+  AND ($8::text = '' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = $8::text
+        AND c.org_id = $2::text
+        AND c.project_id = $1::text
+  ))
   AND completed_at >= $9
 `
 
@@ -210,14 +220,24 @@ func (q *Queries) GetConnectorErrorRateStats(ctx context.Context, arg GetConnect
 
 const getConnectorFreshnessStats = `-- name: GetConnectorFreshnessStats :one
 SELECT max(completed_at)::timestamptz AS last_completed_at
-FROM connector_attempts
+FROM connector_attempts ca
 WHERE COALESCE(project_id, '') = $1::text
   AND org_id = $2::text
   AND source_kind = $3::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
   AND provider = $4::text
   AND ($5::text = '' OR operation = $5::text)
   AND ($6::text = '' OR channel = $6::text)
   AND ($7::text = '' OR connection_id = $7::text)
+  AND ($7::text = '' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = $7::text
+        AND c.org_id = $2::text
+        AND c.project_id = $1::text
+  ))
   AND completed_at >= $8
 `
 
@@ -273,15 +293,17 @@ JOIN connector_connections c
   ON c.id = s.connection_id
  AND c.org_id = s.org_id
 WHERE s.org_id = $2::text
-  AND s.connection_id = $3::text
-  AND c.provider = $4::text
-  AND s.operation = $5::text
+  AND c.project_id = $3::text
+  AND s.connection_id = $4::text
+  AND c.provider = $5::text
+  AND s.operation = $6::text
   AND c.status IN ('active', 'pending', 'error')
 `
 
 type GetConnectorSyncHealthStatsParams struct {
 	Cutoff       pgtype.Timestamptz `json:"cutoff"`
 	OrgID        string             `json:"org_id"`
+	ProjectID    string             `json:"project_id"`
 	ConnectionID string             `json:"connection_id"`
 	Provider     string             `json:"provider"`
 	Operation    string             `json:"operation"`
@@ -292,10 +314,8 @@ type GetConnectorSyncHealthStatsRow struct {
 	OverdueCount int64 `json:"overdue_count"`
 }
 
-// Sync state is organization-owned because one registered installation may be
-// used by several project routes. The alert itself remains project-scoped for
-// notification routing, but the selector is always one exact connection and
-// operation. `failed` counts recent terminal failures; `overdue` counts rows
+// Sync state is organization-owned, but a project alert can select only an
+// installation explicitly bound to that project. `failed` counts recent terminal failures; `overdue` counts rows
 // whose scheduled run or lease expiry is past the configured grace cutoff.
 // Paused/revoked connections are excluded so intentional disconnects do not
 // page. Only counts cross the watchdog boundary.
@@ -303,6 +323,7 @@ func (q *Queries) GetConnectorSyncHealthStats(ctx context.Context, arg GetConnec
 	row := q.db.QueryRow(ctx, getConnectorSyncHealthStats,
 		arg.Cutoff,
 		arg.OrgID,
+		arg.ProjectID,
 		arg.ConnectionID,
 		arg.Provider,
 		arg.Operation,

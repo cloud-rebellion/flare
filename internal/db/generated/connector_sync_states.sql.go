@@ -359,6 +359,92 @@ func (q *Queries) ListConnectorSyncHealthByOrg(ctx context.Context, arg ListConn
 	return items, nil
 }
 
+const listConnectorSyncHealthByProject = `-- name: ListConnectorSyncHealthByProject :many
+SELECT s.id, s.connection_id, c.provider, c.installation_id, c.installation_name,
+       c.status AS connection_status, s.operation, s.state,
+       (s.cursor_ciphertext <> '') AS cursor_configured, s.cursor_version,
+       s.attempt_count, s.last_started_at, s.last_completed_at,
+       s.last_success_at, s.last_error_code, s.last_sync_lag_ms,
+       s.next_run_at, s.lease_owner <> '' AS lease_active,
+       s.lease_expires_at, s.updated_at
+FROM connector_sync_states s
+JOIN connector_connections c
+  ON c.id = s.connection_id AND c.org_id = s.org_id
+WHERE c.project_id = $1 AND s.org_id = $2
+ORDER BY s.updated_at DESC, s.id DESC
+LIMIT $3
+`
+
+type ListConnectorSyncHealthByProjectParams struct {
+	ProjectID pgtype.Text `json:"project_id"`
+	OrgID     string      `json:"org_id"`
+	Limit     int32       `json:"limit"`
+}
+
+type ListConnectorSyncHealthByProjectRow struct {
+	ID               string             `json:"id"`
+	ConnectionID     string             `json:"connection_id"`
+	Provider         string             `json:"provider"`
+	InstallationID   string             `json:"installation_id"`
+	InstallationName string             `json:"installation_name"`
+	ConnectionStatus string             `json:"connection_status"`
+	Operation        string             `json:"operation"`
+	State            string             `json:"state"`
+	CursorConfigured bool               `json:"cursor_configured"`
+	CursorVersion    int64              `json:"cursor_version"`
+	AttemptCount     int64              `json:"attempt_count"`
+	LastStartedAt    pgtype.Timestamptz `json:"last_started_at"`
+	LastCompletedAt  pgtype.Timestamptz `json:"last_completed_at"`
+	LastSuccessAt    pgtype.Timestamptz `json:"last_success_at"`
+	LastErrorCode    string             `json:"last_error_code"`
+	LastSyncLagMs    pgtype.Int8        `json:"last_sync_lag_ms"`
+	NextRunAt        pgtype.Timestamptz `json:"next_run_at"`
+	LeaseActive      bool               `json:"lease_active"`
+	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ListConnectorSyncHealthByProject(ctx context.Context, arg ListConnectorSyncHealthByProjectParams) ([]*ListConnectorSyncHealthByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listConnectorSyncHealthByProject, arg.ProjectID, arg.OrgID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*ListConnectorSyncHealthByProjectRow{}
+	for rows.Next() {
+		var i ListConnectorSyncHealthByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ConnectionID,
+			&i.Provider,
+			&i.InstallationID,
+			&i.InstallationName,
+			&i.ConnectionStatus,
+			&i.Operation,
+			&i.State,
+			&i.CursorConfigured,
+			&i.CursorVersion,
+			&i.AttemptCount,
+			&i.LastStartedAt,
+			&i.LastCompletedAt,
+			&i.LastSuccessAt,
+			&i.LastErrorCode,
+			&i.LastSyncLagMs,
+			&i.NextRunAt,
+			&i.LeaseActive,
+			&i.LeaseExpiresAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueHubSpotConnectorConnections = `-- name: ListDueHubSpotConnectorConnections :many
 SELECT c.org_id, c.id AS connection_id, c.provider,
        COALESCE(s.next_run_at, c.created_at) AS next_run_at

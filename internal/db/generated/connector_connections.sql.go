@@ -15,10 +15,10 @@ import (
 const createConnectorConnection = `-- name: CreateConnectorConnection :one
 
 INSERT INTO connector_connections (
-    id, org_id, provider, installation_id, installation_name, status, scopes, secret_ciphertext
+    id, org_id, provider, installation_id, installation_name, status, scopes, secret_ciphertext, project_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, org_id, provider, installation_id, installation_name, status, scopes,
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text)
+RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 `
 
@@ -31,11 +31,13 @@ type CreateConnectorConnectionParams struct {
 	Status           string          `json:"status"`
 	Scopes           json.RawMessage `json:"scopes"`
 	SecretCiphertext string          `json:"secret_ciphertext"`
+	ProjectID        pgtype.Text     `json:"project_id"`
 }
 
 type CreateConnectorConnectionRow struct {
 	ID                   string             `json:"id"`
 	OrgID                string             `json:"org_id"`
+	ProjectID            pgtype.Text        `json:"project_id"`
 	Provider             string             `json:"provider"`
 	InstallationID       string             `json:"installation_id"`
 	InstallationName     string             `json:"installation_name"`
@@ -59,11 +61,13 @@ func (q *Queries) CreateConnectorConnection(ctx context.Context, arg CreateConne
 		arg.Status,
 		arg.Scopes,
 		arg.SecretCiphertext,
+		arg.ProjectID,
 	)
 	var i CreateConnectorConnectionRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrgID,
+		&i.ProjectID,
 		&i.Provider,
 		&i.InstallationID,
 		&i.InstallationName,
@@ -95,7 +99,7 @@ func (q *Queries) DeleteConnectorConnection(ctx context.Context, arg DeleteConne
 }
 
 const getConnectorConnectionByID = `-- name: GetConnectorConnectionByID :one
-SELECT id, org_id, provider, installation_id, installation_name, status, scopes,
+SELECT id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
        (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 FROM connector_connections
 WHERE id = $1 AND org_id = $2
@@ -109,6 +113,7 @@ type GetConnectorConnectionByIDParams struct {
 type GetConnectorConnectionByIDRow struct {
 	ID                   string             `json:"id"`
 	OrgID                string             `json:"org_id"`
+	ProjectID            pgtype.Text        `json:"project_id"`
 	Provider             string             `json:"provider"`
 	InstallationID       string             `json:"installation_id"`
 	InstallationName     string             `json:"installation_name"`
@@ -125,6 +130,7 @@ func (q *Queries) GetConnectorConnectionByID(ctx context.Context, arg GetConnect
 	err := row.Scan(
 		&i.ID,
 		&i.OrgID,
+		&i.ProjectID,
 		&i.Provider,
 		&i.InstallationID,
 		&i.InstallationName,
@@ -156,7 +162,7 @@ func (q *Queries) GetConnectorConnectionSecret(ctx context.Context, arg GetConne
 }
 
 const listConnectorConnectionsByOrg = `-- name: ListConnectorConnectionsByOrg :many
-SELECT id, org_id, provider, installation_id, installation_name, status, scopes,
+SELECT id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
        (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 FROM connector_connections
 WHERE org_id = $1
@@ -166,6 +172,7 @@ ORDER BY updated_at DESC, id DESC
 type ListConnectorConnectionsByOrgRow struct {
 	ID                   string             `json:"id"`
 	OrgID                string             `json:"org_id"`
+	ProjectID            pgtype.Text        `json:"project_id"`
 	Provider             string             `json:"provider"`
 	InstallationID       string             `json:"installation_id"`
 	InstallationName     string             `json:"installation_name"`
@@ -188,6 +195,7 @@ func (q *Queries) ListConnectorConnectionsByOrg(ctx context.Context, orgID strin
 		if err := rows.Scan(
 			&i.ID,
 			&i.OrgID,
+			&i.ProjectID,
 			&i.Provider,
 			&i.InstallationID,
 			&i.InstallationName,
@@ -215,9 +223,12 @@ SET provider = $3,
     status = $6,
     scopes = $7,
     secret_ciphertext = CASE WHEN $9::boolean THEN $8 ELSE secret_ciphertext END,
+    project_id = CASE WHEN $10::boolean THEN $11::text ELSE project_id END,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
-RETURNING id, org_id, provider, installation_id, installation_name, status, scopes,
+  AND provider = $3 AND installation_id = $4
+  AND (NOT $10::boolean OR project_id IS NULL OR project_id = $11::text)
+RETURNING id, org_id, project_id, provider, installation_id, installation_name, status, scopes,
           (secret_ciphertext <> '') AS credential_configured, created_at, updated_at
 `
 
@@ -231,11 +242,14 @@ type UpdateConnectorConnectionParams struct {
 	Scopes           json.RawMessage `json:"scopes"`
 	SecretCiphertext string          `json:"secret_ciphertext"`
 	ReplaceSecret    bool            `json:"replace_secret"`
+	BindProject      bool            `json:"bind_project"`
+	ProjectID        pgtype.Text     `json:"project_id"`
 }
 
 type UpdateConnectorConnectionRow struct {
 	ID                   string             `json:"id"`
 	OrgID                string             `json:"org_id"`
+	ProjectID            pgtype.Text        `json:"project_id"`
 	Provider             string             `json:"provider"`
 	InstallationID       string             `json:"installation_id"`
 	InstallationName     string             `json:"installation_name"`
@@ -257,11 +271,14 @@ func (q *Queries) UpdateConnectorConnection(ctx context.Context, arg UpdateConne
 		arg.Scopes,
 		arg.SecretCiphertext,
 		arg.ReplaceSecret,
+		arg.BindProject,
+		arg.ProjectID,
 	)
 	var i UpdateConnectorConnectionRow
 	err := row.Scan(
 		&i.ID,
 		&i.OrgID,
+		&i.ProjectID,
 		&i.Provider,
 		&i.InstallationID,
 		&i.InstallationName,

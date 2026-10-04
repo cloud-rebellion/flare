@@ -4100,6 +4100,10 @@
                     "maxLength": 16384,
                     "writeOnly": true,
                     "description": "Encrypted with FLARE_SECRET_KEY before storage; never returned."
+                  },
+                  "project_id": {
+                    "type": "string",
+                    "description": "Required when registering an active HubSpot installation; must belong to the caller's workspace."
                   }
                 }
               }
@@ -4120,7 +4124,8 @@
           "409": {
             "description": "Duplicate provider installation"
           }
-        }
+        },
+        "description": "An active HubSpot installation requires a tenant-owned project_id so its server-observed checks and sync state can drive that project's health and alerts. Historical org-only installations can be assigned later with PATCH."
       }
     },
     "/api/connector-connections/{id}": {
@@ -4165,7 +4170,7 @@
           "Integrations"
         ],
         "summary": "Update connector connection metadata or rotate its credential (admin)",
-        "description": "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only.",
+        "description": "Omit secret to preserve the encrypted credential. Supplying a secret replaces it; the response remains metadata-only. Set project_id once to assign a historical org-only installation; provider, installation_id, and an existing project binding are immutable.",
         "security": [
           {
             "session": []
@@ -4222,6 +4227,10 @@
                     "type": "string",
                     "maxLength": 16384,
                     "writeOnly": true
+                  },
+                  "project_id": {
+                    "type": "string",
+                    "description": "One-time project binding for an unbound installation; cannot be cleared or changed."
                   }
                 }
               }
@@ -4662,6 +4671,51 @@
           },
           "404": {
             "description": "Project or active key not found in this organization"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/connector-sync-health": {
+      "get": {
+        "tags": [
+          "Integrations"
+        ],
+        "summary": "Query project-bound connector synchronization state",
+        "description": "Returns the same bounded state projection as the org route, restricted to installations explicitly bound to this project. Historical unbound installations appear only in the org route.",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/paths/~1api~1connector-sync-health/get/responses/200"
+          },
+          "404": {
+            "description": "Project not found"
           }
         }
       }
@@ -5697,6 +5751,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Explicit tenant-checked project binding. Historical org-only installations omit this field until assigned; a binding cannot be moved to another project."
           }
         }
       },

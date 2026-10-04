@@ -17,10 +17,8 @@ FROM alert_rules r
 JOIN projects p ON p.id = r.project_id
 WHERE r.enabled = true AND r.type IN ('anomaly', 'silence', 'metric_threshold', 'trace_percentile', 'service_level', 'business_health', 'connector_error_rate', 'connector_freshness', 'connector_sync_health', 'service_freshness', 'release_freshness', 'connector_quota', 'release_error_rate', 'deploy_failure', 'deploy_acceptance', 'rollback', 'log_severity', 'usage_threshold', 'api_key_hygiene', 'ai_triage', 'ingest_acceptance');
 
--- Sync state is organization-owned because one registered installation may be
--- used by several project routes. The alert itself remains project-scoped for
--- notification routing, but the selector is always one exact connection and
--- operation. `failed` counts recent terminal failures; `overdue` counts rows
+-- Sync state is organization-owned, but a project alert can select only an
+-- installation explicitly bound to that project. `failed` counts recent terminal failures; `overdue` counts rows
 -- whose scheduled run or lease expiry is past the configured grace cutoff.
 -- Paused/revoked connections are excluded so intentional disconnects do not
 -- page. Only counts cross the watchdog boundary.
@@ -44,6 +42,7 @@ JOIN connector_connections c
   ON c.id = s.connection_id
  AND c.org_id = s.org_id
 WHERE s.org_id = sqlc.arg(org_id)::text
+  AND c.project_id = sqlc.arg(project_id)::text
   AND s.connection_id = sqlc.arg(connection_id)::text
   AND c.provider = sqlc.arg(provider)::text
   AND s.operation = sqlc.arg(operation)::text
@@ -134,14 +133,24 @@ WHERE d.project_id = sqlc.arg(project_id)::text
 -- are all tenant/project scoped and no connector body crosses this query.
 -- name: GetConnectorFreshnessStats :one
 SELECT max(completed_at)::timestamptz AS last_completed_at
-FROM connector_attempts
+FROM connector_attempts ca
 WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
   AND org_id = sqlc.arg(org_id)::text
   AND source_kind = sqlc.arg(source_kind)::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
   AND provider = sqlc.arg(provider)::text
   AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
   AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)
   AND (sqlc.arg(connection_id)::text = '' OR connection_id = sqlc.arg(connection_id)::text)
+  AND (sqlc.arg(connection_id)::text = '' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = sqlc.arg(connection_id)::text
+        AND c.org_id = sqlc.arg(org_id)::text
+        AND c.project_id = sqlc.arg(project_id)::text
+  ))
   AND completed_at >= sqlc.arg(baseline_at);
 
 -- Service-freshness rules inspect only the exact canonical heartbeat for one
@@ -185,15 +194,25 @@ WHERE project_id = $1
 -- name: GetConnectorErrorRateStats :one
 SELECT count(*)::bigint AS attempts,
        count(*) FILTER (WHERE outcome = 'error')::bigint AS error_count
-FROM connector_attempts
+FROM connector_attempts ca
 WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
   AND org_id = sqlc.arg(org_id)::text
   AND source_kind = sqlc.arg(source_kind)::text
+  AND (ca.connection_id IS NULL OR ca.source_kind <> 'server_observed' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = ca.connection_id AND c.org_id = ca.org_id AND c.project_id = ca.project_id
+  ))
   AND provider = sqlc.arg(provider)::text
   AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
   AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)
   AND (sqlc.arg(error_code)::text = '' OR error_code = sqlc.arg(error_code)::text)
   AND (sqlc.arg(connection_id)::text = '' OR connection_id = sqlc.arg(connection_id)::text)
+  AND (sqlc.arg(connection_id)::text = '' OR EXISTS (
+      SELECT 1 FROM connector_connections c
+      WHERE c.id = sqlc.arg(connection_id)::text
+        AND c.org_id = sqlc.arg(org_id)::text
+        AND c.project_id = sqlc.arg(project_id)::text
+  ))
   AND completed_at >= sqlc.arg(completed_at);
 
 -- Deploy-failure rules count only failed or blocked deploy stages in the same

@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/connectorcheck"
 	"github.com/bright-interaction/flare/internal/db/generated"
@@ -44,6 +45,7 @@ var connectorConnectionStatuses = map[string]struct{}{
 // endpoint without turning a read into a credential export.
 type connectorConnectionResponse struct {
 	ID                   string   `json:"id"`
+	ProjectID            string   `json:"project_id,omitempty"`
 	Provider             string   `json:"provider"`
 	InstallationID       string   `json:"installation_id"`
 	InstallationName     string   `json:"installation_name"`
@@ -55,6 +57,7 @@ type connectorConnectionResponse struct {
 }
 
 type connectorConnectionCreateRequest struct {
+	ProjectID        string   `json:"project_id"`
 	Provider         string   `json:"provider"`
 	InstallationID   string   `json:"installation_id"`
 	InstallationName string   `json:"installation_name"`
@@ -64,6 +67,7 @@ type connectorConnectionCreateRequest struct {
 }
 
 type connectorConnectionPatchRequest struct {
+	ProjectID        *string   `json:"project_id"`
 	Provider         *string   `json:"provider"`
 	InstallationID   *string   `json:"installation_id"`
 	InstallationName *string   `json:"installation_name"`
@@ -170,28 +174,28 @@ func connectorConnectionTimestamp(ts time.Time, valid bool) string {
 	return ts.UTC().Format(time.RFC3339Nano)
 }
 
-func connectorConnectionResponseFromValues(id, provider, installationID, installationName, status string, scopes json.RawMessage, credentialConfigured bool, createdAt, updatedAt time.Time, createdValid, updatedValid bool) connectorConnectionResponse {
+func connectorConnectionResponseFromValues(id string, projectID pgtype.Text, provider, installationID, installationName, status string, scopes json.RawMessage, credentialConfigured bool, createdAt, updatedAt time.Time, createdValid, updatedValid bool) connectorConnectionResponse {
 	return connectorConnectionResponse{
-		ID: id, Provider: provider, InstallationID: installationID, InstallationName: installationName,
+		ID: id, ProjectID: projectID.String, Provider: provider, InstallationID: installationID, InstallationName: installationName,
 		Status: status, Scopes: connectorScopes(scopes), CredentialConfigured: credentialConfigured,
 		CreatedAt: connectorConnectionTimestamp(createdAt, createdValid), UpdatedAt: connectorConnectionTimestamp(updatedAt, updatedValid),
 	}
 }
 
 func connectorConnectionResponseFromCreate(row *generated.CreateConnectorConnectionRow) connectorConnectionResponse {
-	return connectorConnectionResponseFromValues(row.ID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
+	return connectorConnectionResponseFromValues(row.ID, row.ProjectID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
 }
 
 func connectorConnectionResponseFromList(row *generated.ListConnectorConnectionsByOrgRow) connectorConnectionResponse {
-	return connectorConnectionResponseFromValues(row.ID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
+	return connectorConnectionResponseFromValues(row.ID, row.ProjectID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
 }
 
 func connectorConnectionResponseFromGet(row *generated.GetConnectorConnectionByIDRow) connectorConnectionResponse {
-	return connectorConnectionResponseFromValues(row.ID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
+	return connectorConnectionResponseFromValues(row.ID, row.ProjectID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
 }
 
 func connectorConnectionResponseFromUpdate(row *generated.UpdateConnectorConnectionRow) connectorConnectionResponse {
-	return connectorConnectionResponseFromValues(row.ID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
+	return connectorConnectionResponseFromValues(row.ID, row.ProjectID, row.Provider, row.InstallationID, row.InstallationName, row.Status, row.Scopes, row.CredentialConfigured, row.CreatedAt.Time, row.UpdatedAt.Time, row.CreatedAt.Valid, row.UpdatedAt.Valid)
 }
 
 func (s *Server) handleListConnectorConnections(w http.ResponseWriter, r *http.Request) {
@@ -242,10 +246,31 @@ func (s *Server) handleCreateConnectorConnection(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, "an active connection requires a secret")
 		return
 	}
+	projectID := strings.TrimSpace(req.ProjectID)
+	if projectID == "" && values.provider == "hubspot" && values.status == "active" {
+		writeErr(w, http.StatusBadRequest, "an active HubSpot connection requires project_id")
+		return
+	}
+	if projectID != "" {
+		if len(projectID) > 128 || !connectorConnectionToken.MatchString(projectID) {
+			writeErr(w, http.StatusBadRequest, "project_id must be a safe bounded identifier")
+			return
+		}
+		_, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{ID: projectID, OrgScope: orgIDFrom(r.Context())})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusBadRequest, "project_id is not in this workspace")
+			return
+		}
+		if err != nil {
+			slogError(w, "get project for connector connection", err)
+			return
+		}
+	}
 	row, err := s.q.CreateConnectorConnection(r.Context(), generated.CreateConnectorConnectionParams{
 		ID: id.New(), OrgID: orgIDFrom(r.Context()), Provider: values.provider,
 		InstallationID: values.installationID, InstallationName: values.installationName,
 		Status: values.status, Scopes: values.scopes, SecretCiphertext: s.secrets.Encrypt(secret),
+		ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -298,6 +323,40 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if values.provider != current.Provider || values.installationID != current.InstallationID {
+		writeErr(w, http.StatusConflict, "provider and installation_id are immutable; create a new connection")
+		return
+	}
+	projectID := current.ProjectID.String
+	bindProject := req.ProjectID != nil
+	if bindProject {
+		projectID = strings.TrimSpace(*req.ProjectID)
+		if projectID == "" {
+			writeErr(w, http.StatusBadRequest, "project_id cannot be cleared; disconnect the installation instead")
+			return
+		}
+		if current.ProjectID.Valid && projectID != current.ProjectID.String {
+			writeErr(w, http.StatusConflict, "project_id is immutable once bound")
+			return
+		}
+		if len(projectID) > 128 || !connectorConnectionToken.MatchString(projectID) {
+			writeErr(w, http.StatusBadRequest, "project_id must be a safe bounded identifier")
+			return
+		}
+		_, err := s.q.GetProjectByID(ctx, generated.GetProjectByIDParams{ID: projectID, OrgScope: org})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusBadRequest, "project_id is not in this workspace")
+			return
+		}
+		if err != nil {
+			slogError(w, "get project for connector connection", err)
+			return
+		}
+	}
+	if values.provider == "hubspot" && values.status == "active" && current.Status != "active" && projectID == "" {
+		writeErr(w, http.StatusBadRequest, "an active HubSpot connection requires project_id")
+		return
+	}
 	secret, supplied, err := normalizeConnectorSecret(req.Secret)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -317,8 +376,13 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		ID: idParam, OrgID: org, Provider: values.provider, InstallationID: values.installationID,
 		InstallationName: values.installationName, Status: values.status, Scopes: values.scopes,
 		SecretCiphertext: secret, ReplaceSecret: supplied,
+		BindProject: bindProject, ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, http.StatusConflict, "connector connection changed; reload and retry")
+			return
+		}
 		if isUniqueViolation(err) {
 			writeErr(w, http.StatusConflict, "a connection for this provider and installation already exists")
 			return
@@ -393,7 +457,7 @@ func (s *Server) handleCheckConnectorConnection(w http.ResponseWriter, r *http.R
 		writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
 		return
 	}
-	result, probeErr := adapter.Probe.Check(integration.WithScope(ctx, integration.Scope{OrgID: org, ConnectionID: connectionID}), secret)
+	result, probeErr := adapter.Probe.Check(integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: row.ProjectID.String, ConnectionID: connectionID}), secret)
 	if probeErr != nil && result.Outcome == "" {
 		result.Outcome, result.StatusClass, result.ErrorCode = integration.ClassifyError(probeErr)
 	}

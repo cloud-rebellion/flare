@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -58,6 +60,44 @@ func (s *Server) handleListConnectorSyncHealth(w http.ResponseWriter, r *http.Re
 	for _, row := range rows {
 		if row != nil {
 			out = append(out, toConnectorSyncHealthResponse(row))
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleListProjectConnectorSyncHealth exposes only worker states whose
+// installation was explicitly bound to the authenticated project. Historical
+// unbound installations remain visible through the organization projection.
+func (s *Server) handleListProjectConnectorSyncHealth(w http.ResponseWriter, r *http.Request) {
+	project, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{
+		ID: chi.URLParam(r, "id"), OrgScope: orgIDFrom(r.Context()),
+	})
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project not found")
+		return
+	}
+	rows, err := s.q.ListConnectorSyncHealthByProject(r.Context(), generated.ListConnectorSyncHealthByProjectParams{
+		ProjectID: pgtype.Text{String: project.ID, Valid: true},
+		OrgID:     project.OrgID, Limit: int32(connectorSyncHealthLimit(r)),
+	})
+	if err != nil {
+		slogError(w, "list project connector sync health", err)
+		return
+	}
+	out := make([]connectorSyncHealthResponse, 0, len(rows))
+	for _, row := range rows {
+		if row != nil {
+			out = append(out, connectorSyncHealthResponse{
+				ID: row.ID, ConnectionID: row.ConnectionID, Provider: row.Provider,
+				InstallationName: row.InstallationName, ConnectionStatus: row.ConnectionStatus,
+				Operation: row.Operation, State: row.State, CursorConfigured: row.CursorConfigured,
+				CursorVersion: row.CursorVersion, AttemptCount: row.AttemptCount,
+				LastStartedAt: receiptTimestamp(row.LastStartedAt), LastCompletedAt: receiptTimestamp(row.LastCompletedAt),
+				LastSuccessAt: receiptTimestamp(row.LastSuccessAt), LastErrorCode: row.LastErrorCode,
+				LastSyncLagMS: nullableInt64(row.LastSyncLagMs), NextRunAt: receiptTimestamp(row.NextRunAt),
+				LeaseActive: row.LeaseActive, LeaseExpiresAt: receiptTimestamp(row.LeaseExpiresAt),
+				UpdatedAt: receiptTimestamp(row.UpdatedAt),
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
