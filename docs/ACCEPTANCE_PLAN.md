@@ -46,7 +46,7 @@ green tests are necessary evidence, but they are not live acceptance.
 
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
 plan are local release candidates. Combined Flare PostgreSQL 16 API and query
-tests through migration 079, focused Go tests, frontend type check/build,
+tests through migration 080, focused Go tests, frontend type check/build,
 pinned SQL generation, and the backup Bash fixture have passed locally. A
 hidden-source-map build moved 45 JavaScript maps to a private build directory
 and left zero maps in the served frontend directory. These checks do not
