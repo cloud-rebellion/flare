@@ -75,7 +75,7 @@ sampling did not prove an active Flare DSN or event receipt. Most app builds
 also lack a demonstrated private-map artifact and most Compose releases still
 default to `development`; each app needs exact build-time release injection,
 private map delivery, and an event and bundled-frame resolution canary on its
-own product branch. BrightCRM candidate `0b0b8ff3b` and Atomicsite candidate
+own product branch. BrightCRM combined candidate `9a5a3bfbf` and Atomicsite candidate
 `cbf83bf06` now prove in configured local builds that a synthetic DSN and full
 source SHA reach the shipped JavaScript, while 233 and 182 JavaScript maps,
 respectively, stay private. The initial configured builds exposed a real Vite
@@ -97,7 +97,9 @@ provider revocation are implemented and tested; a real HubSpot app registration,
 consent, account probe, and alert remain unverified. Legacy installations still
 require an admin to bind them.
 
-The BrightCRM native metric pilot reuses one batch key and exact body on retry;
+The BrightCRM native metric pilot separates accepted metric batches from
+maintenance check-ins, so a healthy check-in cannot mask a stalled metric
+batch. It reuses one batch key and exact body on retry;
 the Flare candidate commits metric rows and their terminal receipt together
 and replays the result for seven days. Native logs and client connector-attempts
 have the same optional key contract. Sentry envelope items use a project-scoped
