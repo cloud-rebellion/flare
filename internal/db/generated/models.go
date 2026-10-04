@@ -470,18 +470,35 @@ type MetricsDefault struct {
 }
 
 type Monitor struct {
-	ID              string             `json:"id"`
-	OrgID           string             `json:"org_id"`
-	ProjectID       string             `json:"project_id"`
-	Slug            string             `json:"slug"`
-	Name            string             `json:"name"`
-	IntervalSeconds int32              `json:"interval_seconds"`
-	GraceSeconds    int32              `json:"grace_seconds"`
-	LastPingAt      pgtype.Timestamptz `json:"last_ping_at"`
-	LastStatus      string             `json:"last_status"`
-	State           string             `json:"state"`
-	LastAlertAt     pgtype.Timestamptz `json:"last_alert_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	ID               string             `json:"id"`
+	OrgID            string             `json:"org_id"`
+	ProjectID        string             `json:"project_id"`
+	Slug             string             `json:"slug"`
+	Name             string             `json:"name"`
+	IntervalSeconds  int32              `json:"interval_seconds"`
+	GraceSeconds     int32              `json:"grace_seconds"`
+	LastPingAt       pgtype.Timestamptz `json:"last_ping_at"`
+	LastStatus       string             `json:"last_status"`
+	State            string             `json:"state"`
+	LastAlertAt      pgtype.Timestamptz `json:"last_alert_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	FailedGeneration int64              `json:"failed_generation"`
+}
+
+type MonitorFailureOutbox struct {
+	MonitorID        string             `json:"monitor_id"`
+	OrgID            string             `json:"org_id"`
+	ProjectID        string             `json:"project_id"`
+	ChannelID        string             `json:"channel_id"`
+	FailedGeneration int64              `json:"failed_generation"`
+	ObservedAt       pgtype.Timestamptz `json:"observed_at"`
+	State            string             `json:"state"`
+	Attempts         int32              `json:"attempts"`
+	NextAttemptAt    pgtype.Timestamptz `json:"next_attempt_at"`
+	LeaseToken       string             `json:"lease_token"`
+	LeasedUntil      pgtype.Timestamptz `json:"leased_until"`
+	LastErrorCode    string             `json:"last_error_code"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 }
 
 type NativeLogAcceptance struct {

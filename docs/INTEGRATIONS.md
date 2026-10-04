@@ -237,7 +237,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 | OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. Accepted rows and terminal receipts commit together. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. Native log and metric rows and their terminal receipts commit together before `200`. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
-| Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | Failed transitions page immediately; the watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors. New slugs are capped and quiet, unconfigured monitors are pruned after 30 days. |
+| Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | A failed check-in and its routed alert notices commit together before HTTP 200; a worker delivers them asynchronously. The watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors. New slugs are capped and quiet, unconfigured monitors are pruned after 30 days. |
 | External SaaS and app connectors | `POST /api/{projectID}/connector-attempts` with `X-Flare-Key` (or `sentry_key`) | A bridge in any web, Flutter, backend, or vendor app can submit one bounded provider/operation/channel result plus optional `quota_remaining`, `retry_after_ms`, and observed `sync_lag_ms` integers. Flare stores it with `client_reported` provenance and no registered installation ID; it is a caller assertion, not proof that a provider call happened. The attempt and terminal receipt commit together before `202`. | `connector_error_rate` and `connector_quota` rules can page on this series only when `connector_source_kind` is explicitly `client_reported`. The request accepts only safe bounded tokens, `ok`/`error`, an HTTP status class or safe error code, elapsed milliseconds, and bounded provider hints; response bodies, URLs, credentials, and user data are rejected by the contract. |
 | Releases and source maps | Authenticated `POST /api/projects/{id}/releases` and `POST /api/projects/{id}/artifacts` | Release version and registry creation time, new-issue count, source-map artifact name and size, symbolication for matching releases, bounded release health via `GET /api/projects/{id}/release-health?hours=24&limit=100`, release freshness via `GET /api/projects/{id}/release-freshness?hours=24&limit=100`, and source-map coverage via `GET /api/projects/{id}/symbolication-health?hours=24&limit=100`. | Release registry is capped at 2,000 versions per project. Source maps are capped at 30 MiB per upload, 2,000 artifacts, and 2 GiB per project. Release, freshness, and symbolication health report aggregate metadata without raw payloads; `release_error_rate` can page on an explicit or latest recent release, while `release_freshness` requires an explicit deployed release and its canonical heartbeat. |
 | Flutter/Dart and native mobile symbols | Authenticated `POST /api/projects/{id}/symbol-artifacts` with a member API key or session | Stores one bounded, release-scoped `dart_symbols`, `proguard`, `breakpad`, `dsym`, or `elf` artifact for Flutter, Android, or iOS. Flare records a SHA-256 digest, size, platform, format, upload receipt, and durable upload-time `validation_status`; list responses never return symbol bytes. | Artifact count is capped at 2,000 and native-symbol storage at 2 GiB per project, with 30 MiB per artifact. Upload acceptance proves durable retention; Flutter container validation is explicit, while format-specific frame rewriting remains pending until its resolver is enabled. |
@@ -847,14 +847,43 @@ configured TLS mode. Channel records include `last_attempt_at`, `last_ok_at`,
 and `last_error`. The **Send test** action exercises the real destination and
 updates those fields; an automation webhook test requires a selected project
 and sends a distinct `test` event. Ordinary email, Slack, and webhook sends
-remain best effort and record their last delivery result. For automation
+remain best effort for other alert types and record their last delivery result;
+failed check-ins use the durable monitor queue described below. For automation
 webhooks, watchdog, missing-monitor, and spike claims commit with a bounded
 PostgreSQL notice. The outbox retries failed sends with a stable signed body,
 fences concurrent workers, and checks that the channel is still enabled and
 routed to the project before each attempt. `/readyz` and `/api/health` expose
-aggregate pending, due, leased, and dead counts. Issue-alert evaluation and
-failed check-in alert scheduling still enter a bounded background pool before
-enqueue; an ingest HTTP 200 alone does not prove an automation notice exists.
+aggregate pending, due, leased, and dead counts. Issue-alert evaluation still
+enters a bounded background pool before enqueue; an event ingest HTTP 200
+alone does not prove an automation notice exists.
+
+For a failed scheduled check-in, HTTP 200 means its failed state and a durable
+notice for every enabled channel routed to that project committed in one
+transaction. The first check-in in a failure episode creates pending notices;
+repeated error pings preserve their existing delivery outcomes. A queue failure
+returns retryable HTTP 503 and rolls the failed state back. If no channel is
+routed, the failed state commits without a notice.
+This is an acceptance receipt, not proof that a provider delivered.
+
+`RunMonitorFailureOutbox` must run on every server replica. It claims due
+notices with expiring leases, rechecks current channel enablement and project
+routing before each send, and retries delivery failures with capped backoff.
+Pool saturation leaves the leased notice for another attempt; the per-monitor
+10/minute and per-org 20/minute send limits delay pending notices instead of
+discarding them. A success check-in does not erase an accepted failure notice.
+For a monitor that fails, recovers and fails again before the first notice is
+sent, the newer failure replaces the older pending notice for the same
+monitor/channel; a stale worker cannot mark the new notice delivered. One row
+per monitor/channel bounds storage. This policy reports the latest failure
+episode. An external send followed by a worker crash can be retried, so
+destinations should deduplicate if they require exactly-once effects. Routing
+removal or channel disablement cancels a pending notice. Migration 084 does
+not enqueue historical failed monitors; it applies to new failed check-ins.
+
+During operations, watch `/readyz` or `/api/health` for the bounded
+`monitor_failure_outbox` pending, due, expired-lease, and oldest-due-age
+projection, together with channel `last_error`. A persistent due backlog
+means the server worker, destination, or alert capacity needs attention.
 
 The workspace limits enabled channels to 25 (100 stored). The private
 `/metrics` endpoint records bounded alert-channel attempts and latency by

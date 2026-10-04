@@ -2,11 +2,13 @@
 -- Records a check-in. Creates the monitor on first ping with an unconfigured
 -- interval, otherwise refreshes the last ping. The caller passes the computed
 -- state so a successful ping clears a prior missing or failed state.
-INSERT INTO monitors (id, org_id, project_id, slug, last_ping_at, last_status, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO monitors (id, org_id, project_id, slug, last_ping_at, last_status, state, failed_generation)
+VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $7::text='failed' THEN 1 ELSE 0 END)
 ON CONFLICT (project_id, slug) DO UPDATE
 SET last_ping_at = EXCLUDED.last_ping_at,
     last_status = EXCLUDED.last_status,
+    failed_generation = monitors.failed_generation + CASE
+        WHEN EXCLUDED.state='failed' AND monitors.state<>'failed' THEN 1 ELSE 0 END,
     state = EXCLUDED.state
 RETURNING *;
 

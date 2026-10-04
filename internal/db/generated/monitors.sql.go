@@ -30,7 +30,7 @@ func (q *Queries) CountMonitorsByProject(ctx context.Context, arg CountMonitorsB
 const createMonitor = `-- name: CreateMonitor :one
 INSERT INTO monitors (id, org_id, project_id, slug, name, interval_seconds, grace_seconds)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at
+RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation
 `
 
 type CreateMonitorParams struct {
@@ -67,6 +67,7 @@ func (q *Queries) CreateMonitor(ctx context.Context, arg CreateMonitorParams) (*
 		&i.State,
 		&i.LastAlertAt,
 		&i.CreatedAt,
+		&i.FailedGeneration,
 	)
 	return &i, err
 }
@@ -89,7 +90,7 @@ func (q *Queries) DeleteMonitor(ctx context.Context, arg DeleteMonitorParams) (i
 }
 
 const getMonitorBySlug = `-- name: GetMonitorBySlug :one
-SELECT id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at FROM monitors WHERE project_id = $1 AND org_id = $2 AND slug = $3
+SELECT id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation FROM monitors WHERE project_id = $1 AND org_id = $2 AND slug = $3
 `
 
 type GetMonitorBySlugParams struct {
@@ -114,12 +115,13 @@ func (q *Queries) GetMonitorBySlug(ctx context.Context, arg GetMonitorBySlugPara
 		&i.State,
 		&i.LastAlertAt,
 		&i.CreatedAt,
+		&i.FailedGeneration,
 	)
 	return &i, err
 }
 
 const listDueMonitors = `-- name: ListDueMonitors :many
-SELECT m.id, m.org_id, m.project_id, m.slug, m.name, m.interval_seconds, m.grace_seconds, m.last_ping_at, m.last_status, m.state, m.last_alert_at, m.created_at, p.name AS project_name
+SELECT m.id, m.org_id, m.project_id, m.slug, m.name, m.interval_seconds, m.grace_seconds, m.last_ping_at, m.last_status, m.state, m.last_alert_at, m.created_at, m.failed_generation, p.name AS project_name
 FROM monitors m
 JOIN projects p ON p.id = m.project_id
 WHERE m.interval_seconds > 0
@@ -136,19 +138,20 @@ type ListDueMonitorsParams struct {
 }
 
 type ListDueMonitorsRow struct {
-	ID              string             `json:"id"`
-	OrgID           string             `json:"org_id"`
-	ProjectID       string             `json:"project_id"`
-	Slug            string             `json:"slug"`
-	Name            string             `json:"name"`
-	IntervalSeconds int32              `json:"interval_seconds"`
-	GraceSeconds    int32              `json:"grace_seconds"`
-	LastPingAt      pgtype.Timestamptz `json:"last_ping_at"`
-	LastStatus      string             `json:"last_status"`
-	State           string             `json:"state"`
-	LastAlertAt     pgtype.Timestamptz `json:"last_alert_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	ProjectName     string             `json:"project_name"`
+	ID               string             `json:"id"`
+	OrgID            string             `json:"org_id"`
+	ProjectID        string             `json:"project_id"`
+	Slug             string             `json:"slug"`
+	Name             string             `json:"name"`
+	IntervalSeconds  int32              `json:"interval_seconds"`
+	GraceSeconds     int32              `json:"grace_seconds"`
+	LastPingAt       pgtype.Timestamptz `json:"last_ping_at"`
+	LastStatus       string             `json:"last_status"`
+	State            string             `json:"state"`
+	LastAlertAt      pgtype.Timestamptz `json:"last_alert_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	FailedGeneration int64              `json:"failed_generation"`
+	ProjectName      string             `json:"project_name"`
 }
 
 // ciguard:allow-unscoped global watchdog worker scanning every org's monitors; the claim it drives (TrySetMonitorMissing) filters id AND org_id
@@ -181,6 +184,7 @@ func (q *Queries) ListDueMonitors(ctx context.Context, arg ListDueMonitorsParams
 			&i.State,
 			&i.LastAlertAt,
 			&i.CreatedAt,
+			&i.FailedGeneration,
 			&i.ProjectName,
 		); err != nil {
 			return nil, err
@@ -194,7 +198,7 @@ func (q *Queries) ListDueMonitors(ctx context.Context, arg ListDueMonitorsParams
 }
 
 const listMonitorsByProject = `-- name: ListMonitorsByProject :many
-SELECT id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at FROM monitors WHERE project_id = $1 AND org_id = $2 ORDER BY slug
+SELECT id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation FROM monitors WHERE project_id = $1 AND org_id = $2 ORDER BY slug
 `
 
 type ListMonitorsByProjectParams struct {
@@ -224,6 +228,7 @@ func (q *Queries) ListMonitorsByProject(ctx context.Context, arg ListMonitorsByP
 			&i.State,
 			&i.LastAlertAt,
 			&i.CreatedAt,
+			&i.FailedGeneration,
 		); err != nil {
 			return nil, err
 		}
@@ -302,7 +307,7 @@ const updateMonitorConfig = `-- name: UpdateMonitorConfig :one
 UPDATE monitors
 SET name = $3, interval_seconds = $4, grace_seconds = $5
 WHERE id = $1 AND org_id = $2
-RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at
+RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation
 `
 
 type UpdateMonitorConfigParams struct {
@@ -335,18 +340,21 @@ func (q *Queries) UpdateMonitorConfig(ctx context.Context, arg UpdateMonitorConf
 		&i.State,
 		&i.LastAlertAt,
 		&i.CreatedAt,
+		&i.FailedGeneration,
 	)
 	return &i, err
 }
 
 const upsertMonitorCheckin = `-- name: UpsertMonitorCheckin :one
-INSERT INTO monitors (id, org_id, project_id, slug, last_ping_at, last_status, state)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO monitors (id, org_id, project_id, slug, last_ping_at, last_status, state, failed_generation)
+VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $7::text='failed' THEN 1 ELSE 0 END)
 ON CONFLICT (project_id, slug) DO UPDATE
 SET last_ping_at = EXCLUDED.last_ping_at,
     last_status = EXCLUDED.last_status,
+    failed_generation = monitors.failed_generation + CASE
+        WHEN EXCLUDED.state='failed' AND monitors.state<>'failed' THEN 1 ELSE 0 END,
     state = EXCLUDED.state
-RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at
+RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation
 `
 
 type UpsertMonitorCheckinParams struct {
@@ -386,6 +394,7 @@ func (q *Queries) UpsertMonitorCheckin(ctx context.Context, arg UpsertMonitorChe
 		&i.State,
 		&i.LastAlertAt,
 		&i.CreatedAt,
+		&i.FailedGeneration,
 	)
 	return &i, err
 }

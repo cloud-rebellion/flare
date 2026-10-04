@@ -11,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/bright-interaction/flare/internal/alerts"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
 )
@@ -89,7 +88,8 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 
-	// Prior state drives transition-only failure alerting (see below).
+	// Prior state is used only for the monitor creation cap. The durable
+	// failure-generation claim is made atomically by UpsertMonitorCheckin.
 	priorState := ""
 	if prior, err := s.q.GetMonitorBySlug(r.Context(), generated.GetMonitorBySlugParams{
 		ProjectID: project.ID, OrgID: project.OrgID, Slug: slug,
@@ -134,7 +134,7 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, err := s.q.UpsertMonitorCheckin(r.Context(), generated.UpsertMonitorCheckinParams{
+	params := generated.UpsertMonitorCheckinParams{
 		ID:         id.New(),
 		OrgID:      project.OrgID,
 		ProjectID:  project.ID,
@@ -142,44 +142,33 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		LastPingAt: pgtype.Timestamptz{Time: now, Valid: true},
 		LastStatus: checkStatus,
 		State:      state,
-	}); err != nil {
+	}
+	if state == "failed" {
+		// Resolve only channels routed to this project. A transient routing
+		// load error cannot acknowledge a failed check-in whose alert never
+		// entered the durable queue.
+		channels, err := s.q.ListEnabledChannelsForProject(r.Context(), generated.ListEnabledChannelsForProjectParams{
+			OrgID: project.OrgID, ProjectID: project.ID,
+		})
+		if err != nil {
+			w.Header().Set("Retry-After", "1")
+			writeErr(w, http.StatusServiceUnavailable, "monitor acceptance is temporarily unavailable")
+			return
+		}
+		if len(channels) > 0 {
+			if err := s.recordFailedMonitorCheckin(r.Context(), params, channels); err != nil {
+				slog.Error("failed monitor check-in acceptance failed", "project_id", project.ID, "slug", slug)
+				w.Header().Set("Retry-After", "1")
+				writeErr(w, http.StatusServiceUnavailable, "monitor acceptance is temporarily unavailable")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+	}
+	if _, err := s.q.UpsertMonitorCheckin(r.Context(), params); err != nil {
 		slogError(w, "monitor checkin", err)
 		return
-	}
-
-	// A run that reports failure pages immediately, but only on the ok->failed
-	// transition so a persistently-failing job does not spam an alert per run.
-	// Rate-cap per (org, monitor). The transition test alone is not a cap: the
-	// check-in endpoint is DSN-authed and the caller chooses ?status=, so
-	// alternating ok/error makes every second request a fresh ok->failed
-	// transition, and at the ingest budget that is hundreds of emails a minute
-	// to the org's channels.
-	// Two caps, and both are needed. The per-monitor one stops a single honestly
-	// flapping cron from alerting on every run; the per-ORG one bounds the total
-	// when the slug itself is attacker-chosen, which it is: this endpoint is
-	// DSN-authed and UpsertMonitorCheckin creates the monitor, so an unlimited
-	// number of slugs is reachable with a public key. Checking the per-monitor
-	// limiter FIRST keeps the org budget from being consumed by a monitor that
-	// was going to be suppressed anyway.
-	if state == "failed" && priorState != "failed" &&
-		s.testLimiter.Allow("monitor-failed:"+project.OrgID+":"+slug) &&
-		s.monitorAlertLimiter.Allow("monitor-failed-org:"+project.OrgID) {
-		pid, name, org := project.ID, project.Name, project.OrgID
-		// Bounded like the other ingest-side background work: this runs on the
-		// DSN-authed check-in endpoint, so anyone holding a project's public key
-		// could otherwise loop ok->failed transitions and spawn one unbounded
-		// detached goroutine (plus one outbound alert) per request.
-		s.goBackgroundFor(org, "monitor-failed", 15*time.Second, func(ctx context.Context) {
-			// A monitor belongs to a project, so this respects routing.
-			s.dispatchToProject(ctx, org, pid, alerts.Notification{
-				ProjectID:   pid,
-				ProjectName: name,
-				Title:       "Monitor failed: " + slug,
-				Level:       "warning",
-				Reason:      "Check-in reported failure",
-				URL:         strings.TrimRight(s.cfg.BaseURL, "/") + "/projects/" + pid,
-			})
-		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

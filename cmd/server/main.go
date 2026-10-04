@@ -161,6 +161,9 @@ func run() error {
 	// leases preserve one stored notice across restarts; retries sign the same
 	// body so receivers can deduplicate its verified hash.
 	go srv.RunAutomationOutbox(ctx)
+	// Failed check-ins commit their per-channel notices with monitor state.
+	// Every replica may reclaim expired leases and retry routed destinations.
+	go srv.RunMonitorFailureOutbox(ctx)
 	// Event and alert evaluation now share a commit. Every replica may drain
 	// the fenced queue; a saturated or restarting process cannot discard an
 	// accepted event's issue-alert handoff.

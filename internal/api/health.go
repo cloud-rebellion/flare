@@ -65,19 +65,29 @@ type healthIssueEvaluations struct {
 	CountsCapped         bool   `json:"counts_capped"`
 }
 
+type healthMonitorFailureOutbox struct {
+	State            string `json:"state"` // healthy | degraded | unavailable
+	Pending          int64  `json:"pending"`
+	Due              int64  `json:"due"`
+	ExpiredLeases    int64  `json:"expired_leases"`
+	OldestDueSeconds int64  `json:"oldest_due_seconds"`
+	CountsCapped     bool   `json:"counts_capped"`
+}
+
 type healthResponse struct {
-	Status            string                          `json:"status"`
-	Release           string                          `json:"release"`
-	SourceCommit      string                          `json:"source_commit"`
-	DB                healthDB                        `json:"db"`
-	Analytics         healthAnalytics                 `json:"analytics"`
-	Retention         healthRetention                 `json:"retention"`
-	ConnectorReceipts healthConnectorReceipts         `json:"connector_receipts"`
-	Email             string                          `json:"email"`
-	Workers           map[string]healthWorkerSnapshot `json:"workers"`
-	Queue             healthQueue                     `json:"queue"`
-	AutomationOutbox  healthAutomationOutbox          `json:"automation_outbox"`
-	IssueEvaluations  healthIssueEvaluations          `json:"issue_evaluations"`
+	Status               string                          `json:"status"`
+	Release              string                          `json:"release"`
+	SourceCommit         string                          `json:"source_commit"`
+	DB                   healthDB                        `json:"db"`
+	Analytics            healthAnalytics                 `json:"analytics"`
+	Retention            healthRetention                 `json:"retention"`
+	ConnectorReceipts    healthConnectorReceipts         `json:"connector_receipts"`
+	Email                string                          `json:"email"`
+	Workers              map[string]healthWorkerSnapshot `json:"workers"`
+	Queue                healthQueue                     `json:"queue"`
+	AutomationOutbox     healthAutomationOutbox          `json:"automation_outbox"`
+	IssueEvaluations     healthIssueEvaluations          `json:"issue_evaluations"`
+	MonitorFailureOutbox healthMonitorFailureOutbox      `json:"monitor_failure_outbox"`
 }
 
 // workerSnapshot reports the current occupancy of a bounded pool. A nil
@@ -221,6 +231,27 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("issue evaluation health query failed", "error", err)
 		}
 	}
+	monitorFailureHealth := healthMonitorFailureOutbox{State: "unavailable"}
+	if db.Healthy {
+		if snapshot, err := s.monitorFailureOutboxHealth(ctx); err == nil {
+			monitorFailureHealth = healthMonitorFailureOutbox{
+				State: "healthy", Pending: snapshot.Pending, Due: snapshot.Due,
+				ExpiredLeases:    snapshot.ExpiredLeases,
+				OldestDueSeconds: snapshot.OldestDueSeconds, CountsCapped: snapshot.CountsCapped,
+			}
+			if snapshot.Due > 100 || snapshot.ExpiredLeases > 0 || snapshot.OldestDueSeconds > 300 {
+				monitorFailureHealth.State = "degraded"
+				if status == "ok" {
+					status = "degraded"
+				}
+			}
+		} else {
+			if status == "ok" {
+				status = "degraded"
+			}
+			slog.Warn("monitor failure outbox health query failed", "error", err)
+		}
+	}
 
 	workers := map[string]healthWorkerSnapshot{
 		"default":     workerSnapshot(s.bgPool("default")),
@@ -257,8 +288,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			Durable:    false,
 			DropOnFull: true,
 		},
-		AutomationOutbox: queueHealth,
-		IssueEvaluations: issueHealth,
+		AutomationOutbox:     queueHealth,
+		IssueEvaluations:     issueHealth,
+		MonitorFailureOutbox: monitorFailureHealth,
 	}
 	writeJSON(w, code, resp)
 }
