@@ -146,8 +146,24 @@ GITLEAKS_VERSION="v8.30.0"
 GOVULNCHECK_VERSION="v1.1.4"
 sqlc_check() {
   local bin rc out
-  bin="$(tool sqlc "github.com/sqlc-dev/sqlc/cmd/sqlc@$SQLC_VERSION")"; rc=$?
-  [ $rc -eq 0 ] || { [ $rc -eq 99 ] && echo "not run: FLARE_CI_SKIP_TOOLS=1"; return $rc; }
+  bin="$(command -v sqlc 2>/dev/null || true)"
+  if [ -z "$bin" ] || [ "$("$bin" version 2>/dev/null)" != "$SQLC_VERSION" ]; then
+    bin="$(go env GOPATH)/bin/sqlc"
+    if [ ! -x "$bin" ] || [ "$("$bin" version 2>/dev/null)" != "$SQLC_VERSION" ]; then
+      if [ "${FLARE_CI_SKIP_TOOLS:-0}" = "1" ]; then
+        echo "not run: FLARE_CI_SKIP_TOOLS=1"
+        return 99
+      fi
+      go install "github.com/sqlc-dev/sqlc/cmd/sqlc@$SQLC_VERSION" >/dev/null 2>&1 || {
+        echo "could not install pinned sqlc $SQLC_VERSION" >&2
+        return 1
+      }
+      [ -x "$bin" ] && [ "$("$bin" version 2>/dev/null)" = "$SQLC_VERSION" ] || {
+        echo "installed sqlc does not match $SQLC_VERSION" >&2
+        return 1
+      }
+    fi
+  fi
   out="$("$bin" diff 2>&1)"; rc=$?
   if [ $rc -ne 0 ]; then
     printf '%s\n' "$out" >&2
