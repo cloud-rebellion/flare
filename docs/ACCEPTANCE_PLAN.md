@@ -156,8 +156,13 @@ consent, account probe, and alert remain unverified. Legacy installations still
 require an admin to bind them. The connector sync watchdog now detects a bound
 active installation whose first sync never ran, after its rule-window grace;
 the project/provider/tenant and paused/revoked exclusions passed a disposable
-PostgreSQL 16 regression. An enabled scheduler and live HubSpot pass are still
-needed to prove that this alert can fire in production.
+PostgreSQL 16 regression. A rejected HubSpot refresh grant now yields a
+payload-free, project-bound `auth_expired` check receipt and worker result;
+the on-demand handler regression proved that a matching alert fires and that
+foreign tenants cannot check the installation. A failed receipt write remains
+visible, and token-store infrastructure errors do not impersonate the provider.
+An enabled scheduler, real HubSpot consent, and a live failed-grant pass are
+still needed to prove those alerts in production.
 
 The BrightCRM native metric pilot separates accepted metric batches from
 maintenance check-ins, so a healthy check-in cannot mask a stalled metric
