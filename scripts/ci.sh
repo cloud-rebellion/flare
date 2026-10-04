@@ -162,7 +162,7 @@ sqlc_check() {
 # with flare/VERSION and Chart.yaml, and keep the deployment template wired to
 # pass that value through FLARE_RELEASE. Without this check a healthy pod can
 # report a stale release while its image tag points at a different build.
-helm_release_identity_check() {
+release_identity_check() {
   local release
   [ -f VERSION ] || { echo "VERSION is missing" >&2; return 1; }
   release="$(tr -d '[:space:]' < VERSION)"
@@ -377,7 +377,7 @@ step "test (RUN, not just compile)"           go test ./... -count=1 -timeout=60
 step "gofmt"                                  fmt_check
 step "goose migrations"                       migrations_check
 step "sqlc generated code is current"         sqlc_check
-step "Helm release identity"                  helm_release_identity_check
+step "Release identity"                       release_identity_check
 step "frontend deps (frozen lockfile)"        bun_step bun install --frozen-lockfile
 step "frontend typecheck (svelte-check)"      bun_step bun run check
 step "frontend build (what the binary embeds)" bun_step bun run build
