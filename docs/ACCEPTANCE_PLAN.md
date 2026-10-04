@@ -71,13 +71,23 @@ networkless regression fixture. That fixture checks the restore procedure; it
 does not prove a Flare boot or secret decryption from a real restored snapshot.
 
 The ten first-party browser bridges are source-wired, but public bundle
-sampling did not prove an active Flare DSN or event receipt. Their app builds
+sampling did not prove an active Flare DSN or event receipt. Most app builds
 also lack a demonstrated private-map artifact and most Compose releases still
 default to `development`; each app needs exact build-time release injection,
 private map delivery, and an event and bundled-frame resolution canary on its
-own product branch. Choose the first pilot from the currently operated app
-inventory; Bright Hub (`portal`) was previously marked discarded and must be
-revalidated before any rollout. A
+own product branch. BrightCRM candidate `0b0b8ff3b` and Atomicsite candidate
+`cbf83bf06` now prove in configured local builds that a synthetic DSN and full
+source SHA reach the shipped JavaScript, while 233 and 182 JavaScript maps,
+respectively, stay private. The initial configured builds exposed a real Vite
+env-prefix bug that silently disabled both bridges; the corrected manifest
+builds fail if configured telemetry values are absent from compiled JavaScript.
+Stage candidate `144462194` binds both pilot builds to the checked-out commit
+and provisioned Flare project before image build. Private map extraction,
+matching final-image proof, authenticated upload, and live event/frame canaries
+remain open. Current host checks found both app containers healthy and their
+public `/login` routes returning 200; Atomicsite is the narrower first pilot,
+subject to the release gates. Bright Hub (`portal`) was previously marked
+discarded and must be revalidated before any rollout. A
 Flutter starter has framework, zone, platform, HTTP, frame, and metric hooks,
 but no production Flutter app repository or Dart/Flutter build has been
 selected. Backend DSNs and provider connections still need deployed
@@ -105,8 +115,9 @@ servers and a BrightCRM process restart before delivery still need separate
 failure handling. Native symbol upload acceptance does not itself prove frame
 resolution.
 
-The public Flare `/metrics` probe currently returns the SPA shell at the live
-hostname, so a successful HTTP status is not a scrape. Stage's public
+The public Flare `/metrics` probe and `/readyz` currently return the SPA shell
+at the live hostname, so a successful HTTP status is not a scrape or readiness
+proof. Stage's public
 synthetic verifies the shell, immutable assets, readiness, and release
 identity. Its new opt-in Chromium mode also exercises the anonymous login
 form and emits a distinct version 3 browser receipt; the runtime could not be
