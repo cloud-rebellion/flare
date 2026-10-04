@@ -424,11 +424,14 @@ exact embedded value; for Flare's Docker build it includes `+g<commit>` when
 moves every `.map` outside its public `build/` directory to
 `/app/frontend/source-maps/`. The frontend stage also writes
 `/app/frontend/build-manifest.json` with SHA-256 hashes of the public files and
-private maps. The final runtime image carries only that small manifest and
+private maps. Manifest version 2 also hashes the build-time browser DSN's
+public ingest key and project ID, without storing the DSN. The final runtime image carries only that small manifest and
 the embedded public `build/` files; map bytes stay out of it. Stage's optional
 Flare source-map upload gate compares the running image manifest with a
 separately extracted frontend target and verifies every file hash before it
-uploads. The gate requires a Flare-program member secret and project ID in the
+uploads. It checks the authenticated project's DSN against the immutable
+browser DSN binding before the first map upload. An unset browser DSN leaves
+the binding empty and cannot pass the opt-in upload gate. The gate requires a Flare-program member secret and project ID in the
 privileged Stage runner and is disabled by default. An app building outside
 Docker can run
 `bun run build --sourcemap hidden && bun scripts/stage-source-maps.mjs` from

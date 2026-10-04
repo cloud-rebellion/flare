@@ -23,7 +23,28 @@ async function hashes(root) {
   return Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
 }
 
-export async function writeBuildManifest(publicRoot, privateRoot, output) {
+// The browser DSN is injected into the compiled frontend by this same build.
+// Bind its project and public ingest key to the image without retaining the
+// DSN itself in the runtime manifest. Stage compares this digest with an
+// authenticated project read before uploading private source maps.
+export function browserDsnBinding(dsn) {
+  if (!dsn?.trim()) return '';
+  let url;
+  try {
+    url = new URL(dsn.trim());
+  } catch {
+    throw new Error('invalid browser DSN build input');
+  }
+  const projectID = url.pathname.replace(/\/+$/, '').split('/').at(-1);
+  if (!['http:', 'https:'].includes(url.protocol) || !url.host || url.password ||
+      url.search || url.hash || !/^[A-Za-z0-9_-]{1,64}$/.test(url.username) ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(projectID ?? '')) {
+    throw new Error('invalid browser DSN build input');
+  }
+  return createHash('sha256').update(`flare-browser-dsn-v1\n${url.username}\n${projectID}`).digest('hex');
+}
+
+export async function writeBuildManifest(publicRoot, privateRoot, output, browserDSN = process.env.PUBLIC_FLARE_DSN ?? '') {
   const publicDir = resolve(publicRoot);
   const privateDir = resolve(privateRoot);
   const outputFile = resolve(output);
@@ -41,7 +62,12 @@ export async function writeBuildManifest(publicRoot, privateRoot, output) {
       throw new Error('each source map must match a public file');
     }
   }
-  const manifest = { version: 1, public_files: publicFiles, source_maps: sourceMaps };
+  const manifest = {
+    version: 2,
+    public_files: publicFiles,
+    source_maps: sourceMaps,
+    browser_dsn_binding_sha256: browserDsnBinding(browserDSN)
+  };
   await writeFile(outputFile, `${JSON.stringify(manifest)}\n`, { flag: 'w', mode: 0o600 });
   return manifest;
 }
