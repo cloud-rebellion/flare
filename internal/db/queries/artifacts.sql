@@ -3,10 +3,10 @@ INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (project_id, release, name) DO UPDATE
   SET content = EXCLUDED.content, parse_status = EXCLUDED.parse_status, created_at = now()
-RETURNING id, project_id, org_id, release, name, length(content) AS size, parse_status, created_at;
+RETURNING id, project_id, org_id, release, name, octet_length(content) AS size, parse_status, created_at;
 
 -- name: ListSourceMapsByProject :many
-SELECT id, release, name, length(content) AS size, parse_status, created_at
+SELECT id, release, name, octet_length(content) AS size, parse_status, created_at
 FROM source_map_artifacts
 WHERE project_id = $1 AND org_id = $2
 ORDER BY release DESC, name ASC;
@@ -40,5 +40,5 @@ DELETE FROM source_map_artifacts WHERE id = $1 AND project_id = $2 AND org_id = 
 
 -- name: CountSourceMapsByProject :one
 -- Row count and total bytes for a project's source maps, for the upload quota.
-SELECT count(*)::bigint AS artifacts, coalesce(sum(length(content)), 0)::bigint AS bytes
+SELECT count(*)::bigint AS artifacts, coalesce(sum(octet_length(content)), 0)::bigint AS bytes
 FROM source_map_artifacts WHERE project_id = $1 AND org_id = $2;

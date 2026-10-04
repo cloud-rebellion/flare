@@ -12,7 +12,7 @@ import (
 )
 
 const countSourceMapsByProject = `-- name: CountSourceMapsByProject :one
-SELECT count(*)::bigint AS artifacts, coalesce(sum(length(content)), 0)::bigint AS bytes
+SELECT count(*)::bigint AS artifacts, coalesce(sum(octet_length(content)), 0)::bigint AS bytes
 FROM source_map_artifacts WHERE project_id = $1 AND org_id = $2
 `
 
@@ -115,7 +115,7 @@ func (q *Queries) GetSourceMapsForRelease(ctx context.Context, arg GetSourceMaps
 }
 
 const listSourceMapsByProject = `-- name: ListSourceMapsByProject :many
-SELECT id, release, name, length(content) AS size, parse_status, created_at
+SELECT id, release, name, octet_length(content) AS size, parse_status, created_at
 FROM source_map_artifacts
 WHERE project_id = $1 AND org_id = $2
 ORDER BY release DESC, name ASC
@@ -130,7 +130,7 @@ type ListSourceMapsByProjectRow struct {
 	ID          string             `json:"id"`
 	Release     string             `json:"release"`
 	Name        string             `json:"name"`
-	Size        float64            `json:"size"`
+	Size        int32              `json:"size"`
 	ParseStatus string             `json:"parse_status"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
@@ -167,7 +167,7 @@ INSERT INTO source_map_artifacts (id, project_id, org_id, release, name, content
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (project_id, release, name) DO UPDATE
   SET content = EXCLUDED.content, parse_status = EXCLUDED.parse_status, created_at = now()
-RETURNING id, project_id, org_id, release, name, length(content) AS size, parse_status, created_at
+RETURNING id, project_id, org_id, release, name, octet_length(content) AS size, parse_status, created_at
 `
 
 type UpsertSourceMapParams struct {
@@ -186,7 +186,7 @@ type UpsertSourceMapRow struct {
 	OrgID       string             `json:"org_id"`
 	Release     string             `json:"release"`
 	Name        string             `json:"name"`
-	Size        float64            `json:"size"`
+	Size        int32              `json:"size"`
 	ParseStatus string             `json:"parse_status"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
