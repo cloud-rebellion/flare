@@ -67,9 +67,12 @@ browser DSN origin and exact browser release. Focused manifest tests and a
 configured build passed.
 A fixed handled dashboard canary is in a real immutable chunk; its local
 hidden map resolves the generated error to `src/lib/flare-client.ts:362`.
-Nine focused browser-client tests and the frontend type check passed. Four
-older example RUM route-scrubbing assertions still fail unchanged against
-the pre-canary source and need a separate correction before a full green suite.
+Nine focused browser-client tests and the frontend type check passed. The
+four older example RUM route-scrubbing assertions were then corrected for the
+fixed route-word allowlist: opaque segments and emails become `:id`, while
+`orders`, `events`, and `stream` remain fixed route labels. The focused example
+and dashboard suites now pass 14 tests; frontend type check also passes. A
+configured hidden-map rebuild reconfirmed the canary mapping to line 362.
 Stage's disabled-by-default Flare map gate now requires the origin and browser
 release to match the authenticated project and running image. It compares the
 content-addressed final-image manifest with the live container, probes the

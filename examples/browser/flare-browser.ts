@@ -86,11 +86,11 @@ const safeRouteSegments = new Set([
 	'_app', 'accept-invite', 'account', 'accounts', 'admin', 'alerts', 'api', 'app',
 	'assets', 'auth', 'build', 'business-health', 'callbacks', 'chunks', 'connectors',
 	'contacts', 'contracts', 'customers', 'dashboards', 'deals', 'docs', 'documents',
-	'dsn', 'entry', 'files', 'forgot-password', 'immutable', 'integrations', 'issues',
+	'dsn', 'entry', 'events', 'files', 'forgot-password', 'immutable', 'integrations', 'issues',
 	'jobs', 'login', 'logout', 'logs', 'members', 'metrics', 'monitors', 'nodes',
-	'overview', 'pipelines', 'profile', 'projects', 'public', 'register', 'releases',
-	'reset-password', 'runs', 'search', 'settings', 'sign', 'spans', 'static', 'tasks',
-	'teams', 'traces', 'users', 'verify', 'webhooks', 'workflows'
+	'orders', 'overview', 'pipelines', 'profile', 'projects', 'public', 'register', 'releases',
+	'reset-password', 'runs', 'search', 'settings', 'sign', 'spans', 'static', 'stream',
+	'tasks', 'teams', 'traces', 'users', 'verify', 'webhooks', 'workflows'
 ]);
 
 /** Return a bounded route template without arbitrary path segments. */

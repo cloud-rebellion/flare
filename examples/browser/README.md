@@ -51,9 +51,10 @@ origin. Set `captureXHR: false` to leave the XHR prototype untouched. Set
 `captureRealtime: true` to observe allow-listed WebSocket and EventSource
 construction, open latency, runtime errors, and abnormal closes; the wrapper
 is removed by the cleanup function. Realtime URLs use the same route filter and
-the `transport`/`state` labels are fixed enums. Routes are scrubbed to remove
-query strings, emails, and identifier-shaped path segments; only method,
-status class, transport, state, and the scrubbed route are retained. Request
+the `transport`/`state` labels are fixed enums. Routes retain only fixed,
+allow-listed path words; all other segments become `:id`, including emails,
+opaque customer slugs, and malformed escapes. Query strings are dropped. Only
+method, status class, transport, state, and the scrubbed route are retained. Request
 bodies, headers, user identifiers, and response bodies are never sent. Sampling
 and a per-minute point cap apply before transport. Web Vitals are flushed when
 the page is hidden or unloaded.

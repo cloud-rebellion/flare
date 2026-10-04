@@ -16,10 +16,12 @@ describe('Flare browser RUM metric contract', () => {
 			'/users/alice%40example.com%ZZ/orders/42'
 		]) {
 			const scrubbed = scrubFlareBrowserPath(raw);
-			expect(scrubbed).toBe(raw.includes('%ZZ') ? '/users/[REDACTED_EMAIL]%ZZ/orders/:id' : '/users/[REDACTED_EMAIL]/orders/:id');
+			expect(scrubbed).toBe('/users/:id/orders/:id');
 			expect(scrubbed).not.toContain('alice');
 			expect(scrubbed).not.toContain('example.com');
+			expect(scrubbed).not.toContain('%ZZ');
 		}
+		expect(scrubFlareBrowserPath('/api/orders/opaqueCustomerSlug')).toBe('/api/orders/:id');
 	});
 
 	test('allows only stable names and scrubs request labels', () => {
@@ -40,7 +42,7 @@ describe('Flare browser RUM metric contract', () => {
 			name: FLARE_RUM_METRICS.requestLatencyMs,
 			kind: 'gauge',
 			value: 123.4,
-			labels: { environment: 'production', release: 'web@abc123', method: 'GET', route: '/accounts/:id/orders/:id/[REDACTED_EMAIL]', status_class: '5xx' },
+			labels: { environment: 'production', release: 'web@abc123', method: 'GET', route: '/accounts/:id/orders/:id/:id', status_class: '5xx' },
 			timestamp: '2026-10-02T12:00:00.000Z'
 		});
 		expect(JSON.stringify(point)).not.toContain('person@example.com');
@@ -199,7 +201,7 @@ describe('Flare browser RUM request bridge', () => {
 			]);
 			expect(points[0].labels).toEqual({ method: 'POST', route: '/api/orders/:id', status_class: '5xx', transport: 'xhr' });
 			expect(points[2].labels).toEqual({ transport: 'websocket', route: '/api/stream', state: 'opening' });
-			expect(points[3].labels).toEqual({ transport: 'eventsource', route: '/api/events/[REDACTED_EMAIL]', state: 'opening' });
+			expect(points[3].labels).toEqual({ transport: 'eventsource', route: '/api/events/:id', state: 'opening' });
 			expect(JSON.stringify(points)).not.toContain('secret');
 			expect(JSON.stringify(points)).not.toContain('alice');
 			expect((fakeWindow.XMLHttpRequest as unknown) === FakeXHR).toBe(true);

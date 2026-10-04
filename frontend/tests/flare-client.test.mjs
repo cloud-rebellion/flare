@@ -13,6 +13,9 @@ test('browser paths retain route shape without arbitrary tokens', () => {
 	expect(scrubFlareBrowserPath('/sign/opaque%2FInviteToken')).toBe('/sign/:id/:id');
 	expect(scrubFlareBrowserPath('/users/alice%40example.com')).toBe('/users/:id');
 	expect(scrubFlareBrowserPath('/api/projects/customer-name/issues/12345')).toBe('/api/projects/:id/issues/:id');
+	expect(scrubFlareBrowserPath('/api/orders/opaqueCustomerSlug')).toBe('/api/orders/:id');
+	expect(scrubFlareBrowserPath('/api/events/alice%40example.com')).toBe('/api/events/:id');
+	expect(scrubFlareBrowserPath('/api/stream/customer%ZZ')).toBe('/api/stream/:id');
 	expect(scrubFlareBrowserPath('/_app/immutable/chunks/app.BhOPzaDi.js')).toBe('/_app/immutable/chunks/:id');
 });
 
