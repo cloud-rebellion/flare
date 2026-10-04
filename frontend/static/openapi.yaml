@@ -291,6 +291,7 @@ components:
         connector_channel: { type: string }
         connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
         connector_connection_id: { type: string, maxLength: 128, description: "Optional registered connector installation selector; tenant checked and provider must match." }
+        connector_source_kind: { type: string, enum: [server_observed, client_reported], description: "Required provenance selector for connector error, quota and freshness rules; defaults to server_observed. Client reports cannot select a registered connection." }
         connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
         connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
         release_version: { type: string }
@@ -508,7 +509,8 @@ paths:
       description: >
         DSN-authenticated, payload-free health receipt for a SaaS or app
         connector. Flare supplies tenant/project scope and timestamps and
-        acknowledges only after the connector attempt is stored.
+        acknowledges only after the connector attempt is stored. The result is
+        client_reported and cannot claim a registered provider connection.
       security: [{ flareKey: [] }, { sentryKey: [] }]
       parameters:
         - { name: projectID, in: path, required: true, schema: { type: string } }
@@ -522,7 +524,6 @@ paths:
               additionalProperties: false
               properties:
                 provider: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
-                connection_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$', description: "Optional registered connector installation ID; must belong to the authenticated workspace and match provider." }
                 operation: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
                 channel: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
                 outcome: { type: string, enum: [ok, error] }
@@ -868,6 +869,7 @@ paths:
       parameters:
         - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { name: source_kind, in: query, schema: { type: string, enum: [server_observed, client_reported, legacy_unknown], default: server_observed } }
       responses:
         "200":
           description: Bounded provider and operation aggregates
@@ -878,6 +880,7 @@ paths:
                 items:
                   type: object
                   properties:
+                    source_kind: { type: string, enum: [server_observed, client_reported, legacy_unknown] }
                     connection_id: { type: string, maxLength: 128, description: "Opaque registered installation ID; empty/omitted for legacy or external DSN receipts." }
                     provider: { type: string }
                     operation: { type: string }
@@ -937,6 +940,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { name: source_kind, in: query, schema: { type: string, enum: [server_observed, client_reported, legacy_unknown], default: server_observed } }
       responses:
         "200": { description: "Bounded connector aggregates scoped to the project" }
         "404": { description: Project not found }
@@ -1072,6 +1076,7 @@ paths:
       parameters:
         - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { name: source_kind, in: query, schema: { type: string, enum: [server_observed, client_reported, legacy_unknown], default: server_observed } }
       responses:
         "200":
           description: Bounded latest quota, retry-after, and sync-lag aggregates
@@ -1082,6 +1087,7 @@ paths:
                 items:
                   type: object
                   properties:
+                    source_kind: { type: string, enum: [server_observed, client_reported, legacy_unknown] }
                     connection_id: { type: string, description: "Opaque registered installation ID; omitted for legacy external receipts" }
                     provider: { type: string }
                     operation: { type: string }
@@ -1106,6 +1112,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+        - { name: source_kind, in: query, schema: { type: string, enum: [server_observed, client_reported, legacy_unknown], default: server_observed } }
       responses:
         "200":
           description: Bounded project latest quota, retry-after, and sync-lag aggregates
@@ -1116,6 +1123,7 @@ paths:
                 items:
                   type: object
                   properties:
+                    source_kind: { type: string, enum: [server_observed, client_reported, legacy_unknown] }
                     connection_id: { type: string, description: "Opaque registered installation ID; omitted for legacy external receipts" }
                     provider: { type: string }
                     operation: { type: string }
@@ -1345,6 +1353,7 @@ paths:
                 connector_channel: { type: string, maxLength: 32 }
                 connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
                 connector_connection_id: { type: string, maxLength: 128, description: "Optional registered connector installation selector; tenant checked and provider must match." }
+                connector_source_kind: { type: string, enum: [server_observed, client_reported], description: "Provenance selector for connector error, quota and freshness rules; defaults to server_observed. Client reports cannot select a registered connection." }
                 connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
                 connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
                 release_version: { type: string, maxLength: 128 }

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
@@ -59,9 +58,9 @@ type connectorAttemptResponse struct {
 }
 
 // handleConnectorAttempt accepts one payload-free connector outcome from an
-// external app. The project DSN authenticates the request; the server derives
-// both timestamps and tenant/project scope, then writes the durable attempt
-// before acknowledging it.
+// external app. The project DSN authenticates the request; it cannot claim an
+// org-owned provider installation or a server-observed provider result. The
+// server derives timestamps, tenant/project scope, and client provenance.
 func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) {
 	var outcome ingestOutcome
 	var receipt *ingestReceipt
@@ -92,30 +91,11 @@ func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	connectionID := pgtype.Text{}
 	if normalized.ConnectionID != "" {
-		connection, connectionErr := s.q.GetConnectorConnectionByID(r.Context(), generated.GetConnectorConnectionByIDParams{
-			ID: normalized.ConnectionID, OrgID: project.OrgID,
-		})
-		if errors.Is(connectionErr, pgx.ErrNoRows) {
-			outcome.invalid = 1
-			receiptStatus = http.StatusBadRequest
-			writeErr(w, http.StatusBadRequest, "connection_id is not registered in this workspace")
-			return
-		}
-		if connectionErr != nil {
-			outcome.failed = 1
-			receiptStatus = http.StatusServiceUnavailable
-			slogError(w, "resolve connector connection", connectionErr)
-			return
-		}
-		if !strings.EqualFold(connection.Provider, normalized.Provider) {
-			outcome.invalid = 1
-			receiptStatus = http.StatusBadRequest
-			writeErr(w, http.StatusBadRequest, "connection_id provider does not match provider")
-			return
-		}
-		connectionID = pgtype.Text{String: normalized.ConnectionID, Valid: true}
+		outcome.invalid = 1
+		receiptStatus = http.StatusBadRequest
+		writeErr(w, http.StatusBadRequest, "connection_id requires a server-side connector adapter")
+		return
 	}
 	receipt = s.requireIngestReceipt(r.Context(), w, r, project, "connectors", "native", &outcome, &requestOutcome, &receiptStatus)
 	if receipt == nil {
@@ -128,7 +108,7 @@ func (s *Server) handleConnectorAttempt(w http.ResponseWriter, r *http.Request) 
 		ID:             id.New(),
 		OrgID:          project.OrgID,
 		ProjectID:      pgtype.Text{String: project.ID, Valid: true},
-		ConnectionID:   connectionID,
+		SourceKind:     "client_reported",
 		Provider:       normalized.Provider,
 		Operation:      normalized.Operation,
 		Channel:        normalized.Channel,

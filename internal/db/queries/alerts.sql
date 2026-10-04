@@ -2,10 +2,10 @@
 INSERT INTO alert_rules (
     id, project_id, org_id, name, type, threshold, window_minutes, enabled,
     metric_name, comparison, threshold_value, span_name, percentile,
-    connector_provider, connector_operation, connector_channel, connector_error_code, connector_connection_id, connector_sync_mode, release_version, service_name, log_severity,
+    connector_provider, connector_operation, connector_channel, connector_error_code, connector_connection_id, connector_source_kind, connector_sync_mode, release_version, service_name, log_severity,
     connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, ai_triage_mode, metric_labels, business_check_name
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
 RETURNING *;
 
 -- name: ListAlertRulesByProject :many

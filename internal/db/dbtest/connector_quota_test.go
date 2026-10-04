@@ -21,7 +21,8 @@ func TestConnectorQuotaStatsAreTenantProjectScopedAndLatest(t *testing.T) {
 		t.Helper()
 		if err := q.InsertConnectorAttempt(ctx, generated.InsertConnectorAttemptParams{
 			ID: id.New(), OrgID: org, ProjectID: pgtype.Text{String: project, Valid: true},
-			Provider: "hubspot", Operation: "contacts.list", Channel: "http", Outcome: "ok",
+			SourceKind: "server_observed",
+			Provider:   "hubspot", Operation: "contacts.list", Channel: "http", Outcome: "ok",
 			StatusClass: "2xx", ElapsedMs: 20,
 			QuotaRemaining: pgtype.Int8{Int64: quota, Valid: true},
 			SyncLagMs:      pgtype.Int8{Int64: 1000 + quota, Valid: true},
@@ -37,7 +38,8 @@ func TestConnectorQuotaStatsAreTenantProjectScopedAndLatest(t *testing.T) {
 
 	arg := generated.GetConnectorQuotaStatsParams{
 		Metric: "quota_remaining", ProjectID: projectA, OrgID: orgA,
-		Provider: "hubspot", Operation: "contacts.list", Channel: "http",
+		SourceKind: "server_observed",
+		Provider:   "hubspot", Operation: "contacts.list", Channel: "http",
 		CompletedAt: pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
 	}
 	got, err := q.GetConnectorQuotaStats(ctx, arg)

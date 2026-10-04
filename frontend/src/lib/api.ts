@@ -25,6 +25,7 @@ import type {
   CreateConnectorConnectionInput,
   UpdateConnectorConnectionInput,
   ConnectorQuotaHealth,
+  ConnectorSourceKind,
   ConnectorSyncHealth,
   Issue,
   IssueEvent,
@@ -249,10 +250,10 @@ export const api = {
     req<ClientHealth[]>('GET', `/projects/${pid}/client-health?hours=${hours}&limit=${limit}`),
   connectorSyncHealth: (limit = 100) =>
     req<ConnectorSyncHealth[]>('GET', `/connector-sync-health?limit=${limit}`),
-  connectorQuotaHealth: (hours = 24, limit = 100) =>
-    req<ConnectorQuotaHealth[]>('GET', `/connector-quota-health?hours=${hours}&limit=${limit}`),
-  projectConnectorQuotaHealth: (pid: string, hours = 24, limit = 100) =>
-    req<ConnectorQuotaHealth[]>('GET', `/projects/${pid}/connector-quota-health?hours=${hours}&limit=${limit}`),
+  connectorQuotaHealth: (hours = 24, limit = 100, source: ConnectorSourceKind = 'server_observed') =>
+    req<ConnectorQuotaHealth[]>('GET', `/connector-quota-health?hours=${hours}&limit=${limit}&source_kind=${source}`),
+  projectConnectorQuotaHealth: (pid: string, hours = 24, limit = 100, source: ConnectorSourceKind = 'server_observed') =>
+    req<ConnectorQuotaHealth[]>('GET', `/projects/${pid}/connector-quota-health?hours=${hours}&limit=${limit}&source_kind=${source}`),
   connectorConnections: () => req<ConnectorConnection[]>('GET', '/connector-connections'),
   connectorConnection: (id: string) => req<ConnectorConnection>('GET', `/connector-connections/${id}`),
   createConnectorConnection: (input: CreateConnectorConnectionInput) =>

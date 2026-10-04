@@ -13,6 +13,7 @@
     AlertAITriageMode,
     AlertAPIKeyHygieneMode,
     AlertConnectorSyncMode,
+    AlertConnectorSourceKind,
     AlertUsageMeasure,
     AlertUsageSurface,
     Artifact,
@@ -57,6 +58,7 @@
   let ruleConnectorChannel = $state('');
   let ruleConnectorErrorCode = $state('');
   let ruleConnectorConnectionID = $state('');
+  let ruleConnectorSourceKind = $state<AlertConnectorSourceKind>('server_observed');
   let ruleConnectorSyncMode = $state<AlertConnectorSyncMode>('overdue');
   let ruleConnectorQuotaMetric = $state<ConnectorQuotaMetric>('quota_remaining');
   let ruleReleaseVersion = $state('');
@@ -215,19 +217,21 @@
           break;
         case 'connector_error_rate':
           rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_source_kind = ruleConnectorSourceKind;
           rule.connector_operation = ruleConnectorOperation.trim() || undefined;
           rule.connector_channel = ruleConnectorChannel.trim() || undefined;
           rule.connector_error_code = ruleConnectorErrorCode.trim() || undefined;
-          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorSourceKind === 'server_observed' ? ruleConnectorConnectionID.trim() || undefined : undefined;
           rule.comparison = ruleComparison;
           rule.threshold_value = ruleThresholdValue;
           rule.window_minutes = ruleWindow;
           break;
         case 'connector_quota':
           rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_source_kind = ruleConnectorSourceKind;
           rule.connector_operation = ruleConnectorOperation.trim() || undefined;
           rule.connector_channel = ruleConnectorChannel.trim() || undefined;
-          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorSourceKind === 'server_observed' ? ruleConnectorConnectionID.trim() || undefined : undefined;
           rule.connector_quota_metric = ruleConnectorQuotaMetric;
           rule.comparison = ruleComparison;
           rule.threshold_value = ruleThresholdValue;
@@ -235,9 +239,10 @@
           break;
         case 'connector_freshness':
           rule.connector_provider = ruleConnectorProvider.trim();
+          rule.connector_source_kind = ruleConnectorSourceKind;
           rule.connector_operation = ruleConnectorOperation.trim() || undefined;
           rule.connector_channel = ruleConnectorChannel.trim() || undefined;
-          rule.connector_connection_id = ruleConnectorConnectionID.trim() || undefined;
+          rule.connector_connection_id = ruleConnectorSourceKind === 'server_observed' ? ruleConnectorConnectionID.trim() || undefined : undefined;
           rule.window_minutes = ruleWindow;
           break;
         case 'connector_sync_health':
@@ -444,17 +449,17 @@
       const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
       const code = r.connector_error_code ? ` (${r.connector_error_code})` : '';
       const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
-      return `connector: ${selector || 'unknown'}${connection}${code} ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+      return `connector (${r.connector_source_kind || 'server_observed'}): ${selector || 'unknown'}${connection}${code} ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
     }
     if (r.type === 'connector_quota') {
       const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
       const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
-      return `quota: ${selector || 'unknown'}${connection} ${r.connector_quota_metric || 'quota_remaining'} ${r.comparison || 'lte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
+      return `quota (${r.connector_source_kind || 'server_observed'}): ${selector || 'unknown'}${connection} ${r.connector_quota_metric || 'quota_remaining'} ${r.comparison || 'lte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
     }
     if (r.type === 'connector_freshness') {
       const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
       const connection = r.connector_connection_id ? ` [${r.connector_connection_id}]` : '';
-      return `freshness: ${selector || 'unknown'}${connection} every ${r.window_minutes}m`;
+      return `freshness (${r.connector_source_kind || 'server_observed'}): ${selector || 'unknown'}${connection} every ${r.window_minutes}m`;
     }
     if (r.type === 'connector_sync_health') {
       const selector = [r.connector_provider, r.connector_operation].filter(Boolean).join('/');
@@ -701,6 +706,18 @@
               <option value="ingest_acceptance">Ingest acceptance health</option>
             </select>
           </div>
+          {#if ruleType === 'connector_error_rate' || ruleType === 'connector_quota' || ruleType === 'connector_freshness'}
+            <label class="flex flex-col gap-1 text-xs text-zinc-500">
+              Observation source
+              <select
+                bind:value={ruleConnectorSourceKind}
+                class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+              >
+                <option value="server_observed">Flare provider adapter</option>
+                <option value="client_reported">App or DSN sender assertion</option>
+              </select>
+            </label>
+          {/if}
           {#if ruleType === 'spike'}
             <div class="flex items-center gap-2 text-xs text-zinc-500">
               <span>when</span>
@@ -970,16 +987,18 @@
                   class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
                 />
               </label>
-              <label class="flex flex-col gap-1 text-xs text-zinc-500">
-                Connection ID (optional)
-                <input
-                  bind:value={ruleConnectorConnectionID}
-                  maxlength="128"
-                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
-                  placeholder="registered installation id"
-                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
-                />
-              </label>
+              {#if ruleConnectorSourceKind === 'server_observed'}
+                <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                  Connection ID (optional)
+                  <input
+                    bind:value={ruleConnectorConnectionID}
+                    maxlength="128"
+                    pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                    placeholder="registered installation id"
+                    class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                  />
+                </label>
+              {/if}
               <label class="flex items-center gap-2 text-xs text-zinc-500">
                 Error rate
                 <input
@@ -1031,16 +1050,18 @@
                   class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
                 />
               </label>
-              <label class="flex flex-col gap-1 text-xs text-zinc-500">
-                Connection ID (optional)
-                <input
-                  bind:value={ruleConnectorConnectionID}
-                  maxlength="128"
-                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
-                  placeholder="registered installation id"
-                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
-                />
-              </label>
+              {#if ruleConnectorSourceKind === 'server_observed'}
+                <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                  Connection ID (optional)
+                  <input
+                    bind:value={ruleConnectorConnectionID}
+                    maxlength="128"
+                    pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                    placeholder="registered installation id"
+                    class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                  />
+                </label>
+              {/if}
               <label class="flex flex-col gap-1 text-xs text-zinc-500">
                 Provider signal
                 <select
@@ -1114,16 +1135,18 @@
                   class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
                 />
               </label>
-              <label class="flex flex-col gap-1 text-xs text-zinc-500">
-                Connection ID (optional)
-                <input
-                  bind:value={ruleConnectorConnectionID}
-                  maxlength="128"
-                  pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
-                  placeholder="registered installation id"
-                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
-                />
-              </label>
+              {#if ruleConnectorSourceKind === 'server_observed'}
+                <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                  Connection ID (optional)
+                  <input
+                    bind:value={ruleConnectorConnectionID}
+                    maxlength="128"
+                    pattern="[A-Za-z0-9][A-Za-z0-9._:-]*"
+                    placeholder="registered installation id"
+                    class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                  />
+                </label>
+              {/if}
               <label class="flex items-center gap-2 text-xs text-zinc-500">
                 Require a completed attempt every
                 <input

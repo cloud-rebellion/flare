@@ -79,6 +79,7 @@ type AlertRule struct {
 	ConnectorConnectionID        string             `json:"connector_connection_id"`
 	ConnectorSyncMode            string             `json:"connector_sync_mode"`
 	BusinessCheckName            string             `json:"business_check_name"`
+	ConnectorSourceKind          string             `json:"connector_source_kind"`
 }
 
 type ApiKey struct {
@@ -248,6 +249,7 @@ type ConnectorAttempt struct {
 	RetryAfterMs   pgtype.Int8        `json:"retry_after_ms"`
 	SyncLagMs      pgtype.Int8        `json:"sync_lag_ms"`
 	ConnectionID   pgtype.Text        `json:"connection_id"`
+	SourceKind     string             `json:"source_kind"`
 }
 
 type ConnectorConnection struct {

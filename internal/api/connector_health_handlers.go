@@ -12,6 +12,21 @@ import (
 	"github.com/bright-interaction/flare/internal/db/generated"
 )
 
+// A client DSN identifies a project but cannot prove that a provider call was
+// made. Keep its observations separate from Flare's own adapter receipts.
+func connectorSourceKind(r *http.Request) (string, bool) {
+	source := strings.TrimSpace(r.URL.Query().Get("source_kind"))
+	if source == "" {
+		return "server_observed", true
+	}
+	switch source {
+	case "server_observed", "client_reported", "legacy_unknown":
+		return source, true
+	default:
+		return "", false
+	}
+}
+
 const (
 	defaultConnectorHealthHours = 24
 	maxConnectorHealthHours     = 720
@@ -22,6 +37,7 @@ const (
 // connectorHealthResponse is an aggregate projection. It contains no tenant
 // identifiers, URLs, provider response text, credentials, or payloads.
 type connectorHealthResponse struct {
+	SourceKind string `json:"source_kind"`
 	// Empty means the receipt came from a legacy/external DSN bridge without a
 	// registered installation. Non-empty IDs are opaque tenant-owned registry
 	// identifiers and let operators separate two installs of one provider.
@@ -44,10 +60,16 @@ type connectorHealthResponse struct {
 // is retained in the receipt for future project filtering but is not needed to
 // authorize this bounded org aggregate.
 func (s *Server) handleListConnectorHealth(w http.ResponseWriter, r *http.Request) {
+	source, ok := connectorSourceKind(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source_kind must be server_observed, client_reported or legacy_unknown")
+		return
+	}
 	since := time.Now().UTC().Add(-time.Duration(connectorHealthHours(r)) * time.Hour)
 	rows, err := s.q.ListConnectorHealthByOrg(r.Context(), generated.ListConnectorHealthByOrgParams{
 		OrgID:       orgIDFrom(r.Context()),
 		CompletedAt: pgtype.Timestamptz{Time: since, Valid: true},
+		SourceKind:  source,
 		Limit:       int32(connectorHealthLimit(r)),
 	})
 	if err != nil {
@@ -69,6 +91,11 @@ func (s *Server) handleListConnectorHealth(w http.ResponseWriter, r *http.Reques
 // app integrations carry a project id; this route keeps that provenance
 // visible without widening the tenant boundary.
 func (s *Server) handleListProjectConnectorHealth(w http.ResponseWriter, r *http.Request) {
+	source, ok := connectorSourceKind(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source_kind must be server_observed, client_reported or legacy_unknown")
+		return
+	}
 	project, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{
 		ID: chi.URLParam(r, "id"), OrgScope: orgIDFrom(r.Context()),
 	})
@@ -81,6 +108,7 @@ func (s *Server) handleListProjectConnectorHealth(w http.ResponseWriter, r *http
 		ProjectID:   pgtype.Text{String: project.ID, Valid: true},
 		OrgID:       project.OrgID,
 		CompletedAt: pgtype.Timestamptz{Time: since, Valid: true},
+		SourceKind:  source,
 		Limit:       int32(connectorHealthLimit(r)),
 	})
 	if err != nil {
@@ -91,6 +119,7 @@ func (s *Server) handleListProjectConnectorHealth(w http.ResponseWriter, r *http
 	for _, row := range rows {
 		if row != nil {
 			mapped := connectorHealthResponse{
+				SourceKind:      row.SourceKind,
 				ConnectionID:    row.ConnectionID,
 				Provider:        row.Provider,
 				Operation:       row.Operation,
@@ -136,6 +165,7 @@ func connectorHealthLimit(r *http.Request) int {
 
 func toConnectorHealthResponse(row *generated.ListConnectorHealthByOrgRow) connectorHealthResponse {
 	out := connectorHealthResponse{
+		SourceKind:      row.SourceKind,
 		ConnectionID:    row.ConnectionID,
 		Provider:        row.Provider,
 		Operation:       row.Operation,

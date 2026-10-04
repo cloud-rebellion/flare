@@ -7,7 +7,7 @@
 -- Enabled watchdog rules with the project name + org for dispatch.
 SELECT r.id, r.project_id, r.org_id, r.name, r.type, r.threshold, r.window_minutes,
        r.metric_name, r.comparison, r.threshold_value, r.span_name, r.percentile,
-       r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_sync_mode,
+       r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_source_kind, r.connector_sync_mode,
        r.release_version, r.service_name, r.log_severity, r.connector_quota_metric,
        r.usage_surface, r.usage_operation, r.usage_measure,
        r.api_key_hygiene_mode, r.ai_triage_mode, r.metric_labels, r.business_check_name,
@@ -137,6 +137,7 @@ SELECT max(completed_at)::timestamptz AS last_completed_at
 FROM connector_attempts
 WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
   AND org_id = sqlc.arg(org_id)::text
+  AND source_kind = sqlc.arg(source_kind)::text
   AND provider = sqlc.arg(provider)::text
   AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
   AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)
@@ -187,6 +188,7 @@ SELECT count(*)::bigint AS attempts,
 FROM connector_attempts
 WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
   AND org_id = sqlc.arg(org_id)::text
+  AND source_kind = sqlc.arg(source_kind)::text
   AND provider = sqlc.arg(provider)::text
   AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
   AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)

@@ -28,7 +28,8 @@ func TestConnectorAttemptProjectScopeConstraint(t *testing.T) {
 		attemptID := id.New()
 		err := q.InsertConnectorAttempt(ctx, generated.InsertConnectorAttemptParams{
 			ID: attemptID, OrgID: orgA, ProjectID: project,
-			Provider: "github", Operation: "user", Channel: "http", Outcome: "ok",
+			SourceKind: "server_observed",
+			Provider:   "github", Operation: "user", Channel: "http", Outcome: "ok",
 			StatusClass: "2xx", AttemptedAt: now, CompletedAt: now,
 		})
 		return attemptID, err

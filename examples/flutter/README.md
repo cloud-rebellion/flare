@@ -240,10 +240,10 @@ The binding records one first-frame startup duration, aggregates up to 120
 frame timings at a time (`frame.max_ms`, `jank_frames`, and `jank_rate`), and
 records bounded lifecycle state counters. Wrap backend calls with
 `health.trackApi('GET /orders', request)` to emit an API latency metric and a
-payload-free connector attempt. Pass `connectionId: 'backend-prod'` when the
-project has a registered connector installation; Flare checks that opaque ID
-against the authenticated workspace before storing the attempt. The operation
-is reduced to a stable token;
+payload-free connector attempt. Public DSN reports are labeled
+`client_reported` and cannot claim a registered provider installation. A
+server-side provider adapter owns `server_observed` receipts and the
+installation ID. The operation is reduced to a stable token;
 request URLs, response bodies, exception messages, credentials, and user data
 never enter these signals. A failed transport is swallowed so telemetry cannot
 break the app. The sample checks HTTP 200 with `accepted == 1` for its one

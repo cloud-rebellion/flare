@@ -108,7 +108,11 @@ aggregates, and last-attempt timestamps. `hours` is clamped to 1--720 and
 `limit` to 1--100. Receipts retain only organization provenance, optional
 project provenance, outcome, HTTP status class or safe error code, duration,
 and timestamps; URLs, response bodies, credentials, and tenant payloads are
-never stored. Project alert rules can now use `type: "connector_error_rate"`
+never stored. The default `source_kind=server_observed` view includes only
+Flare's own adapter calls. Use `source_kind=client_reported` for DSN sender
+observations or `source_kind=legacy_unknown` to audit historical receipts
+whose origin cannot be proven. These views never mix sources. Project alert
+rules can use `type: "connector_error_rate"`
 with a required `connector_provider`, optional `connector_operation` and
 `connector_channel`, a `comparison` (`gt`, `gte`, `lt`, or `lte`), a decimal
 `threshold_value` from `0` to `1`, and a `window_minutes` value from `1` to
@@ -116,8 +120,12 @@ with a required `connector_provider`, optional `connector_operation` and
 that provider; set `connector_error_code` to a safe token such as
 `auth_expired` to page separately on credential failures. Rules do not fire
 until at least one matching attempt exists. The watchdog aggregates only
-project and organization scoped rows, so one tenant cannot observe or alert on
-another tenant's connector activity.
+project and organization scoped rows of the rule's exact
+`connector_source_kind`, so one tenant cannot observe or alert on another
+tenant's connector activity. New rules default to `server_observed`; set
+`client_reported` explicitly for app-observed calls. Existing connector error,
+quota, and freshness rules are bound to `server_observed` by migration 078;
+review any rule that previously relied on a public DSN sender.
 For an app or service dashboard, use
 `GET /api/projects/{id}/connector-health?hours=24&limit=100` to keep the same
 aggregate scoped to one project. The project route verifies that the caller's
@@ -146,8 +154,9 @@ probes a provider.
 These values are available through
 `GET /api/connector-quota-health?hours=24&limit=100`, which returns the latest
 value and observation time for each provider/operation/channel/installation
-series. Registered installations include an opaque `connection_id`; legacy
-external receipts remain grouped under an empty connection ID.
+series. Registered server-side installations include an opaque `connection_id`;
+new client reports cannot claim one. Historical ambiguous receipts are visible
+only with `source_kind=legacy_unknown`.
 For an app or service dashboard, use
 `GET /api/projects/{id}/connector-quota-health?hours=24&limit=100`; Flare
 verifies that the caller's organization owns the project before returning the
@@ -218,7 +227,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
 | Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | Failed transitions page immediately; the watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors. New slugs are capped and quiet, unconfigured monitors are pruned after 30 days. |
-| External SaaS and app connectors | `POST /api/{projectID}/connector-attempts` with `X-Flare-Key` (or `sentry_key`) | A bridge in any web, Flutter, backend, or vendor app can submit one bounded provider/operation/channel result plus optional registered `connection_id`, `quota_remaining`, `retry_after_ms`, and observed `sync_lag_ms` integers. Flare validates the connection belongs to the authenticated workspace and matches the provider, then stores a payload-free connector attempt and ingest receipt. | `connector_error_rate` and `connector_quota` rules can page on a provider, registered connection, operation, channel, fixed error code (including `auth_expired`), quota, retry delay, or observed sync lag. The request accepts only safe bounded tokens, `ok`/`error`, an HTTP status class or safe error code, elapsed milliseconds, and bounded provider hints; response bodies, URLs, credentials, and user data are rejected by the contract. |
+| External SaaS and app connectors | `POST /api/{projectID}/connector-attempts` with `X-Flare-Key` (or `sentry_key`) | A bridge in any web, Flutter, backend, or vendor app can submit one bounded provider/operation/channel result plus optional `quota_remaining`, `retry_after_ms`, and observed `sync_lag_ms` integers. Flare stores it with `client_reported` provenance and no registered installation ID; it is a caller assertion, not proof that a provider call happened. | `connector_error_rate` and `connector_quota` rules can page on this series only when `connector_source_kind` is explicitly `client_reported`. The request accepts only safe bounded tokens, `ok`/`error`, an HTTP status class or safe error code, elapsed milliseconds, and bounded provider hints; response bodies, URLs, credentials, and user data are rejected by the contract. |
 | Releases and source maps | Authenticated `POST /api/projects/{id}/releases` and `POST /api/projects/{id}/artifacts` | Release version and registry creation time, new-issue count, source-map artifact name and size, symbolication for matching releases, bounded release health via `GET /api/projects/{id}/release-health?hours=24&limit=100`, release freshness via `GET /api/projects/{id}/release-freshness?hours=24&limit=100`, and source-map coverage via `GET /api/projects/{id}/symbolication-health?hours=24&limit=100`. | Release registry is capped at 2,000 versions per project. Source maps are capped at 30 MiB per upload, 2,000 artifacts, and 2 GiB per project. Release, freshness, and symbolication health report aggregate metadata without raw payloads; `release_error_rate` can page on an explicit or latest recent release, while `release_freshness` requires an explicit deployed release and its canonical heartbeat. |
 | Flutter/Dart and native mobile symbols | Authenticated `POST /api/projects/{id}/symbol-artifacts` with a member API key or session | Stores one bounded, release-scoped `dart_symbols`, `proguard`, `breakpad`, `dsym`, or `elf` artifact for Flutter, Android, or iOS. Flare records a SHA-256 digest, size, platform, format, upload receipt, and durable upload-time `validation_status`; list responses never return symbol bytes. | Artifact count is capped at 2,000 and native-symbol storage at 2 GiB per project, with 30 MiB per artifact. Upload acceptance proves durable retention; Flutter container validation is explicit, while format-specific frame rewriting remains pending until its resolver is enabled. |
 | Client/runtime health | Authenticated `GET /api/projects/{id}/client-health?hours=24&limit=100` | Browser, Flutter, mobile, and backend SDK dimensions grouped by platform, environment, and release, with event volume, actionable errors and rate, affected issues, and first/last seen. | The hot-window query is bounded to 1--720 hours and 1--100 groups and returns no event bodies, stacktraces, labels, or tenant IDs. Emit a bounded web-vitals or request metric and use a `metric_threshold` rule when a client performance or availability threshold should page. |
@@ -252,12 +261,17 @@ for browser code when the provider result must remain private:
 curl -X POST "https://flare.example/api/<project-id>/connector-attempts" \
   -H "X-Flare-Key: <project-public-key>" \
   -H "Content-Type: application/json" \
-  -d '{"provider":"hubspot","connection_id":"<registered-connection-id>","operation":"contacts.upsert","channel":"http","outcome":"error","status_class":"5xx","error_code":"provider_error","elapsed_ms":842,"quota_remaining":4,"retry_after_ms":2500,"sync_lag_ms":18000}'
+  -d '{"provider":"hubspot","operation":"contacts.upsert","channel":"http","outcome":"error","status_class":"5xx","error_code":"provider_error","elapsed_ms":842,"quota_remaining":4,"retry_after_ms":2500,"sync_lag_ms":18000}'
 ```
 
 The response is `202` only after the connector attempt is stored. Flare derives
 the attempt timestamps from its receive time and the bounded duration, so a
 client cannot forge an old success or move a receipt into another project.
+The endpoint rejects `connection_id`: only a server-side Flare adapter can bind
+an attempt to a registered provider installation. A DSN holder can still make
+false or duplicate client-reported assertions, so use this series for client
+experience, not provider-attested availability or billing. For a trusted
+business outcome, use the confidential server-side business-check key.
 
 Flare's own outbound adapters (alerts, GitHub, OIDC, and AI) use the same
 payload-free receipt shape. Their authenticated tenant/project scope is carried
@@ -412,9 +426,10 @@ and a `window_minutes` value from `1` to `720`.
 The rule compares the latest matching provider hint and does not fire before a
 hint has been accepted. Query the same payload-free series with
 `GET /api/connector-quota-health?hours=24&limit=100`. Connector error-rate and
-freshness rules accept the same connection selector. Health rows include the
-opaque `connection_id` when a registered installation produced the receipt;
-legacy DSN rows leave it empty. A non-empty selector is tenant-checked and its
+freshness rules accept the same connection selector when
+`connector_source_kind=server_observed`. Health rows include the opaque
+`connection_id` when a server adapter used a registered installation; client
+reports leave it empty. A non-empty selector is tenant-checked and its
 provider must match `connector_provider`, so two HubSpot installations cannot
 silently share an alert series.
 

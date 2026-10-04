@@ -520,6 +520,7 @@ func (s *Server) recordConnectorAttempt(ctx context.Context, a integration.Attem
 		OrgID:          a.Scope.OrgID,
 		ProjectID:      projectID,
 		ConnectionID:   connectionID,
+		SourceKind:     "server_observed",
 		Provider:       a.Provider,
 		Operation:      a.Operation,
 		Channel:        a.Channel,

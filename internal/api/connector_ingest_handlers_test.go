@@ -1,10 +1,35 @@
 package api
 
 import (
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 )
+
+func TestConnectorSourceKindSelection(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  string
+		ok    bool
+	}{
+		{"", "server_observed", true},
+		{"?source_kind=client_reported", "client_reported", true},
+		{"?source_kind=legacy_unknown", "legacy_unknown", true},
+		{"?source_kind=provider_attested", "", false},
+	} {
+		got, ok := connectorSourceKind(httptest.NewRequest("GET", "/api/connector-health"+tc.query, nil))
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("source_kind %q = %q/%v, want %q/%v", tc.query, got, ok, tc.want, tc.ok)
+		}
+	}
+	if _, err := normalizeConnectorSourceKind("client_reported"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeConnectorSourceKind("legacy_unknown"); err == nil {
+		t.Fatal("legacy observations must not be eligible for new alert rules")
+	}
+}
 
 func TestNormalizeConnectorAttemptRequest(t *testing.T) {
 	got, err := normalizeConnectorAttemptRequest(connectorAttemptRequest{

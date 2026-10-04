@@ -93,6 +93,7 @@ export interface BusinessCheckKeyCreated extends BusinessCheckKey {
 }
 
 export interface ConnectorQuotaHealth {
+  source_kind: ConnectorSourceKind;
   connection_id?: string;
   provider: string;
   operation: string;
@@ -382,6 +383,7 @@ export interface AlertRule {
   connector_channel?: string;
   connector_error_code?: string;
   connector_connection_id?: string;
+  connector_source_kind?: AlertConnectorSourceKind;
   connector_sync_mode?: AlertConnectorSyncMode;
   connector_quota_metric?: ConnectorQuotaMetric;
   release_version?: string;
@@ -425,6 +427,8 @@ export type AlertRuleType =
 export type AlertRuleComparison = 'gt' | 'gte' | 'lt' | 'lte';
 export type AlertRuleSeverity = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 export type ConnectorQuotaMetric = 'quota_remaining' | 'retry_after_ms' | 'sync_lag_ms';
+export type ConnectorSourceKind = 'server_observed' | 'client_reported' | 'legacy_unknown';
+export type AlertConnectorSourceKind = 'server_observed' | 'client_reported';
 export type AlertConnectorSyncMode = 'failed' | 'overdue';
 export type AlertUsageSurface = 'dsn' | 'business_key' | 'api_key' | 'mcp';
 export type AlertUsageMeasure = 'requests' | 'errors' | 'denied';
@@ -448,6 +452,7 @@ export interface CreateAlertRuleInput {
   connector_channel?: string;
   connector_error_code?: string;
   connector_connection_id?: string;
+  connector_source_kind?: AlertConnectorSourceKind;
   connector_sync_mode?: AlertConnectorSyncMode;
   connector_quota_metric?: ConnectorQuotaMetric;
   release_version?: string;

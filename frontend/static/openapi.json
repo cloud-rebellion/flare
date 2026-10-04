@@ -1471,6 +1471,27 @@
                     "maxLength": 64,
                     "description": "optional fixed provider error code selector, such as auth_expired"
                   },
+                  "connector_connection_id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "Optional registered connector installation selector; tenant checked and provider must match."
+                  },
+                  "connector_source_kind": {
+                    "type": "string",
+                    "enum": [
+                      "server_observed",
+                      "client_reported"
+                    ],
+                    "description": "Provenance selector for connector error, quota and freshness rules; defaults to server_observed. Client reports cannot select a registered connection."
+                  },
+                  "connector_sync_mode": {
+                    "type": "string",
+                    "enum": [
+                      "failed",
+                      "overdue"
+                    ],
+                    "description": "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases"
+                  },
                   "connector_quota_metric": {
                     "type": "string",
                     "enum": [
@@ -1538,16 +1559,6 @@
                       "stuck"
                     ],
                     "description": "project-scoped payload-free AI receipt mode; failed counts terminal failures and stuck counts started receipts older than the bounded window"
-                  },
-                  "connector_connection_id": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "description": "Optional registered connector installation selector; tenant checked and provider must match."
-                  },
-                  "connector_sync_mode": {
-                    "type": "string",
-                    "enum": ["failed", "overdue"],
-                    "description": "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases"
                   }
                 }
               }
@@ -1945,7 +1956,7 @@
           "Ingest"
         ],
         "summary": "Record one external connector outcome",
-        "description": "DSN-authenticated, payload-free health receipt for a SaaS or app connector. Flare supplies tenant/project scope and timestamps and acknowledges only after the connector attempt is stored.\n",
+        "description": "DSN-authenticated, payload-free health receipt for a SaaS or app connector. Flare supplies tenant/project scope and timestamps and acknowledges only after the connector attempt is stored. The result is client_reported and cannot claim a registered provider connection.\n",
         "security": [
           {
             "flareKey": []
@@ -2028,12 +2039,6 @@
                     "format": "int64",
                     "minimum": 0,
                     "maximum": 604800000
-                  },
-                  "connection_id": {
-                    "type": "string",
-                    "maxLength": 128,
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-                    "description": "Optional registered connector installation ID; must belong to the authenticated workspace and match provider."
                   }
                 }
               }
@@ -2285,6 +2290,19 @@
               "maximum": 100,
               "default": 100
             }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "server_observed",
+                "client_reported",
+                "legacy_unknown"
+              ],
+              "default": "server_observed"
+            }
           }
         ],
         "responses": {
@@ -2297,6 +2315,14 @@
                   "items": {
                     "type": "object",
                     "properties": {
+                      "source_kind": {
+                        "type": "string",
+                        "enum": [
+                          "server_observed",
+                          "client_reported",
+                          "legacy_unknown"
+                        ]
+                      },
                       "connection_id": {
                         "type": "string",
                         "maxLength": 128,
@@ -2537,6 +2563,19 @@
               "minimum": 1,
               "maximum": 100,
               "default": 100
+            }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "server_observed",
+                "client_reported",
+                "legacy_unknown"
+              ],
+              "default": "server_observed"
             }
           }
         ],
@@ -3728,6 +3767,19 @@
               "maximum": 100,
               "default": 100
             }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "server_observed",
+                "client_reported",
+                "legacy_unknown"
+              ],
+              "default": "server_observed"
+            }
           }
         ],
         "responses": {
@@ -3740,6 +3792,14 @@
                   "items": {
                     "type": "object",
                     "properties": {
+                      "source_kind": {
+                        "type": "string",
+                        "enum": [
+                          "server_observed",
+                          "client_reported",
+                          "legacy_unknown"
+                        ]
+                      },
                       "connection_id": {
                         "type": "string",
                         "description": "Opaque registered installation ID; omitted for legacy external receipts"
@@ -3757,6 +3817,9 @@
                         "type": "integer"
                       },
                       "retry_points": {
+                        "type": "integer"
+                      },
+                      "sync_lag_points": {
                         "type": "integer"
                       },
                       "quota_remaining": {
@@ -3779,20 +3842,17 @@
                         "format": "date-time",
                         "nullable": true
                       },
-                      "last_completed_at": {
-                        "type": "string",
-                        "format": "date-time",
-                        "nullable": true
-                      },
-                      "sync_lag_points": {
-                        "type": "integer"
-                      },
                       "sync_lag_ms": {
                         "type": "integer",
                         "format": "int64",
                         "nullable": true
                       },
                       "sync_lag_observed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                      },
+                      "last_completed_at": {
                         "type": "string",
                         "format": "date-time",
                         "nullable": true
@@ -3849,6 +3909,19 @@
               "maximum": 100,
               "default": 100
             }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "server_observed",
+                "client_reported",
+                "legacy_unknown"
+              ],
+              "default": "server_observed"
+            }
           }
         ],
         "responses": {
@@ -3861,6 +3934,14 @@
                   "items": {
                     "type": "object",
                     "properties": {
+                      "source_kind": {
+                        "type": "string",
+                        "enum": [
+                          "server_observed",
+                          "client_reported",
+                          "legacy_unknown"
+                        ]
+                      },
                       "connection_id": {
                         "type": "string",
                         "description": "Opaque registered installation ID; omitted for legacy external receipts"
@@ -4957,12 +5038,9 @@
           },
           "window_minutes": {
             "type": "integer",
-            "description": "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period",
             "minimum": 1,
-            "maximum": 720
-          },
-          "enabled": {
-            "type": "boolean"
+            "maximum": 720,
+            "description": "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period"
           },
           "threshold_value": {
             "type": "number",
@@ -5049,6 +5127,35 @@
             "maxLength": 64,
             "description": "optional fixed provider error code selector, such as auth_expired"
           },
+          "connector_connection_id": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Optional registered connector installation selector; tenant checked and provider must match."
+          },
+          "connector_source_kind": {
+            "type": "string",
+            "enum": [
+              "server_observed",
+              "client_reported"
+            ],
+            "description": "Required provenance selector for connector error, quota and freshness rules; defaults to server_observed. Client reports cannot select a registered connection."
+          },
+          "connector_sync_mode": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "overdue"
+            ],
+            "description": "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases"
+          },
+          "connector_quota_metric": {
+            "type": "string",
+            "enum": [
+              "quota_remaining",
+              "retry_after_ms",
+              "sync_lag_ms"
+            ]
+          },
           "release_version": {
             "type": "string"
           },
@@ -5066,14 +5173,6 @@
               "warn",
               "error",
               "fatal"
-            ]
-          },
-          "connector_quota_metric": {
-            "type": "string",
-            "enum": [
-              "quota_remaining",
-              "retry_after_ms",
-              "sync_lag_ms"
             ]
           },
           "usage_surface": {
@@ -5116,18 +5215,8 @@
             ],
             "description": "project-scoped payload-free AI receipt mode; failed counts terminal failures and stuck counts started receipts older than the bounded window"
           },
-          "connector_connection_id": {
-            "type": "string",
-            "maxLength": 128,
-            "description": "Optional registered connector installation selector; tenant checked and provider must match."
-          },
-          "connector_sync_mode": {
-            "type": "string",
-            "enum": [
-              "failed",
-              "overdue"
-            ],
-            "description": "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases"
+          "enabled": {
+            "type": "boolean"
           }
         }
       },

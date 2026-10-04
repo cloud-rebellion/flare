@@ -53,11 +53,11 @@ const createAlertRule = `-- name: CreateAlertRule :one
 INSERT INTO alert_rules (
     id, project_id, org_id, name, type, threshold, window_minutes, enabled,
     metric_name, comparison, threshold_value, span_name, percentile,
-    connector_provider, connector_operation, connector_channel, connector_error_code, connector_connection_id, connector_sync_mode, release_version, service_name, log_severity,
+    connector_provider, connector_operation, connector_channel, connector_error_code, connector_connection_id, connector_source_kind, connector_sync_mode, release_version, service_name, log_severity,
     connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, ai_triage_mode, metric_labels, business_check_name
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
-RETURNING id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+RETURNING id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name, connector_source_kind
 `
 
 type CreateAlertRuleParams struct {
@@ -79,6 +79,7 @@ type CreateAlertRuleParams struct {
 	ConnectorChannel      string          `json:"connector_channel"`
 	ConnectorErrorCode    string          `json:"connector_error_code"`
 	ConnectorConnectionID string          `json:"connector_connection_id"`
+	ConnectorSourceKind   string          `json:"connector_source_kind"`
 	ConnectorSyncMode     string          `json:"connector_sync_mode"`
 	ReleaseVersion        string          `json:"release_version"`
 	ServiceName           string          `json:"service_name"`
@@ -113,6 +114,7 @@ func (q *Queries) CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams
 		arg.ConnectorChannel,
 		arg.ConnectorErrorCode,
 		arg.ConnectorConnectionID,
+		arg.ConnectorSourceKind,
 		arg.ConnectorSyncMode,
 		arg.ReleaseVersion,
 		arg.ServiceName,
@@ -162,6 +164,7 @@ func (q *Queries) CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams
 		&i.ConnectorConnectionID,
 		&i.ConnectorSyncMode,
 		&i.BusinessCheckName,
+		&i.ConnectorSourceKind,
 	)
 	return &i, err
 }
@@ -265,7 +268,7 @@ func (q *Queries) GetNotificationChannel(ctx context.Context, arg GetNotificatio
 }
 
 const listAlertRulesByProject = `-- name: ListAlertRulesByProject :many
-SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name FROM alert_rules WHERE project_id = $1 AND org_id = $2 ORDER BY created_at DESC
+SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name, connector_source_kind FROM alert_rules WHERE project_id = $1 AND org_id = $2 ORDER BY created_at DESC
 `
 
 type ListAlertRulesByProjectParams struct {
@@ -317,6 +320,7 @@ func (q *Queries) ListAlertRulesByProject(ctx context.Context, arg ListAlertRule
 			&i.ConnectorConnectionID,
 			&i.ConnectorSyncMode,
 			&i.BusinessCheckName,
+			&i.ConnectorSourceKind,
 		); err != nil {
 			return nil, err
 		}
@@ -354,7 +358,7 @@ func (q *Queries) ListChannelProjects(ctx context.Context, channelID string) ([]
 }
 
 const listEnabledAlertRulesByProject = `-- name: ListEnabledAlertRulesByProject :many
-SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name FROM alert_rules WHERE project_id = $1 AND org_id = $2 AND enabled = true
+SELECT id, project_id, org_id, name, type, threshold, enabled, created_at, window_minutes, last_fired_at, metric_name, comparison, threshold_value, connector_provider, connector_operation, connector_channel, span_name, percentile, release_version, log_severity, connector_quota_metric, usage_surface, usage_operation, usage_measure, api_key_hygiene_mode, connector_error_code, connector_freshness_baseline_at, ai_triage_mode, service_name, service_freshness_baseline_at, metric_labels, connector_connection_id, connector_sync_mode, business_check_name, connector_source_kind FROM alert_rules WHERE project_id = $1 AND org_id = $2 AND enabled = true
 `
 
 type ListEnabledAlertRulesByProjectParams struct {
@@ -406,6 +410,7 @@ func (q *Queries) ListEnabledAlertRulesByProject(ctx context.Context, arg ListEn
 			&i.ConnectorConnectionID,
 			&i.ConnectorSyncMode,
 			&i.BusinessCheckName,
+			&i.ConnectorSourceKind,
 		); err != nil {
 			return nil, err
 		}

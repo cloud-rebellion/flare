@@ -22,11 +22,12 @@ WITH observations AS (
     FROM connector_attempts
     WHERE COALESCE(project_id, '') = $2::text
       AND org_id = $3::text
-      AND provider = $4::text
-      AND ($5::text = '' OR operation = $5::text)
-      AND ($6::text = '' OR channel = $6::text)
-      AND ($7::text = '' OR connection_id = $7::text)
-      AND completed_at >= $8
+      AND source_kind = $4::text
+      AND provider = $5::text
+      AND ($6::text = '' OR operation = $6::text)
+      AND ($7::text = '' OR channel = $7::text)
+      AND ($8::text = '' OR connection_id = $8::text)
+      AND completed_at >= $9
       AND (
           ($1::text = 'quota_remaining' AND quota_remaining IS NOT NULL)
           OR ($1::text = 'retry_after_ms' AND retry_after_ms IS NOT NULL)
@@ -46,6 +47,7 @@ type GetConnectorQuotaStatsParams struct {
 	Metric       string             `json:"metric"`
 	ProjectID    string             `json:"project_id"`
 	OrgID        string             `json:"org_id"`
+	SourceKind   string             `json:"source_kind"`
 	Provider     string             `json:"provider"`
 	Operation    string             `json:"operation"`
 	Channel      string             `json:"channel"`
@@ -66,6 +68,7 @@ func (q *Queries) GetConnectorQuotaStats(ctx context.Context, arg GetConnectorQu
 		arg.Metric,
 		arg.ProjectID,
 		arg.OrgID,
+		arg.SourceKind,
 		arg.Provider,
 		arg.Operation,
 		arg.Channel,
@@ -80,11 +83,11 @@ func (q *Queries) GetConnectorQuotaStats(ctx context.Context, arg GetConnectorQu
 const insertConnectorAttempt = `-- name: InsertConnectorAttempt :exec
 
 INSERT INTO connector_attempts (
-    id, org_id, project_id, connection_id, provider, operation, channel, outcome,
+    id, org_id, project_id, connection_id, source_kind, provider, operation, channel, outcome,
     status_class, error_code, elapsed_ms, quota_remaining, retry_after_ms, sync_lag_ms,
     attempted_at, completed_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 `
 
 type InsertConnectorAttemptParams struct {
@@ -92,6 +95,7 @@ type InsertConnectorAttemptParams struct {
 	OrgID          string             `json:"org_id"`
 	ProjectID      pgtype.Text        `json:"project_id"`
 	ConnectionID   pgtype.Text        `json:"connection_id"`
+	SourceKind     string             `json:"source_kind"`
 	Provider       string             `json:"provider"`
 	Operation      string             `json:"operation"`
 	Channel        string             `json:"channel"`
@@ -109,13 +113,15 @@ type InsertConnectorAttemptParams struct {
 // Payload-free connector receipts. Never add URLs, request bodies, credentials,
 // or provider response text to this table or its API projection. A nullable
 // connection_id links first-party calls to one registered installation; legacy
-// and external DSN receipts remain null.
+// and external DSN receipts remain null. source_kind is assigned by the
+// server's authentication boundary, never accepted from a sender body.
 func (q *Queries) InsertConnectorAttempt(ctx context.Context, arg InsertConnectorAttemptParams) error {
 	_, err := q.db.Exec(ctx, insertConnectorAttempt,
 		arg.ID,
 		arg.OrgID,
 		arg.ProjectID,
 		arg.ConnectionID,
+		arg.SourceKind,
 		arg.Provider,
 		arg.Operation,
 		arg.Channel,
@@ -133,7 +139,7 @@ func (q *Queries) InsertConnectorAttempt(ctx context.Context, arg InsertConnecto
 }
 
 const listConnectorHealthByOrg = `-- name: ListConnectorHealthByOrg :many
-SELECT COALESCE(connection_id, '') AS connection_id,
+SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        provider,
        operation,
        channel,
@@ -147,7 +153,8 @@ SELECT COALESCE(connection_id, '') AS connection_id,
 FROM connector_attempts
 WHERE org_id = $1
   AND completed_at >= $2
-GROUP BY connection_id, provider, operation, channel
+  AND source_kind = $4::text
+GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $3
 `
@@ -156,9 +163,11 @@ type ListConnectorHealthByOrgParams struct {
 	OrgID       string             `json:"org_id"`
 	CompletedAt pgtype.Timestamptz `json:"completed_at"`
 	Limit       int32              `json:"limit"`
+	SourceKind  string             `json:"source_kind"`
 }
 
 type ListConnectorHealthByOrgRow struct {
+	SourceKind      string             `json:"source_kind"`
 	ConnectionID    string             `json:"connection_id"`
 	Provider        string             `json:"provider"`
 	Operation       string             `json:"operation"`
@@ -173,7 +182,12 @@ type ListConnectorHealthByOrgRow struct {
 }
 
 func (q *Queries) ListConnectorHealthByOrg(ctx context.Context, arg ListConnectorHealthByOrgParams) ([]*ListConnectorHealthByOrgRow, error) {
-	rows, err := q.db.Query(ctx, listConnectorHealthByOrg, arg.OrgID, arg.CompletedAt, arg.Limit)
+	rows, err := q.db.Query(ctx, listConnectorHealthByOrg,
+		arg.OrgID,
+		arg.CompletedAt,
+		arg.Limit,
+		arg.SourceKind,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +196,7 @@ func (q *Queries) ListConnectorHealthByOrg(ctx context.Context, arg ListConnecto
 	for rows.Next() {
 		var i ListConnectorHealthByOrgRow
 		if err := rows.Scan(
+			&i.SourceKind,
 			&i.ConnectionID,
 			&i.Provider,
 			&i.Operation,
@@ -205,7 +220,7 @@ func (q *Queries) ListConnectorHealthByOrg(ctx context.Context, arg ListConnecto
 }
 
 const listConnectorHealthByProject = `-- name: ListConnectorHealthByProject :many
-SELECT COALESCE(connection_id, '') AS connection_id,
+SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        provider,
        operation,
        channel,
@@ -220,7 +235,8 @@ FROM connector_attempts
 WHERE project_id = $1
   AND org_id = $2
   AND completed_at >= $3
-GROUP BY connection_id, provider, operation, channel
+  AND source_kind = $5::text
+GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $4
 `
@@ -230,9 +246,11 @@ type ListConnectorHealthByProjectParams struct {
 	OrgID       string             `json:"org_id"`
 	CompletedAt pgtype.Timestamptz `json:"completed_at"`
 	Limit       int32              `json:"limit"`
+	SourceKind  string             `json:"source_kind"`
 }
 
 type ListConnectorHealthByProjectRow struct {
+	SourceKind      string             `json:"source_kind"`
 	ConnectionID    string             `json:"connection_id"`
 	Provider        string             `json:"provider"`
 	Operation       string             `json:"operation"`
@@ -252,6 +270,7 @@ func (q *Queries) ListConnectorHealthByProject(ctx context.Context, arg ListConn
 		arg.OrgID,
 		arg.CompletedAt,
 		arg.Limit,
+		arg.SourceKind,
 	)
 	if err != nil {
 		return nil, err
@@ -261,6 +280,7 @@ func (q *Queries) ListConnectorHealthByProject(ctx context.Context, arg ListConn
 	for rows.Next() {
 		var i ListConnectorHealthByProjectRow
 		if err := rows.Scan(
+			&i.SourceKind,
 			&i.ConnectionID,
 			&i.Provider,
 			&i.Operation,
@@ -295,6 +315,7 @@ WITH series AS (
            max(completed_at)::timestamptz AS last_completed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = $4::text
       AND ca.completed_at >= $2
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
@@ -304,6 +325,7 @@ WITH series AS (
            completed_at AS quota_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = $4::text
       AND ca.completed_at >= $2
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -313,6 +335,7 @@ WITH series AS (
            completed_at AS retry_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = $4::text
       AND ca.completed_at >= $2
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -322,11 +345,13 @@ WITH series AS (
            completed_at AS sync_lag_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = $4::text
       AND ca.completed_at >= $2
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )
-SELECT s.connection_id,
+SELECT $4::text AS source_kind,
+       s.connection_id,
        s.provider,
        s.operation,
        s.channel,
@@ -352,9 +377,11 @@ type ListConnectorQuotaHealthByOrgParams struct {
 	OrgID       string             `json:"org_id"`
 	CompletedAt pgtype.Timestamptz `json:"completed_at"`
 	Limit       int32              `json:"limit"`
+	SourceKind  string             `json:"source_kind"`
 }
 
 type ListConnectorQuotaHealthByOrgRow struct {
+	SourceKind        string             `json:"source_kind"`
 	ConnectionID      string             `json:"connection_id"`
 	Provider          string             `json:"provider"`
 	Operation         string             `json:"operation"`
@@ -375,7 +402,12 @@ type ListConnectorQuotaHealthByOrgRow struct {
 // provider hints. Each metric is latest-by-series, rather than max/min, so a
 // stale high quota or low lag value cannot hide a newer observation.
 func (q *Queries) ListConnectorQuotaHealthByOrg(ctx context.Context, arg ListConnectorQuotaHealthByOrgParams) ([]*ListConnectorQuotaHealthByOrgRow, error) {
-	rows, err := q.db.Query(ctx, listConnectorQuotaHealthByOrg, arg.OrgID, arg.CompletedAt, arg.Limit)
+	rows, err := q.db.Query(ctx, listConnectorQuotaHealthByOrg,
+		arg.OrgID,
+		arg.CompletedAt,
+		arg.Limit,
+		arg.SourceKind,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +416,7 @@ func (q *Queries) ListConnectorQuotaHealthByOrg(ctx context.Context, arg ListCon
 	for rows.Next() {
 		var i ListConnectorQuotaHealthByOrgRow
 		if err := rows.Scan(
+			&i.SourceKind,
 			&i.ConnectionID,
 			&i.Provider,
 			&i.Operation,
@@ -422,6 +455,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
@@ -432,6 +466,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -442,6 +477,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -452,11 +488,13 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = $5::text
       AND ca.completed_at >= $3
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )
-SELECT s.connection_id,
+SELECT $5::text AS source_kind,
+       s.connection_id,
        s.provider,
        s.operation,
        s.channel,
@@ -483,9 +521,11 @@ type ListConnectorQuotaHealthByProjectParams struct {
 	OrgID       string             `json:"org_id"`
 	CompletedAt pgtype.Timestamptz `json:"completed_at"`
 	Limit       int32              `json:"limit"`
+	SourceKind  string             `json:"source_kind"`
 }
 
 type ListConnectorQuotaHealthByProjectRow struct {
+	SourceKind        string             `json:"source_kind"`
 	ConnectionID      string             `json:"connection_id"`
 	Provider          string             `json:"provider"`
 	Operation         string             `json:"operation"`
@@ -511,6 +551,7 @@ func (q *Queries) ListConnectorQuotaHealthByProject(ctx context.Context, arg Lis
 		arg.OrgID,
 		arg.CompletedAt,
 		arg.Limit,
+		arg.SourceKind,
 	)
 	if err != nil {
 		return nil, err
@@ -520,6 +561,7 @@ func (q *Queries) ListConnectorQuotaHealthByProject(ctx context.Context, arg Lis
 	for rows.Next() {
 		var i ListConnectorQuotaHealthByProjectRow
 		if err := rows.Scan(
+			&i.SourceKind,
 			&i.ConnectionID,
 			&i.Provider,
 			&i.Operation,

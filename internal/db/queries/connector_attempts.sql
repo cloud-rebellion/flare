@@ -1,18 +1,19 @@
 -- Payload-free connector receipts. Never add URLs, request bodies, credentials,
 -- or provider response text to this table or its API projection. A nullable
 -- connection_id links first-party calls to one registered installation; legacy
--- and external DSN receipts remain null.
+-- and external DSN receipts remain null. source_kind is assigned by the
+-- server's authentication boundary, never accepted from a sender body.
 
 -- name: InsertConnectorAttempt :exec
 INSERT INTO connector_attempts (
-    id, org_id, project_id, connection_id, provider, operation, channel, outcome,
+    id, org_id, project_id, connection_id, source_kind, provider, operation, channel, outcome,
     status_class, error_code, elapsed_ms, quota_remaining, retry_after_ms, sync_lag_ms,
     attempted_at, completed_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17);
 
 -- name: ListConnectorHealthByOrg :many
-SELECT COALESCE(connection_id, '') AS connection_id,
+SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        provider,
        operation,
        channel,
@@ -26,12 +27,13 @@ SELECT COALESCE(connection_id, '') AS connection_id,
 FROM connector_attempts
 WHERE org_id = $1
   AND completed_at >= $2
-GROUP BY connection_id, provider, operation, channel
+  AND source_kind = sqlc.arg(source_kind)::text
+GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $3;
 
 -- name: ListConnectorHealthByProject :many
-SELECT COALESCE(connection_id, '') AS connection_id,
+SELECT source_kind, COALESCE(connection_id, '') AS connection_id,
        provider,
        operation,
        channel,
@@ -46,7 +48,8 @@ FROM connector_attempts
 WHERE project_id = $1
   AND org_id = $2
   AND completed_at >= $3
-GROUP BY connection_id, provider, operation, channel
+  AND source_kind = sqlc.arg(source_kind)::text
+GROUP BY source_kind, connection_id, provider, operation, channel
 ORDER BY last_completed_at DESC, connection_id, provider, operation, channel
 LIMIT $4;
 
@@ -65,6 +68,7 @@ WITH series AS (
            max(completed_at)::timestamptz AS last_completed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $2
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
@@ -74,6 +78,7 @@ WITH series AS (
            completed_at AS quota_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $2
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -83,6 +88,7 @@ WITH series AS (
            completed_at AS retry_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $2
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -92,11 +98,13 @@ WITH series AS (
            completed_at AS sync_lag_observed_at
     FROM connector_attempts ca
     WHERE ca.org_id = $1
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $2
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )
-SELECT s.connection_id,
+SELECT sqlc.arg(source_kind)::text AS source_kind,
+       s.connection_id,
        s.provider,
        s.operation,
        s.channel,
@@ -133,6 +141,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
       AND (ca.quota_remaining IS NOT NULL OR ca.retry_after_ms IS NOT NULL OR ca.sync_lag_ms IS NOT NULL)
     GROUP BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel
@@ -143,6 +152,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
       AND ca.quota_remaining IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -153,6 +163,7 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
       AND ca.retry_after_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
@@ -163,11 +174,13 @@ WITH series AS (
     FROM connector_attempts ca
     WHERE ca.project_id = $1
       AND ca.org_id = $2
+      AND ca.source_kind = sqlc.arg(source_kind)::text
       AND ca.completed_at >= $3
       AND ca.sync_lag_ms IS NOT NULL
     ORDER BY COALESCE(ca.connection_id, ''), ca.provider, ca.operation, ca.channel, ca.completed_at DESC, ca.id DESC
 )
-SELECT s.connection_id,
+SELECT sqlc.arg(source_kind)::text AS source_kind,
+       s.connection_id,
        s.provider,
        s.operation,
        s.channel,
@@ -202,6 +215,7 @@ WITH observations AS (
     FROM connector_attempts
     WHERE COALESCE(project_id, '') = sqlc.arg(project_id)::text
       AND org_id = sqlc.arg(org_id)::text
+      AND source_kind = sqlc.arg(source_kind)::text
       AND provider = sqlc.arg(provider)::text
       AND (sqlc.arg(operation)::text = '' OR operation = sqlc.arg(operation)::text)
       AND (sqlc.arg(channel)::text = '' OR channel = sqlc.arg(channel)::text)

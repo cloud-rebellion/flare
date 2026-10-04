@@ -43,28 +43,16 @@ void main() {
     expect(body, isNot(contains('12345678901234567890')));
   });
 
-  test('connector attempts can retain a safe registered installation id only', () {
+  test('client connector attempts never claim a provider installation', () {
     final attempt = FlareConnectorAttempt(
       provider: 'backend',
-      connectionId: 'backend-prod-1',
       operation: 'sync',
       channel: 'api',
       outcome: 'ok',
       elapsedMs: 4,
     );
     final body = encodeFlareConnectorAttempt(attempt);
-    expect(jsonDecode(body)['connection_id'], 'backend-prod-1');
-    expect(
-      FlareConnectorAttempt(
-        provider: 'backend',
-        connectionId: 'alice@example.com',
-        operation: 'sync',
-        channel: 'api',
-        outcome: 'ok',
-        elapsedMs: 4,
-      ).connectionId,
-      isEmpty,
-    );
+    expect(jsonDecode(body)['connection_id'], isNull);
   });
 
   test('DSN parser produces only project scoped native endpoints', () {
@@ -177,13 +165,12 @@ void main() {
         () async {
           throw StateError('private user message');
         },
-        connectionId: 'backend-prod',
       ),
       throwsStateError,
     );
     expect(attempts, hasLength(1));
     expect(attempts.single.outcome, 'error');
-    expect(attempts.single.connectionId, 'backend-prod');
+    expect(attempts.single.toJson().containsKey('connection_id'), isFalse);
     expect(attempts.single.operation, isNot(contains('alice')));
     expect(attempts.single.errorCode, 'stateerror');
   });

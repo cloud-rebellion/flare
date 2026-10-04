@@ -321,9 +321,11 @@ func (s *Server) watchdogReason(ctx context.Context, rule *generated.ListWatchdo
 		stats, err := s.q.GetConnectorErrorRateStats(ctx, generated.GetConnectorErrorRateStatsParams{
 			ProjectID:    rule.ProjectID,
 			OrgID:        rule.OrgID,
+			SourceKind:   rule.ConnectorSourceKind,
 			Provider:     rule.ConnectorProvider,
 			Operation:    rule.ConnectorOperation,
 			Channel:      rule.ConnectorChannel,
+			ErrorCode:    rule.ConnectorErrorCode,
 			ConnectionID: rule.ConnectorConnectionID,
 			CompletedAt:  pgtype.Timestamptz{Time: windowStart, Valid: true},
 		})
@@ -338,6 +340,7 @@ func (s *Server) watchdogReason(ctx context.Context, rule *generated.ListWatchdo
 			Metric:       rule.ConnectorQuotaMetric,
 			ProjectID:    rule.ProjectID,
 			OrgID:        rule.OrgID,
+			SourceKind:   rule.ConnectorSourceKind,
 			Provider:     rule.ConnectorProvider,
 			Operation:    rule.ConnectorOperation,
 			Channel:      rule.ConnectorChannel,
@@ -353,6 +356,7 @@ func (s *Server) watchdogReason(ctx context.Context, rule *generated.ListWatchdo
 		lastCompletedAt, err := s.q.GetConnectorFreshnessStats(ctx, generated.GetConnectorFreshnessStatsParams{
 			ProjectID:    rule.ProjectID,
 			OrgID:        rule.OrgID,
+			SourceKind:   rule.ConnectorSourceKind,
 			Provider:     rule.ConnectorProvider,
 			Operation:    rule.ConnectorOperation,
 			Channel:      rule.ConnectorChannel,

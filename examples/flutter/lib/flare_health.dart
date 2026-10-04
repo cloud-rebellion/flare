@@ -69,7 +69,6 @@ class FlareMetricPoint {
 class FlareConnectorAttempt {
   FlareConnectorAttempt({
     required String provider,
-    String? connectionId,
     required String operation,
     required String channel,
     required String outcome,
@@ -80,7 +79,6 @@ class FlareConnectorAttempt {
     int? retryAfterMs,
     int? syncLagMs,
   })  : provider = sanitizeFlareToken(provider, fallback: 'app'),
-        connectionId = sanitizeFlareConnectionId(connectionId),
         operation = sanitizeFlareOperation(operation),
         channel = sanitizeFlareToken(channel, fallback: 'api'),
         outcome = outcome == 'error' ? 'error' : 'ok',
@@ -92,7 +90,6 @@ class FlareConnectorAttempt {
         syncLagMs = _optionalBounded(syncLagMs, 0, 7 * 24 * 60 * 60 * 1000);
 
   final String provider;
-  final String connectionId;
   final String operation;
   final String channel;
   final String outcome;
@@ -111,7 +108,6 @@ class FlareConnectorAttempt {
       'outcome': outcome,
       'elapsed_ms': elapsedMs,
     };
-    if (connectionId.isNotEmpty) out['connection_id'] = connectionId;
     if (statusClass.isNotEmpty) out['status_class'] = statusClass;
     if (errorCode.isNotEmpty) out['error_code'] = errorCode;
     if (quotaRemaining != null) out['quota_remaining'] = quotaRemaining!;
@@ -317,7 +313,6 @@ class FlareHealthReporter {
     String operation,
     Future<T> Function() request, {
     String channel = 'api',
-    String? connectionId,
     int? successStatusCode,
     int? Function(T response)? statusCodeOf,
     String? Function(Object error)? errorCode,
@@ -336,7 +331,6 @@ class FlareHealthReporter {
       await _connector(
         FlareConnectorAttempt(
           provider: 'backend',
-          connectionId: connectionId,
           operation: safeOperation,
           channel: channel,
           outcome: failed ? 'error' : 'ok',
@@ -352,7 +346,6 @@ class FlareHealthReporter {
       await _connector(
         FlareConnectorAttempt(
           provider: 'backend',
-          connectionId: connectionId,
           operation: safeOperation,
           channel: channel,
           outcome: 'error',
@@ -412,25 +405,6 @@ String sanitizeFlareOperation(String raw) {
   var value = raw.trim().toLowerCase().replaceAll(_queryPattern, '');
   value = value.replaceAll(_longIDPattern, 'id');
   return sanitizeFlareToken(value, fallback: 'unknown_operation');
-}
-
-/// Sanitizes an optional registered connector installation identifier. These
-/// opaque IDs are useful for per-installation health selectors, but they are
-/// never allowed to carry an email, URL, query, or credential-looking value.
-String sanitizeFlareConnectionId(String? raw) {
-  if (raw == null || raw.trim().isEmpty) return '';
-  final value = raw.trim();
-  if (value.length > 64 ||
-      _emailPattern.hasMatch(value) ||
-      _queryPattern.hasMatch(value) ||
-      RegExp(
-        r'(?:authorization|bearer|basic|cookie|password|secret|token|api[_-]?key)',
-        caseSensitive: false,
-      ).hasMatch(value) ||
-      !RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]*$').hasMatch(value)) {
-    return '';
-  }
-  return value;
 }
 
 String sanitizeFlareToken(String raw, {String fallback = 'unknown'}) =>

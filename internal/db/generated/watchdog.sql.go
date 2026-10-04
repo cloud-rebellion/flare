@@ -160,17 +160,19 @@ SELECT count(*)::bigint AS attempts,
 FROM connector_attempts
 WHERE COALESCE(project_id, '') = $1::text
   AND org_id = $2::text
-  AND provider = $3::text
-  AND ($4::text = '' OR operation = $4::text)
-  AND ($5::text = '' OR channel = $5::text)
-  AND ($6::text = '' OR error_code = $6::text)
-  AND ($7::text = '' OR connection_id = $7::text)
-  AND completed_at >= $8
+  AND source_kind = $3::text
+  AND provider = $4::text
+  AND ($5::text = '' OR operation = $5::text)
+  AND ($6::text = '' OR channel = $6::text)
+  AND ($7::text = '' OR error_code = $7::text)
+  AND ($8::text = '' OR connection_id = $8::text)
+  AND completed_at >= $9
 `
 
 type GetConnectorErrorRateStatsParams struct {
 	ProjectID    string             `json:"project_id"`
 	OrgID        string             `json:"org_id"`
+	SourceKind   string             `json:"source_kind"`
 	Provider     string             `json:"provider"`
 	Operation    string             `json:"operation"`
 	Channel      string             `json:"channel"`
@@ -193,6 +195,7 @@ func (q *Queries) GetConnectorErrorRateStats(ctx context.Context, arg GetConnect
 	row := q.db.QueryRow(ctx, getConnectorErrorRateStats,
 		arg.ProjectID,
 		arg.OrgID,
+		arg.SourceKind,
 		arg.Provider,
 		arg.Operation,
 		arg.Channel,
@@ -210,16 +213,18 @@ SELECT max(completed_at)::timestamptz AS last_completed_at
 FROM connector_attempts
 WHERE COALESCE(project_id, '') = $1::text
   AND org_id = $2::text
-  AND provider = $3::text
-  AND ($4::text = '' OR operation = $4::text)
-  AND ($5::text = '' OR channel = $5::text)
-  AND ($6::text = '' OR connection_id = $6::text)
-  AND completed_at >= $7
+  AND source_kind = $3::text
+  AND provider = $4::text
+  AND ($5::text = '' OR operation = $5::text)
+  AND ($6::text = '' OR channel = $6::text)
+  AND ($7::text = '' OR connection_id = $7::text)
+  AND completed_at >= $8
 `
 
 type GetConnectorFreshnessStatsParams struct {
 	ProjectID    string             `json:"project_id"`
 	OrgID        string             `json:"org_id"`
+	SourceKind   string             `json:"source_kind"`
 	Provider     string             `json:"provider"`
 	Operation    string             `json:"operation"`
 	Channel      string             `json:"channel"`
@@ -236,6 +241,7 @@ func (q *Queries) GetConnectorFreshnessStats(ctx context.Context, arg GetConnect
 	row := q.db.QueryRow(ctx, getConnectorFreshnessStats,
 		arg.ProjectID,
 		arg.OrgID,
+		arg.SourceKind,
 		arg.Provider,
 		arg.Operation,
 		arg.Channel,
@@ -837,7 +843,7 @@ const listWatchdogRules = `-- name: ListWatchdogRules :many
 
 SELECT r.id, r.project_id, r.org_id, r.name, r.type, r.threshold, r.window_minutes,
        r.metric_name, r.comparison, r.threshold_value, r.span_name, r.percentile,
-       r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_sync_mode,
+       r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_source_kind, r.connector_sync_mode,
        r.release_version, r.service_name, r.log_severity, r.connector_quota_metric,
        r.usage_surface, r.usage_operation, r.usage_measure,
        r.api_key_hygiene_mode, r.ai_triage_mode, r.metric_labels, r.business_check_name,
@@ -866,6 +872,7 @@ type ListWatchdogRulesRow struct {
 	ConnectorChannel             string             `json:"connector_channel"`
 	ConnectorErrorCode           string             `json:"connector_error_code"`
 	ConnectorConnectionID        string             `json:"connector_connection_id"`
+	ConnectorSourceKind          string             `json:"connector_source_kind"`
 	ConnectorSyncMode            string             `json:"connector_sync_mode"`
 	ReleaseVersion               string             `json:"release_version"`
 	ServiceName                  string             `json:"service_name"`
@@ -917,6 +924,7 @@ func (q *Queries) ListWatchdogRules(ctx context.Context) ([]*ListWatchdogRulesRo
 			&i.ConnectorChannel,
 			&i.ConnectorErrorCode,
 			&i.ConnectorConnectionID,
+			&i.ConnectorSourceKind,
 			&i.ConnectorSyncMode,
 			&i.ReleaseVersion,
 			&i.ServiceName,

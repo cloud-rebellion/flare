@@ -22,6 +22,7 @@ const (
 // connectorQuotaHealthResponse is a metadata-only projection. Nullable values
 // remain omitted when a provider did not report that hint in the window.
 type connectorQuotaHealthResponse struct {
+	SourceKind string `json:"source_kind"`
 	// Empty means a legacy/external receipt without a registered installation.
 	// Registered IDs are opaque and tenant-owned; no provider payload is exposed.
 	ConnectionID      string     `json:"connection_id,omitempty"`
@@ -44,10 +45,16 @@ type connectorQuotaHealthResponse struct {
 // rate-limit and sync-lag hints. The result contains bounded integers and timestamps only;
 // no provider response payload or credential is retained or returned.
 func (s *Server) handleListConnectorQuotaHealth(w http.ResponseWriter, r *http.Request) {
+	source, ok := connectorSourceKind(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source_kind must be server_observed, client_reported or legacy_unknown")
+		return
+	}
 	since := time.Now().UTC().Add(-time.Duration(connectorQuotaHealthHours(r)) * time.Hour)
 	rows, err := s.q.ListConnectorQuotaHealthByOrg(r.Context(), generated.ListConnectorQuotaHealthByOrgParams{
 		OrgID:       orgIDFrom(r.Context()),
 		CompletedAt: pgtype.Timestamptz{Time: since, Valid: true},
+		SourceKind:  source,
 		Limit:       int32(connectorQuotaHealthLimit(r)),
 	})
 	if err != nil {
@@ -69,6 +76,11 @@ func (s *Server) handleListConnectorQuotaHealth(w http.ResponseWriter, r *http.R
 // caller's organization before querying attempts so a guessed project id cannot
 // turn this into a cross-tenant read.
 func (s *Server) handleListProjectConnectorQuotaHealth(w http.ResponseWriter, r *http.Request) {
+	source, ok := connectorSourceKind(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "source_kind must be server_observed, client_reported or legacy_unknown")
+		return
+	}
 	project, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{
 		ID: chi.URLParam(r, "id"), OrgScope: orgIDFrom(r.Context()),
 	})
@@ -81,6 +93,7 @@ func (s *Server) handleListProjectConnectorQuotaHealth(w http.ResponseWriter, r 
 		ProjectID:   pgtype.Text{String: project.ID, Valid: true},
 		OrgID:       project.OrgID,
 		CompletedAt: pgtype.Timestamptz{Time: since, Valid: true},
+		SourceKind:  source,
 		Limit:       int32(connectorQuotaHealthLimit(r)),
 	})
 	if err != nil {
@@ -120,7 +133,7 @@ func connectorQuotaHealthLimit(r *http.Request) int {
 
 func toConnectorQuotaHealthResponse(row *generated.ListConnectorQuotaHealthByOrgRow) connectorQuotaHealthResponse {
 	return connectorQuotaHealthResponseFromValues(
-		row.ConnectionID, row.Provider, row.Operation, row.Channel,
+		row.SourceKind, row.ConnectionID, row.Provider, row.Operation, row.Channel,
 		row.QuotaPoints, row.RetryPoints, row.SyncLagPoints,
 		row.QuotaRemaining, row.QuotaObservedAt,
 		row.RetryAfterMs, row.RetryObservedAt,
@@ -130,7 +143,7 @@ func toConnectorQuotaHealthResponse(row *generated.ListConnectorQuotaHealthByOrg
 
 func toProjectConnectorQuotaHealthResponse(row *generated.ListConnectorQuotaHealthByProjectRow) connectorQuotaHealthResponse {
 	return connectorQuotaHealthResponseFromValues(
-		row.ConnectionID, row.Provider, row.Operation, row.Channel,
+		row.SourceKind, row.ConnectionID, row.Provider, row.Operation, row.Channel,
 		row.QuotaPoints, row.RetryPoints, row.SyncLagPoints,
 		row.QuotaRemaining, row.QuotaObservedAt,
 		row.RetryAfterMs, row.RetryObservedAt,
@@ -138,8 +151,9 @@ func toProjectConnectorQuotaHealthResponse(row *generated.ListConnectorQuotaHeal
 	)
 }
 
-func connectorQuotaHealthResponseFromValues(connectionID, provider, operation, channel string, quotaPoints, retryPoints, syncLagPoints int64, quotaRemaining pgtype.Int8, quotaObservedAt pgtype.Timestamptz, retryAfterMS pgtype.Int8, retryObservedAt pgtype.Timestamptz, syncLagMS pgtype.Int8, syncLagObservedAt pgtype.Timestamptz, lastCompletedAt pgtype.Timestamptz) connectorQuotaHealthResponse {
+func connectorQuotaHealthResponseFromValues(sourceKind, connectionID, provider, operation, channel string, quotaPoints, retryPoints, syncLagPoints int64, quotaRemaining pgtype.Int8, quotaObservedAt pgtype.Timestamptz, retryAfterMS pgtype.Int8, retryObservedAt pgtype.Timestamptz, syncLagMS pgtype.Int8, syncLagObservedAt pgtype.Timestamptz, lastCompletedAt pgtype.Timestamptz) connectorQuotaHealthResponse {
 	out := connectorQuotaHealthResponse{
+		SourceKind:        sourceKind,
 		ConnectionID:      connectionID,
 		Provider:          provider,
 		Operation:         operation,

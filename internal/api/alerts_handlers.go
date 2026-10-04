@@ -386,6 +386,7 @@ type alertRuleResponse struct {
 	ConnectorChannel      string          `json:"connector_channel,omitempty"`
 	ConnectorErrorCode    string          `json:"connector_error_code,omitempty"`
 	ConnectorConnectionID string          `json:"connector_connection_id,omitempty"`
+	ConnectorSourceKind   string          `json:"connector_source_kind,omitempty"`
 	ConnectorSyncMode     string          `json:"connector_sync_mode,omitempty"`
 	ConnectorQuotaMetric  string          `json:"connector_quota_metric,omitempty"`
 	ReleaseVersion        string          `json:"release_version,omitempty"`
@@ -407,7 +408,7 @@ func toAlertRuleResponse(rule *generated.AlertRule) alertRuleResponse {
 		ID: rule.ID, Name: rule.Name, Type: rule.Type, Threshold: rule.Threshold, WindowMinutes: rule.WindowMinutes,
 		MetricName: rule.MetricName, MetricLabels: rule.MetricLabels, Comparison: rule.Comparison, ThresholdValue: rule.ThresholdValue,
 		SpanName: rule.SpanName, Percentile: rule.Percentile,
-		ConnectorProvider: rule.ConnectorProvider, ConnectorOperation: rule.ConnectorOperation, ConnectorChannel: rule.ConnectorChannel, ConnectorErrorCode: rule.ConnectorErrorCode, ConnectorConnectionID: rule.ConnectorConnectionID, ConnectorSyncMode: rule.ConnectorSyncMode, ConnectorQuotaMetric: rule.ConnectorQuotaMetric,
+		ConnectorProvider: rule.ConnectorProvider, ConnectorOperation: rule.ConnectorOperation, ConnectorChannel: rule.ConnectorChannel, ConnectorErrorCode: rule.ConnectorErrorCode, ConnectorConnectionID: rule.ConnectorConnectionID, ConnectorSourceKind: rule.ConnectorSourceKind, ConnectorSyncMode: rule.ConnectorSyncMode, ConnectorQuotaMetric: rule.ConnectorQuotaMetric,
 		ReleaseVersion: rule.ReleaseVersion, ServiceName: rule.ServiceName, LogSeverity: rule.LogSeverity, APIKeyHygieneMode: rule.ApiKeyHygieneMode, AITriageMode: rule.AiTriageMode, BusinessCheckName: rule.BusinessCheckName, Enabled: rule.Enabled,
 	}
 	if rule.Type == "usage_threshold" {
@@ -590,6 +591,17 @@ func normalizeServiceLevel(spanName string, target *float64, latencyMS, windowMi
 // keeps the error-rate rule meaningful. Provider is required; empty operation
 // and channel selectors intentionally match every operation/channel for that
 // provider. Selectors are labels only and never carry URLs or response text.
+func normalizeConnectorSourceKind(raw string) (string, error) {
+	source := strings.ToLower(strings.TrimSpace(raw))
+	if source == "" {
+		return "server_observed", nil
+	}
+	if source != "server_observed" && source != "client_reported" {
+		return "", errors.New("connector_source_kind must be server_observed or client_reported")
+	}
+	return source, nil
+}
+
 func normalizeConnectorErrorRate(provider, operation, channel, errorCode, comparison string, threshold *float64, windowMinutes int32) (string, string, string, string, string, float64, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	operation = strings.ToLower(strings.TrimSpace(operation))
@@ -969,6 +981,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		ConnectorChannel      string            `json:"connector_channel"`
 		ConnectorErrorCode    string            `json:"connector_error_code"`
 		ConnectorConnectionID string            `json:"connector_connection_id"`
+		ConnectorSourceKind   string            `json:"connector_source_kind"`
 		ConnectorSyncMode     string            `json:"connector_sync_mode"`
 		ConnectorQuotaMetric  string            `json:"connector_quota_metric"`
 		ReleaseVersion        string            `json:"release_version"`
@@ -1001,6 +1014,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	comparison := "gte"
 	thresholdValue := float64(0)
 	connectorProvider, connectorOperation, connectorChannel, connectorErrorCode, connectorConnectionID, connectorSyncMode := "", "", "", "", "", ""
+	connectorSourceKind := ""
 	connectorQuotaMetric := ""
 	releaseVersion := ""
 	serviceName := ""
@@ -1008,6 +1022,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	usageSurface, usageOperation, usageMeasure := "", "", ""
 	apiKeyHygieneMode := ""
 	aiTriageMode := ""
+	var err error
 	switch req.Type {
 	case "new_issue", "regression":
 		req.Threshold, req.WindowMinutes = 0, 0
@@ -1083,6 +1098,11 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "connector_error_rate":
+		connectorSourceKind, err = normalizeConnectorSourceKind(req.ConnectorSourceKind)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var validationErr error
 		connectorProvider, connectorOperation, connectorChannel, connectorErrorCode, comparison, thresholdValue, validationErr = normalizeConnectorErrorRate(
 			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.ConnectorErrorCode, req.Comparison, req.ThresholdValue, req.WindowMinutes,
@@ -1092,6 +1112,11 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "connector_quota":
+		connectorSourceKind, err = normalizeConnectorSourceKind(req.ConnectorSourceKind)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var validationErr error
 		connectorProvider, connectorOperation, connectorChannel, connectorQuotaMetric, comparison, thresholdValue, validationErr = normalizeConnectorQuota(
 			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.ConnectorQuotaMetric, req.Comparison, req.ThresholdValue, req.WindowMinutes,
@@ -1101,6 +1126,11 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "connector_freshness":
+		connectorSourceKind, err = normalizeConnectorSourceKind(req.ConnectorSourceKind)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		var validationErr error
 		connectorProvider, connectorOperation, connectorChannel, req.WindowMinutes, validationErr = normalizeConnectorFreshness(
 			req.ConnectorProvider, req.ConnectorOperation, req.ConnectorChannel, req.WindowMinutes,
@@ -1224,6 +1254,10 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "type must be new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, business_health, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage or ingest_acceptance")
 		return
 	}
+	if strings.TrimSpace(req.ConnectorSourceKind) != "" && connectorSourceKind == "" {
+		writeErr(w, http.StatusBadRequest, "connector_source_kind is only valid for connector error, quota or freshness rules")
+		return
+	}
 
 	// Verify the path project belongs to the caller's org before writing a rule
 	// against it. projects.id is a global primary key, so without this a member
@@ -1243,6 +1277,10 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 	// This keeps a guessed ID from becoming a cross-tenant selector and prevents
 	// a rule from silently watching a different provider than its label says.
 	if strings.TrimSpace(req.ConnectorConnectionID) != "" {
+		if connectorSourceKind == "client_reported" {
+			writeErr(w, http.StatusBadRequest, "client_reported connector rules cannot select a registered connection")
+			return
+		}
 		if req.Type != "connector_error_rate" && req.Type != "connector_quota" && req.Type != "connector_freshness" && req.Type != "connector_sync_health" {
 			writeErr(w, http.StatusBadRequest, "connector_connection_id is only valid for connector rules")
 			return
@@ -1291,6 +1329,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		ConnectorChannel:      connectorChannel,
 		ConnectorErrorCode:    connectorErrorCode,
 		ConnectorConnectionID: connectorConnectionID,
+		ConnectorSourceKind:   connectorSourceKind,
 		ConnectorSyncMode:     connectorSyncMode,
 		ConnectorQuotaMetric:  connectorQuotaMetric,
 		ReleaseVersion:        releaseVersion,
