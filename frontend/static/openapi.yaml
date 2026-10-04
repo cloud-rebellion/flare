@@ -85,10 +85,11 @@ components:
         status: { type: string, enum: [ok] }
     HealthResponse:
       type: object
-      required: [status, release, db, analytics, retention, connector_receipts, email, workers, queue, automation_outbox]
+      required: [status, release, source_commit, db, analytics, retention, connector_receipts, email, workers, queue, automation_outbox]
       properties:
         status: { type: string, enum: [ok, degraded] }
-        release: { type: string, minLength: 1, description: "Release identity built into the running API image." }
+        release: { type: string, minLength: 1, description: "Binary release version with +g<full SHA> when a source commit was stamped." }
+        source_commit: { type: string, description: "Full lowercase Git source revision stamped into the binary, or empty when build provenance was not supplied." }
         db:
           type: object
           properties:

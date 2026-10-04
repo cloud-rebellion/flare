@@ -5156,6 +5156,7 @@
         "required": [
           "status",
           "release",
+          "source_commit",
           "db",
           "analytics",
           "retention",
@@ -5352,7 +5353,11 @@
           "release": {
             "type": "string",
             "minLength": 1,
-            "description": "Release identity built into the running API image."
+            "description": "Binary release version with +g<full SHA> when a source commit was stamped."
+          },
+          "source_commit": {
+            "type": "string",
+            "description": "Full lowercase Git source revision stamped into the binary, or empty when build provenance was not supplied."
           },
           "connector_receipts": {
             "type": "object",
