@@ -57,8 +57,11 @@ old; `unavailable` means the database or its query failed. `counts_capped`
 means a count reached the 1,001-row query ceiling. The generic `queue` field
 still describes other detached work; it does not describe this durable issue
 alert path. A single-event store returns `503` if its event/job transaction
-fails. A Sentry envelope can report partial success with HTTP `200`, so inspect
-its item result and ingest receipt before counting each item as accepted.
+fails. Supported Sentry envelope items share one database transaction: if any
+event or transaction write fails, Flare rolls back all supported items and
+returns `503` with `Retry-After: 1`, `retryable: true`, and explicit failure
+counts. A `200` can still report invalid unsupported items or span-cap drops;
+inspect its counts and ingest receipt before counting each item as accepted.
 
 `readyz.connector_receipts` is the process-level projection of the outbound
 connector receipt writer. `configured` reports whether the server installed a
@@ -196,7 +199,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 
 | Integration | Send to | Stored and visible signals | Current alerts and limits |
 | --- | --- | --- | --- |
-| Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | Successfully persisted issue events include a durable alert-evaluation job. `new_issue`, `regression`, and `spike` rules run from that job. Envelope responses can be partial; HTTP `200` alone does not prove every item persisted, so inspect the response body and correlation ID. |
+| Sentry envelope and event | `POST /api/{projectID}/envelope`, `/store`, or `/events` | Error events are grouped into issues, with first/last seen, frequency, stack traces, release, and trace context. Transaction items become spans. | Successfully persisted issue events include a durable alert-evaluation job. `new_issue`, `regression`, and `spike` rules run from that job. A transient failure of any supported envelope item rolls back the whole supported batch and returns `503`. HTTP `200` can include invalid items or capped spans, so inspect `accepted`, `invalid`, `dropped`, `span_dropped`, and the correlation ID. |
 | OpenTelemetry HTTP | `POST /otlp/v1/logs`, `/otlp/v1/traces`, `/otlp/v1/metrics` (protobuf or JSON) | Logs, spans, and metrics are normalized into the same tenant-scoped store. OTLP responses report rejected items when validation, an oversized metric-label document, or the item cap prevents full acceptance. Each metric point's raw labels are capped at 4 KiB; oversized points are rejected and reported through OTLP `partial_success` rather than truncated. | Logs, traces, and metrics are queryable from the project pages and MCP. Metric threshold rules can alert on a bounded series' min/max over a 1--720 minute window; trace percentile rules page on operation latency, and service-level rules page on sampled-span availability against a latency objective. Use a metric threshold on an explicit request-success or business series when availability must cover unsampled traffic. Keep metric labels low-cardinality and free of secrets or user data. |
 | Native log and metric payloads | `POST /api/{projectID}/logs` and `/metrics` | Structured logs and metric samples are retained and can be searched or queried from the project pages. Native metric points whose raw labels exceed 4 KiB are rejected and the response's accepted count reflects that result; labels are never silently truncated. | Ingest errors, authentication failures, rate limits, and storage failures are returned to the sender and logged internally. The private `GET /metrics` endpoint exposes bounded service, ingest-outcome, and selected integration counters; it does not expose telemetry contents. Keep metric labels low-cardinality and free of secrets or user data. |
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
@@ -209,8 +212,14 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 ### Ingest checks for an exporter
 
 1. Send one known event or OTLP batch with a request ID captured by the sender.
-2. Treat `2xx` plus the response body as the acceptance result. For a partial
-   response, retry only rejected items according to the response contract.
+2. Treat `2xx` plus the response body as the acceptance result. Sentry envelope
+   item counts distinguish newly accepted, invalid, dropped, and failed work.
+   `503` means no supported item in that envelope committed and a whole-envelope
+   retry is safe after the store failure. A `200` may be partial because invalid
+   or unsupported items and capped spans are not stored. Stock Sentry SDKs do
+   not all persist and retry failed envelopes; use a durable sender transport
+   when delivery across process restarts is required. A lost commit response
+   remains an ambiguous case until durable Sentry item deduplication is enabled.
 3. Confirm the issue, log, metric, or trace appears under the same project and
    tenant. A dashboard query proves persistence, while `/readyz` only proves
    database reachability.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/ai"
@@ -118,101 +119,130 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	// write maxEnvelopeItems x cap span rows. See maxIngestRecords.
 	budget = newIngestBudget()
 
-	var lastID string
-	var events, stored int
-	// Transactions are counted the same way events are. They were the ONE
-	// ingest path that discarded data on a DB error and still answered 200: a
-	// Sentry SDK reads 200 as "accepted" and drops the payload, so every
-	// database blip permanently lost tracing data on the Sentry-wire path,
-	// while the OTLP trace path beside it returned 500 and the client retried.
-	// This is the prior audit's "4xx on ingest failure" fix applied to the
-	// events arm and not to the arm next to it.
-	var transactions, storedTransactions int
+	// Parse every supported item before writing. A later malformed item is a
+	// deliberate rejection, but a later store failure rolls back all writes so
+	// a whole-envelope retry cannot repeat already committed earlier items.
+	type preparedItem struct {
+		item  ingest.EnvelopeItem
+		spans []ingest.SpanRecord
+	}
+	prepared := make([]preparedItem, 0, len(items))
+	var validEvents, validTransactions int
 	for _, item := range items {
 		switch item.Type {
-		case "transaction":
-			transactions++
-			// Sentry-wire tracing: a transaction item carries the root span plus
-			// its children. Map to Flare spans and store via the same path OTLP
-			// traces use. A persistence error is surfaced as retryable below so a
-			// Sentry SDK cannot discard a transaction that was never stored.
-			spans, perr := ingest.ParseSentryTransaction(item.Payload)
-			if perr != nil {
-				transactionOutcome.invalid++
-				slog.Warn("envelope transaction parse failed", "project_id", project.ID, "error", perr)
-				continue
-			}
-			storedSpans, perr := s.persistSpans(r.Context(), project, spans, budget)
-			if perr != nil {
-				transactionOutcome.failed++
-				slog.Warn("persist transaction spans failed", "project_id", project.ID, "error", perr)
-				continue
-			}
-			if storedSpans == 0 {
-				// The request budget may have admitted no rows after an earlier
-				// transaction consumed the cap. Do not tell Sentry that this
-				// transaction was accepted when no span row was written.
-				transactionOutcome.dropped++
-				continue
-			}
-			storedTransactions++
-			transactionOutcome.accepted++
 		case "event":
-			events++
-			eid, ierr := s.ingestOne(r.Context(), project, item.Payload)
-			if ierr != nil {
-				var parseErr *ingestParseError
-				if errors.As(ierr, &parseErr) {
-					eventOutcome.invalid++
-				} else {
-					eventOutcome.failed++
-				}
-				slog.Warn("envelope event ingest failed", "project_id", project.ID, "error", ierr)
+			if _, err := ingest.ParseEvent(item.Payload); err != nil {
+				eventOutcome.invalid++
 				continue
 			}
-			stored++
-			eventOutcome.accepted++
-			lastID = eid
+			validEvents++
+			prepared = append(prepared, preparedItem{item: item})
+		case "transaction":
+			spans, err := ingest.ParseSentryTransaction(item.Payload)
+			if err != nil {
+				transactionOutcome.invalid++
+				continue
+			}
+			validTransactions++
+			prepared = append(prepared, preparedItem{item: item, spans: spans})
 		default:
-			// sessions, attachments, client reports: not stored.
+			// Sessions, attachments and client reports are not supported.
 			otherOutcome.invalid++
 		}
 	}
-	// A 200 tells the SDK the payload was accepted, so it drops it. Answering
-	// 200 when EVERY event in the envelope failed silently discarded the data.
-	// 5xx, not 4xx: Sentry SDKs treat 4xx as "this payload is bad, discard it"
-	// and only retry/back off on 5xx, and a total failure here is a server-side
-	// problem, not a malformed request. Partial success still returns 200,
-	// because the SDK cannot retry individual items.
-	if events > 0 && stored == 0 {
-		if eventOutcome.failed > 0 {
-			requestOutcome = "failed"
-			receiptStatus = http.StatusServiceUnavailable
-			writeErr(w, http.StatusServiceUnavailable, "no event in the envelope could be stored")
+	if len(prepared) == 0 {
+		if eventOutcome.invalid+transactionOutcome.invalid > 0 {
+			receiptStatus = http.StatusBadRequest
+			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "no valid event or transaction")
 			return
 		}
-		requestOutcome = "rejected"
-		receiptStatus = http.StatusBadRequest
-		writeErr(w, http.StatusBadRequest, "every event in the envelope was invalid")
+		writeEnvelopeResult(w, http.StatusOK, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
 		return
 	}
-	// Same rule for an envelope that carried only transactions. A parse failure
-	// is the client's problem and is not counted here; a persist failure is
-	// ours, and telling the SDK "accepted" is how the span tree is lost.
-	if events == 0 && transactions > 0 && storedTransactions == 0 {
-		if transactionOutcome.failed > 0 {
-			requestOutcome = "failed"
-			receiptStatus = http.StatusServiceUnavailable
-			writeErr(w, http.StatusServiceUnavailable, "no transaction in the envelope could be stored")
-			return
+
+	// All supported items share one bounded transaction. CopyFrom on qtx is
+	// transactional too. Side effects only run after the commit succeeds.
+	var tx pgx.Tx
+	var qtx *generated.Queries
+	var lastID string
+	committedEvents := make([]ingestedEvent, 0, validEvents)
+	if s.pool != nil {
+		tx, err = s.pool.Begin(r.Context())
+	} else {
+		err = errors.New("envelope transaction unavailable")
+	}
+	if err != nil {
+		goto storeFailed
+	}
+	defer tx.Rollback(r.Context())
+	qtx = s.q.WithTx(tx)
+	for _, item := range prepared {
+		switch item.item.Type {
+		case "event":
+			var result ingestedEvent
+			result, err = s.ingestOneInTx(r.Context(), project, item.item.Payload, tx)
+			if err != nil {
+				goto storeFailed
+			}
+			committedEvents = append(committedEvents, result)
+			eventOutcome.accepted++
+			lastID = result.eventID
+		case "transaction":
+			var storedSpans int
+			storedSpans, err = persistSpansWithQueries(r.Context(), qtx, project, item.spans, budget)
+			if err != nil {
+				goto storeFailed
+			}
+			if storedSpans == 0 {
+				transactionOutcome.dropped++
+			} else {
+				transactionOutcome.accepted++
+			}
 		}
-		requestOutcome = "rejected"
-		receiptStatus = http.StatusBadRequest
-		writeErr(w, http.StatusBadRequest, "every transaction in the envelope was invalid")
-		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		goto storeFailed
+	}
+	for _, result := range committedEvents {
+		s.afterIngestOne(project, result)
 	}
 	budget.report(project.ID, "spans")
-	writeJSON(w, http.StatusOK, map[string]string{"id": lastID})
+	spanOutcome.dropped = uint64(budget.dropped)
+	writeEnvelopeResult(w, http.StatusOK, lastID, receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
+	return
+
+storeFailed:
+	// No supported item committed. Count all valid items as retryable failures,
+	// including earlier writes rolled back and later items not attempted.
+	slog.Warn("envelope transaction failed", "project_id", project.ID, "error", err)
+	eventOutcome.accepted = 0
+	transactionOutcome.accepted = 0
+	transactionOutcome.dropped = 0
+	eventOutcome.failed = uint64(validEvents)
+	transactionOutcome.failed = uint64(validTransactions)
+	budget = nil // no spans from the failed transaction were durably accepted
+	requestOutcome = "failed"
+	receiptStatus = http.StatusServiceUnavailable
+	w.Header().Set("Retry-After", "1")
+	writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "telemetry storage is temporarily unavailable")
+}
+
+func writeEnvelopeResult(w http.ResponseWriter, status int, eventID string, received int64, events, transactions, spans, other ingestOutcome, message string) {
+	total := events
+	total.add(transactions)
+	total.add(spans)
+	total.add(other)
+	response := map[string]any{
+		"id": eventID, "received": received,
+		"accepted": total.accepted, "invalid": total.invalid,
+		"dropped": total.dropped, "span_dropped": spans.dropped, "failed": total.failed,
+		"partial":   total.invalid+total.dropped > 0 && total.accepted > 0,
+		"retryable": status == http.StatusServiceUnavailable,
+	}
+	if message != "" {
+		response["error"] = message
+	}
+	writeJSON(w, status, response)
 }
 
 // handleStore ingests a single event JSON (Sentry /store/ and Flare's native
@@ -278,9 +308,36 @@ func (e *ingestParseError) Unwrap() error { return e.err }
 // A parse failure is wrapped in *ingestParseError; a store failure is returned
 // bare, so callers can tell client errors from server errors.
 func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw []byte) (string, error) {
+	if s.pool == nil {
+		return "", errors.New("event transaction unavailable")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin event transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := s.ingestOneInTx(ctx, project, raw, tx)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit event and alert evaluation: %w", err)
+	}
+	s.afterIngestOne(project, result)
+	return result.eventID, nil
+}
+
+type ingestedEvent struct {
+	eventID, issueID, sensitive, issueTitle string
+	isNew                                   bool
+}
+
+// ingestOneInTx never commits or starts detached work. An envelope can call it
+// repeatedly in one transaction, then publish side effects after commit.
+func (s *Server) ingestOneInTx(ctx context.Context, project *generated.Project, raw []byte, tx pgx.Tx) (ingestedEvent, error) {
 	ev, err := ingest.ParseEvent(raw)
 	if err != nil {
-		return "", &ingestParseError{err}
+		return ingestedEvent{}, &ingestParseError{err}
 	}
 
 	// Sanitize every client-controlled field before it reaches Postgres. This is
@@ -309,27 +366,21 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		eventID = id.New()
 	}
 
-	// Auto-track the release this event reports (deploy markers can also
-	// register one explicitly). Best-effort: a failure never blocks ingest.
+	qtx := s.q.WithTx(tx)
+	// The release marker is part of the same acceptance transaction, including
+	// for service heartbeats whose freshness update depends on it.
 	if release != "" {
-		_ = s.q.UpsertRelease(ctx, generated.UpsertReleaseParams{
+		if err := qtx.UpsertRelease(ctx, generated.UpsertReleaseParams{
 			ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID, Version: release,
-		})
+		}); err != nil {
+			return ingestedEvent{}, fmt.Errorf("register event release: %w", err)
+		}
 	}
 
 	// An accepted event must carry a durable alert-evaluation handoff. Keep
 	// issue grouping, the event, its release marker, and the queue row in one
 	// transaction so a queue failure returns 503 without persisting a phantom
 	// event or spending the new-issue/regression transition.
-	if s.pool == nil {
-		return "", errors.New("event transaction unavailable")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin event transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	qtx := s.q.WithTx(tx)
 	issue, err := qtx.UpsertIssue(ctx, generated.UpsertIssueParams{
 		ID:           id.New(),
 		ProjectID:    project.ID,
@@ -342,7 +393,7 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 		FirstRelease: release,
 	})
 	if err != nil {
-		return "", err
+		return ingestedEvent{}, err
 	}
 
 	// UpsertIssue leaves status untouched, so issue.Status is the PRIOR status.
@@ -350,7 +401,7 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	reopened := false
 	if !issue.IsNew && issue.Status == "resolved" {
 		if err := qtx.ReopenIssue(ctx, generated.ReopenIssueParams{ID: issue.ID, OrgID: project.OrgID}); err != nil {
-			return "", fmt.Errorf("reopen issue: %w", err)
+			return ingestedEvent{}, fmt.Errorf("reopen issue: %w", err)
 		}
 		reopened = true
 	}
@@ -378,17 +429,17 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 	// This keeps arbitrary event traffic from making a deployed release look
 	// live while retaining the payload-free event record as the source of truth.
 	if err := qtx.InsertEvent(ctx, insertParams); err != nil {
-		return "", err
+		return ingestedEvent{}, err
 	}
 	if release != "" && isReleaseHeartbeat(level, msg) {
 		rows, err := qtx.TouchReleaseHeartbeat(ctx, generated.TouchReleaseHeartbeatParams{
 			ProjectID: project.ID, OrgID: project.OrgID, Version: release,
 		})
 		if err != nil {
-			return "", fmt.Errorf("persist release heartbeat: %w", err)
+			return ingestedEvent{}, fmt.Errorf("persist release heartbeat: %w", err)
 		}
 		if rows != 1 {
-			return "", fmt.Errorf("persist release heartbeat: release %q is not registered", release)
+			return ingestedEvent{}, fmt.Errorf("persist release heartbeat: release %q is not registered", release)
 		}
 	}
 
@@ -403,7 +454,7 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 			if err := qtx.MarkIssueSensitive(ctx, generated.MarkIssueSensitiveParams{
 				ID: issue.ID, OrgID: project.OrgID, Sensitive: sensitive,
 			}); err != nil {
-				return "", fmt.Errorf("mark sensitive issue: %w", err)
+				return ingestedEvent{}, fmt.Errorf("mark sensitive issue: %w", err)
 			}
 			// The security event is itself re-ingested as an event into the
 			// flare-security project, so its message must carry the SCRUBBED
@@ -423,32 +474,32 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 			  AND (type='spike' OR (type='new_issue' AND $3::boolean)
 		       OR (type='regression' AND $4::boolean))
 		)`, project.OrgID, project.ID, issue.IsNew, reopened).Scan(&enabled); err != nil {
-			return "", fmt.Errorf("check issue alert rules: %w", err)
+			return ingestedEvent{}, fmt.Errorf("check issue alert rules: %w", err)
 		}
 		if enabled {
 			if _, err := tx.Exec(ctx, `INSERT INTO issue_alert_evaluations
 				(id,org_id,project_id,issue_id,is_new,reopened,event_count,observed_at)
 				VALUES ($1,$2,$3,$4,$5,$6,$7,now())`, insertParams.ID, project.OrgID, project.ID, issue.ID, issue.IsNew, reopened,
 				max(int64(0), min(issue.EventCount, int64(1_000_000_000)))); err != nil {
-				return "", fmt.Errorf("enqueue issue alert evaluation: %w", err)
+				return ingestedEvent{}, fmt.Errorf("enqueue issue alert evaluation: %w", err)
 			}
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit event and alert evaluation: %w", err)
-	}
-	if sensitive != "" {
+	return ingestedEvent{eventID: eventID, issueID: issue.ID, sensitive: sensitive, issueTitle: issue.Title, isNew: issue.IsNew}, nil
+}
+
+func (s *Server) afterIngestOne(project *generated.Project, result ingestedEvent) {
+	if result.sensitive != "" {
 		s.recordSecurityEvent(project.OrgID, "sensitive-data-in-payload",
-			"possible "+sensitive+" in "+project.Name+" - issue: "+ai.Scrub(issue.Title), "")
+			"possible "+result.sensitive+" in "+project.Name+" - issue: "+ai.Scrub(result.issueTitle), "")
 	}
 
 	// A newly-seen issue gets AI triage automatically (background, budget-gated),
 	// so its root cause and fix are already waiting when a human or the AI
 	// operator opens it - not a manual step after the fact.
-	if issue.IsNew {
-		s.maybeAutoTriage(project.OrgID, issue.ID)
+	if result.isNew {
+		s.maybeAutoTriage(project.OrgID, result.issueID)
 	}
-	return eventID, nil
 }
 
 func isReleaseHeartbeat(level, message string) bool {

@@ -541,7 +541,7 @@ SET last_seen    = now(),
     title        = issues.title,
     culprit      = issues.culprit
 RETURNING id, project_id, org_id, fingerprint, title, culprit, level, status, platform,
-          first_release, first_seen, last_seen, event_count, (first_seen = last_seen) AS is_new
+          first_release, first_seen, last_seen, event_count, (id = $1) AS is_new
 `
 
 type UpsertIssueParams struct {
@@ -573,8 +573,10 @@ type UpsertIssueRow struct {
 	IsNew        bool               `json:"is_new"`
 }
 
-// Groups an incoming event into its issue. is_new distinguishes a freshly
-// created issue (first_seen == last_seen on insert) from a recurrence. Status
+// Groups an incoming event into its issue. is_new compares the returned id to
+// this insert's candidate id: first_seen == last_seen is wrong when multiple
+// events for one issue are written inside one transaction, because now() is
+// transaction-stable. Status
 // is intentionally left untouched on conflict so RETURNING exposes the PRIOR
 // status: the caller reopens a 'resolved' issue and fires a regression alert.
 func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) (*UpsertIssueRow, error) {
