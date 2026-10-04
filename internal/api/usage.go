@@ -92,7 +92,7 @@ func boundedUsageIdentifier(v string) string {
 
 func canonicalUsageSurface(surface string) string {
 	switch surface {
-	case "dsn", "api_key", "mcp":
+	case "dsn", "api_key", "mcp", "business_key":
 		return surface
 	default:
 		return "other"
@@ -115,6 +115,10 @@ func canonicalUsageOperation(surface, operation string) string {
 	case "mcp":
 		switch operation {
 		case "initialize", "ping", "tools_list", "tools_call", "tool_overview", "tool_list_projects", "tool_list_issues", "tool_get_issue", "tool_search_logs", "tool_get_trace", "tool_query_metrics", "tool_update_issue_status", "tool_triage_issue", "other":
+			return operation
+		}
+	case "business_key":
+		if operation == "business_checks" {
 			return operation
 		}
 	}

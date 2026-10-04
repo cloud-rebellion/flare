@@ -716,8 +716,8 @@
 <p class="mt-1 mb-8 text-sm text-zinc-500">
   Org-scoped keys for the management API (Bearer auth): auto-provisioning a project per service,
   uploading source maps, reading issues. <strong class="text-zinc-400">Not for sending telemetry.</strong>
-  Ingest (OTLP included) authenticates with the per-project DSN key from the project page, sent as
-  <code class="font-mono">x-flare-key</code>; an org API key is rejected there.
+  Client telemetry (OTLP included) authenticates with the per-project DSN key from the project page, sent as
+  <code class="font-mono">x-flare-key</code>. Business checks use a separate confidential backend key created on the project's Business page; keep that key out of browser and mobile builds.
 </p>
 
 <form onsubmit={createKey} class="mb-6 flex flex-wrap items-end gap-3 border-b border-zinc-800/80 pb-8">

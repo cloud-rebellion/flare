@@ -100,3 +100,34 @@ func TestRecordIngestRequestAndItemsExposeOnlyFixedLabels(t *testing.T) {
 		t.Fatalf("untrusted labels escaped canonicalization:\n%s", body)
 	}
 }
+
+func TestBusinessIngestMetricsCountNewItemsNotReplay(t *testing.T) {
+	m := metrics.New()
+	previous := metrics.Default
+	metrics.Default = m
+	t.Cleanup(func() { metrics.Default = previous })
+
+	accepted := ingestOutcome{accepted: 1}
+	accepted.record("business")
+	recordIngestRequest("native", accepted, "accepted")
+	// An identical idempotency-key retry is a successful HTTP request, but it
+	// did not create a second durable business result.
+	replay := ingestOutcome{}
+	replay.record("business")
+	recordIngestRequest("native", replay, "accepted")
+
+	out := httptest.NewRecorder()
+	m.Handler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := out.Body.String()
+	for _, want := range []string{
+		`flare_ingest_items_total{outcome="accepted",signal="business"} 1`,
+		`flare_ingest_requests_total{outcome="accepted",transport="native"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("business metrics missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `signal="other"`) {
+		t.Fatalf("business signal collapsed into other:\n%s", body)
+	}
+}

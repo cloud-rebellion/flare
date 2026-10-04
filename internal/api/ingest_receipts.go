@@ -192,7 +192,7 @@ func sanitizeReceiptRequestID(raw string) string {
 
 func canonicalReceiptPillar(pillar string) string {
 	switch pillar {
-	case "envelope", "event", "logs", "spans", "metrics", "connectors", "symbols":
+	case "envelope", "event", "logs", "spans", "metrics", "connectors", "business", "symbols":
 		return pillar
 	default:
 		return "other"

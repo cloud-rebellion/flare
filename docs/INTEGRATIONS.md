@@ -138,23 +138,30 @@ project and organization scope.
 
 Authenticated viewers can query durable, one-minute usage buckets with
 `GET /api/usage?hours=24&limit=100`. The response is scoped to the caller's
-organization and exposes only fixed `dsn`, `api_key`, and `mcp` surfaces,
-allowlisted operations, opaque project or API-key row identifiers, counters,
+organization and exposes only fixed `dsn`, `api_key`, `mcp`, and `business_key` surfaces,
+allowlisted operations, opaque project, API-key, or business-key row identifiers, counters,
 and timestamps. It never returns credentials, request bodies, user IDs, or
 provider payloads. API-key and MCP buckets are intentionally organization-wide
-within the owning tenant (`project_id` is empty); DSN buckets retain project
-scope. `hours` is clamped to 1--720 and `limit` to 1--100.
+within the owning tenant (`project_id` is empty); DSN and business-key buckets
+retain project scope. `hours` is clamped to 1--720 and `limit` to 1--100.
 
 Project alert rules can use `type: "usage_threshold"` with a fixed
 `usage_surface`, `usage_operation`, and `usage_measure` (`requests`, `errors`,
 or `denied`), plus a `comparison`, `threshold`, and `window_minutes` from
 `1` to `720`. A missing bucket series never fires an alert. `denied` counts
 tenant-known authorization refusals: read-only API keys rejected by a REST
-role gate and read-only MCP credentials refused a write tool. Invalid or
-unknown credentials have no tenant identity and are deliberately not counted.
+role gate, read-only MCP credentials refused a write tool, and an authenticated
+business check denied after a concurrent revocation. Invalid or unknown
+credentials have no tenant identity and are deliberately not counted.
 API-key and MCP usage alerts are organization-wide within the owning tenant;
 the project rule supplies the notification channels and does not narrow those
 two surfaces to another project's data.
+The `business_key` surface has the fixed `business_checks` operation and is
+project scoped. Each authenticated business-check request increments its key's
+request count, including malformed assertions and idempotent retries. A
+non-`202` response also increments `errors`; a post-authentication `401`
+increments `denied`. Unknown, expired, or already revoked keys cannot be
+attributed to an active tenant credential.
 
 After DSN authentication and body framing, each Sentry, OTLP, native, and
 connector ingest request must start a durable `ingest_receipts` row before any
@@ -389,8 +396,7 @@ client SLO should notify an operator.
 
 ### Business and client KPI conventions
 
-Business and client health use the same tenant-scoped metric store, so they do
-not require a new connector or a second credential. Send one numeric sample per
+Client and numeric business KPIs use the tenant-scoped metric store. Send one numeric sample per
 project with a bounded name such as `business.orders.completed`,
 `business.checkout.failures`, `client.web.lcp_ms`, or
 `client.flutter.api_errors`. Keep names stable and put dimensions in the
@@ -404,6 +410,23 @@ Use `metric_threshold` for a bounded high/low value over 1--720 minutes and
 query `GET /api/projects/{id}/metrics/query` for the same series when showing a
 dashboard. This gives business and client KPIs the same tenant provenance,
 retention, and alert delivery guarantees as infrastructure metrics.
+
+For a trusted outcome per business operation, provision a separate confidential
+project business key with the admin-only business-key API. A backend or SaaS
+adapter uses it as a Bearer token at `POST /api/{projectID}/business-checks`
+with a unique `Idempotency-Key` and
+required `elapsed_ms`. Flare commits the bounded outcome and accepted receipt
+together; retrying the same normalized assertion with the same key returns the
+same receipt. The public browser/Flutter DSN alone cannot submit these
+authoritative outcomes; mobile and web apps send them through their backend.
+At most eight active business keys are allowed per project; keep a spare slot
+to create a replacement before revoking its predecessor. The list orders
+active keys ahead of revoked history. Business submissions share the
+`INGEST_RATE_PER_MIN` source-IP budget, so size it for combined traffic behind
+one NAT and watch for `429` responses.
+Query `GET /api/projects/{id}/business-health` and alert with
+`business_health` on a named check. See [Business health checks](BUSINESS_HEALTH.md)
+for the request shape and retry contract.
 
 ### Service-level objectives
 
@@ -976,8 +999,8 @@ API keys are role-scoped (`viewer` or `member`), tenant-scoped, and record
 API-key authentication and DSN authentication increments a durable one-minute
 usage bucket. API-key rows retain only the opaque key row ID as a credential
 dimension; DSN rows retain only the project ID. Query the same bounded
-`GET /api/usage` projection to review read/write/API-key/MCP volume and DSN
-ingest volume by project. Error counts are recorded when MCP dispatch returns
+`GET /api/usage` projection to review read/write/API-key/MCP volume, DSN
+ingest volume, and business-key submissions by project. Error counts are recorded when MCP dispatch returns
 an error; request-level DSN acceptance and rejection remains authoritative in
 `GET /api/projects/{id}/ingest-receipts`. Unknown credentials cannot be
 associated with a tenant and are therefore not written to usage rows.
@@ -1067,7 +1090,7 @@ The built-in alert surface currently covers:
   synthetic verification after the configured grace period;
 - bounded `rollback` rules over explicit terminal rollback receipts;
 - bounded `log_severity` rules over one canonical log level and rolling count;
-- bounded `usage_threshold` rules over fixed DSN, API-key, or MCP operations;
+- bounded `usage_threshold` rules over fixed DSN, API-key, MCP, or business-key operations;
 - bounded `ai_triage` rules over failed or stuck payload-free AI receipts;
 - bounded `ingest_acceptance` rules over old incomplete payload-free ingest
   receipts;
@@ -1075,7 +1098,7 @@ The built-in alert surface currently covers:
 - delivery health for configured alert channels.
 
 It does not yet provide a first-class object-store quota rule. Durable
-MCP/API-key/DSN usage is queryable through
+MCP/API-key/DSN/business-key usage is queryable through
 `GET /api/usage`, and the `usage_threshold` rule evaluates those counters with
 tenant-safe fixed dimensions. The `deploy_failure` rule evaluates failed or
 blocked deploy receipts. The private `/metrics` endpoint
@@ -1089,7 +1112,7 @@ so rejected, retried, timed-out, and accepted work can be distinguished.
 The service metrics scrape does not include durable receipt rows, background
 worker or partition transitions, database-pool state, or S3 object operations.
 Durable usage rows now cover successful MCP dispatch, API-key authentication,
-and DSN authentication; they are intentionally separate from the process
+DSN authentication, and authenticated business-key submissions; they are intentionally separate from the process
 scrape and from telemetry payloads. HTTP route counts only show
 that a request reached a handler; they do not prove that every event, span,
 metric sample, artifact, or provider-side message was accepted.

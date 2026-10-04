@@ -78,6 +78,7 @@ type AlertRule struct {
 	MetricLabels                 json.RawMessage    `json:"metric_labels"`
 	ConnectorConnectionID        string             `json:"connector_connection_id"`
 	ConnectorSyncMode            string             `json:"connector_sync_mode"`
+	BusinessCheckName            string             `json:"business_check_name"`
 }
 
 type ApiKey struct {
@@ -136,6 +137,34 @@ type AutomationReceipt struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
 	ClaimID        pgtype.Text        `json:"claim_id"`
+}
+
+type BusinessCheck struct {
+	ID                 string             `json:"id"`
+	OrgID              string             `json:"org_id"`
+	ProjectID          string             `json:"project_id"`
+	ReceiptID          string             `json:"receipt_id"`
+	IdempotencyKeyHash string             `json:"idempotency_key_hash"`
+	PayloadHash        string             `json:"payload_hash"`
+	CheckName          string             `json:"check_name"`
+	Outcome            string             `json:"outcome"`
+	StatusClass        string             `json:"status_class"`
+	ErrorCode          string             `json:"error_code"`
+	ElapsedMs          int64              `json:"elapsed_ms"`
+	CompletedAt        pgtype.Timestamptz `json:"completed_at"`
+	BusinessKeyID      string             `json:"business_key_id"`
+}
+
+type BusinessCheckKey struct {
+	ID        string             `json:"id"`
+	OrgID     string             `json:"org_id"`
+	ProjectID string             `json:"project_id"`
+	Name      string             `json:"name"`
+	KeyHash   string             `json:"key_hash"`
+	KeyPrefix string             `json:"key_prefix"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type ChannelProject struct {

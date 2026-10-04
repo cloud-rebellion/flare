@@ -343,6 +343,7 @@ type alertRuleResponse struct {
 	WindowMinutes         int32           `json:"window_minutes"`
 	MetricName            string          `json:"metric_name,omitempty"`
 	MetricLabels          json.RawMessage `json:"metric_labels,omitempty"`
+	BusinessCheckName     string          `json:"business_check_name,omitempty"`
 	Comparison            string          `json:"comparison,omitempty"`
 	ThresholdValue        float64         `json:"threshold_value"`
 	SpanName              string          `json:"span_name,omitempty"`
@@ -374,7 +375,7 @@ func toAlertRuleResponse(rule *generated.AlertRule) alertRuleResponse {
 		MetricName: rule.MetricName, MetricLabels: rule.MetricLabels, Comparison: rule.Comparison, ThresholdValue: rule.ThresholdValue,
 		SpanName: rule.SpanName, Percentile: rule.Percentile,
 		ConnectorProvider: rule.ConnectorProvider, ConnectorOperation: rule.ConnectorOperation, ConnectorChannel: rule.ConnectorChannel, ConnectorErrorCode: rule.ConnectorErrorCode, ConnectorConnectionID: rule.ConnectorConnectionID, ConnectorSyncMode: rule.ConnectorSyncMode, ConnectorQuotaMetric: rule.ConnectorQuotaMetric,
-		ReleaseVersion: rule.ReleaseVersion, ServiceName: rule.ServiceName, LogSeverity: rule.LogSeverity, APIKeyHygieneMode: rule.ApiKeyHygieneMode, AITriageMode: rule.AiTriageMode, Enabled: rule.Enabled,
+		ReleaseVersion: rule.ReleaseVersion, ServiceName: rule.ServiceName, LogSeverity: rule.LogSeverity, APIKeyHygieneMode: rule.ApiKeyHygieneMode, AITriageMode: rule.AiTriageMode, BusinessCheckName: rule.BusinessCheckName, Enabled: rule.Enabled,
 	}
 	if rule.Type == "usage_threshold" {
 		out.UsageSurface, out.UsageOperation, out.UsageMeasure = rule.UsageSurface, rule.UsageOperation, rule.UsageMeasure
@@ -589,6 +590,31 @@ func normalizeConnectorErrorRate(provider, operation, channel, errorCode, compar
 	return provider, operation, channel, errorCode, comparison, *threshold, nil
 }
 
+// normalizeBusinessHealth validates one exact, caller-defined business check
+// series. The check name is only a bounded series key; all observed values are
+// fixed outcome/latency/status fields, so the watchdog never executes caller
+// SQL or evaluates an arbitrary selector.
+func normalizeBusinessHealth(checkName, comparison string, threshold *float64, windowMinutes int32) (string, string, float64, error) {
+	checkName = strings.ToLower(strings.TrimSpace(checkName))
+	if !businessCheckNameToken.MatchString(checkName) {
+		return "", "", 0, errors.New("business_check_name is required and must be a bounded lowercase token")
+	}
+	comparison = strings.ToLower(strings.TrimSpace(comparison))
+	if comparison == "" {
+		comparison = "gte"
+	}
+	if comparison != "gt" && comparison != "gte" {
+		return "", "", 0, errors.New("business health comparison must be gt or gte")
+	}
+	if windowMinutes < 1 || windowMinutes > 720 {
+		return "", "", 0, errors.New("business health windows must be between 1 and 720 minutes")
+	}
+	if threshold == nil || math.IsNaN(*threshold) || math.IsInf(*threshold, 0) || *threshold < 0 || *threshold > 1 {
+		return "", "", 0, errors.New("threshold_value must be a finite error rate between 0 and 1")
+	}
+	return checkName, comparison, *threshold, nil
+}
+
 // normalizeConnectorQuota validates a latest-observation rule for one bounded
 // connector series. The metric is explicit because quota_remaining,
 // retry_after_ms, and sync_lag_ms have different operational meanings and
@@ -756,7 +782,8 @@ var usageThresholdOperations = map[string]map[string]struct{}{
 		"connector_attempts": {}, "checkins": {}, "symbols": {},
 		"otlp_logs": {}, "otlp_traces": {}, "otlp_metrics": {},
 	},
-	"api_key": {"read": {}, "write": {}, "mcp": {}},
+	"api_key":      {"read": {}, "write": {}, "mcp": {}},
+	"business_key": {"business_checks": {}},
 	"mcp": {
 		"initialize": {}, "ping": {}, "tools_list": {}, "tools_call": {},
 		"tool_overview": {}, "tool_list_projects": {}, "tool_list_issues": {},
@@ -769,7 +796,7 @@ func normalizeUsageThreshold(surface, operation, measure, comparison string, thr
 	surface = strings.ToLower(strings.TrimSpace(surface))
 	operations, ok := usageThresholdOperations[surface]
 	if !ok {
-		return "", "", "", "", 0, 0, errors.New("usage_surface must be dsn, api_key or mcp")
+		return "", "", "", "", 0, 0, errors.New("usage_surface must be dsn, api_key, mcp or business_key")
 	}
 	operation = strings.ToLower(strings.TrimSpace(operation))
 	if _, ok := operations[operation]; !ok {
@@ -900,6 +927,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		WindowMinutes         int32             `json:"window_minutes"`
 		MetricName            string            `json:"metric_name"`
 		MetricLabels          map[string]string `json:"metric_labels"`
+		BusinessCheckName     string            `json:"business_check_name"`
 		SpanName              string            `json:"span_name"`
 		Percentile            int32             `json:"percentile"`
 		Comparison            string            `json:"comparison"`
@@ -933,6 +961,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		req.Type = "new_issue"
 	}
 	metricName := ""
+	businessCheckName := ""
 	metricLabels := json.RawMessage(`{}`)
 	spanName := ""
 	percentile := int32(95)
@@ -1011,6 +1040,15 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		// The watchdog compares observed availability directly to the target;
 		// keep the stored comparison explicit for API consumers and old clients.
 		comparison = "lt"
+	case "business_health":
+		var validationErr error
+		businessCheckName, comparison, thresholdValue, validationErr = normalizeBusinessHealth(
+			req.BusinessCheckName, req.Comparison, req.ThresholdValue, req.WindowMinutes,
+		)
+		if validationErr != nil {
+			writeErr(w, http.StatusBadRequest, validationErr.Error())
+			return
+		}
 	case "connector_error_rate":
 		var validationErr error
 		connectorProvider, connectorOperation, connectorChannel, connectorErrorCode, comparison, thresholdValue, validationErr = normalizeConnectorErrorRate(
@@ -1150,7 +1188,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		writeErr(w, http.StatusBadRequest, "type must be new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage or ingest_acceptance")
+		writeErr(w, http.StatusBadRequest, "type must be new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, business_health, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage or ingest_acceptance")
 		return
 	}
 
@@ -1230,6 +1268,7 @@ func (s *Server) handleCreateAlertRule(w http.ResponseWriter, r *http.Request) {
 		UsageMeasure:          usageMeasure,
 		ApiKeyHygieneMode:     apiKeyHygieneMode,
 		AiTriageMode:          aiTriageMode,
+		BusinessCheckName:     businessCheckName,
 		Enabled:               true,
 	})
 	if err != nil {

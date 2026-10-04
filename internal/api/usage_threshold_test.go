@@ -18,6 +18,9 @@ func TestNormalizeUsageThreshold(t *testing.T) {
 	if gotSurface != "mcp" || gotOperation != "tool_query_metrics" || gotMeasure != "errors" || gotComparison != "gt" || gotThreshold != 10 || gotWindow != 15 {
 		t.Fatalf("normalized usage rule = %q/%q/%q/%q/%d/%d", gotSurface, gotOperation, gotMeasure, gotComparison, gotThreshold, gotWindow)
 	}
+	if surface, operation, _, _, _, _, err := normalizeUsageThreshold("business_key", "business_checks", "requests", "gte", 1, 5); err != nil || surface != "business_key" || operation != "business_checks" {
+		t.Fatalf("business key usage rule = %q/%q (%v)", surface, operation, err)
+	}
 	for _, tc := range []struct {
 		name       string
 		surface    string

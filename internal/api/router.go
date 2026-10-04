@@ -66,6 +66,9 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 			r.Post("/{projectID}/checkins/{slug}", s.handleCheckin)
 			r.Get("/{projectID}/checkins/{slug}", s.handleCheckin)
 		})
+		// Business assertions can drive operator alerts. Their confidential
+		// project key and limiter are separate from the public browser DSN.
+		r.With(s.rateLimitBusinessCheck).Post("/{projectID}/business-checks", s.handleBusinessCheck)
 
 		r.Group(func(r chi.Router) {
 			r.Use(ccsrf)
@@ -124,6 +127,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/client-health", s.handleListClientHealth)
 				r.Get("/projects/{id}/connector-health", s.handleListProjectConnectorHealth)
 				r.Get("/projects/{id}/connector-quota-health", s.handleListProjectConnectorQuotaHealth)
+				r.Get("/projects/{id}/business-health", s.handleListBusinessHealth)
 				r.Get("/projects/{id}/ingest-receipts", s.handleListIngestReceipts)
 				r.Get("/projects/{id}/ai-receipts", s.handleListAIActionReceipts)
 				r.Get("/projects/{id}/automation-receipts", s.handleListAutomationReceipts)
@@ -189,6 +193,9 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Delete("/projects/{id}", s.handleDeleteProject)
 					r.Post("/keys", s.handleCreateAPIKey)
 					r.Delete("/keys/{id}", s.handleDeleteAPIKey)
+					r.Get("/projects/{id}/business-keys", s.handleListBusinessCheckKeys)
+					r.Post("/projects/{id}/business-keys", s.handleCreateBusinessCheckKey)
+					r.Delete("/projects/{id}/business-keys/{keyID}", s.handleRevokeBusinessCheckKey)
 				})
 
 				// Team management + integration secrets: admin+.

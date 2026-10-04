@@ -25,7 +25,7 @@ func TestIsUntraceable(t *testing.T) {
 		"/otlp/v1/traces", "/otlp",
 		"/api/724067772811/envelope/", "/api/724067772811/store/",
 		"/api/proj/events", "/api/proj/logs", "/api/proj/traces", "/api/proj/metrics",
-		"/api/proj/connector-attempts", "/api/proj/checkins/nightly", "/api/proj/checkins/nightly/",
+		"/api/proj/connector-attempts", "/api/proj/business-checks", "/api/proj/checkins/nightly", "/api/proj/checkins/nightly/",
 	}
 	for _, p := range skip {
 		if !isUntraceable(p) {

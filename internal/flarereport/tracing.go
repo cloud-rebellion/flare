@@ -333,7 +333,7 @@ func isUntraceable(p string) bool {
 		return false
 	}
 	switch parts[1] {
-	case "envelope", "store", "events", "logs", "traces", "metrics", "security", "connector-attempts":
+	case "envelope", "store", "events", "logs", "traces", "metrics", "security", "connector-attempts", "business-checks":
 		return len(parts) == 2
 	case "checkins":
 		return len(parts) == 3 && parts[2] != ""

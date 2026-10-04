@@ -24,6 +24,8 @@ func TestUsageOperationCanonicalizationRejectsCallerText(t *testing.T) {
 		{"api_key", "Bearer live-secret", "other"},
 		{"mcp", "tool_unknown", "other"},
 		{"mcp", "tool_query_metrics", "tool_query_metrics"},
+		{"business_key", "business_checks", "business_checks"},
+		{"business_key", "attacker-controlled", "other"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.surface+"/"+tc.value, func(t *testing.T) {
@@ -31,6 +33,12 @@ func TestUsageOperationCanonicalizationRejectsCallerText(t *testing.T) {
 				t.Fatalf("canonicalUsageOperation(%q, %q) = %q, want %q", tc.surface, tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBusinessKeyUsageSurfaceIsAllowlisted(t *testing.T) {
+	if got := canonicalUsageSurface("business_key"); got != "business_key" {
+		t.Fatalf("business key usage surface = %q", got)
 	}
 }
 

@@ -47,6 +47,7 @@
   let ruleWindow = $state(5);
   let ruleMetricName = $state('');
   let ruleMetricLabels = $state('');
+  let ruleBusinessCheckName = $state('');
   let ruleComparison = $state<AlertRuleComparison>('gte');
   let ruleThresholdValue = $state(0.95);
   let ruleSpanName = $state('');
@@ -87,6 +88,7 @@
   const filters = ['unresolved', 'resolved', 'ignored', 'all'];
   const usageOperations: Record<AlertUsageSurface, string[]> = {
     dsn: ['envelope', 'event', 'logs', 'metrics', 'traces', 'connector_attempts', 'checkins', 'symbols', 'otlp_logs', 'otlp_traces', 'otlp_metrics'],
+    business_key: ['business_checks'],
     api_key: ['read', 'write', 'mcp'],
     mcp: ['initialize', 'ping', 'tools_list', 'tools_call', 'tool_overview', 'tool_list_projects', 'tool_list_issues', 'tool_get_issue', 'tool_search_logs', 'tool_get_trace', 'tool_query_metrics', 'tool_update_issue_status', 'tool_triage_issue']
   };
@@ -202,6 +204,12 @@
           // the latency objective in milliseconds and threshold_value is the
           // minimum availability target.
           rule.threshold = ruleThreshold;
+          rule.threshold_value = ruleThresholdValue;
+          rule.window_minutes = ruleWindow;
+          break;
+        case 'business_health':
+          rule.business_check_name = ruleBusinessCheckName.trim();
+          rule.comparison = 'gte';
           rule.threshold_value = ruleThresholdValue;
           rule.window_minutes = ruleWindow;
           break;
@@ -333,6 +341,10 @@
       ruleThreshold = 1000;
       ruleThresholdValue = 0.999;
       ruleWindow = 5;
+    } else if (ruleType === 'business_health') {
+      ruleBusinessCheckName = '';
+      ruleThresholdValue = 0.1;
+      ruleWindow = 5;
     } else if (ruleType === 'connector_error_rate') {
       ruleConnectorProvider = '';
       ruleConnectorOperation = '';
@@ -424,6 +436,9 @@
     }
     if (r.type === 'service_level') {
       return `SLO: ${r.span_name || 'unknown'} availability < ${r.threshold_value ?? 0.999} at ${r.threshold || 1000}ms / ${r.window_minutes}m`;
+    }
+    if (r.type === 'business_health') {
+      return `business: ${r.business_check_name || 'unknown'} error rate ${r.comparison || 'gte'} ${r.threshold_value ?? 0} / ${r.window_minutes}m`;
     }
     if (r.type === 'connector_error_rate') {
       const selector = [r.connector_provider, r.connector_operation, r.connector_channel].filter(Boolean).join('/');
@@ -621,6 +636,7 @@
     <a href="/projects/{id}/logs" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Logs</a>
     <a href="/projects/{id}/traces" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Traces</a>
     <a href="/projects/{id}/metrics" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Metrics</a>
+    <a href="/projects/{id}/business-health" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Business</a>
     <a href="/projects/{id}/releases" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Releases</a>
   </div>
 
@@ -638,7 +654,7 @@
         <h3 class="text-sm font-medium">Alert rules</h3>
         <p class="mt-1 text-xs text-zinc-500">
           New issue, regression, spike (N events in M minutes), anomaly (error rate jumps vs the project's own
-          baseline), silence, metric thresholds, trace latency, connector error/quota/sync-lag/freshness/sync-state health, release error rates, release freshness, deploy failures, explicit rollbacks, log volume, MCP/API-key/DSN usage, API-key hygiene, AI triage, or incomplete ingest acceptance.
+          baseline), silence, metric thresholds, trace latency, service-level SLOs, business outcome error rates, connector error/quota/sync-lag/freshness/sync-state health, release error rates, release freshness, deploy failures, explicit rollbacks, log volume, MCP/API-key/DSN usage, API-key hygiene, AI triage, or incomplete ingest acceptance.
           Delivery goes to channels you add under <a href="/settings" class="text-amber-400 hover:text-amber-300">Alerts</a>.
         </p>
         {#if !hasChannel}
@@ -667,6 +683,7 @@
               <option value="metric_threshold">Metric threshold</option>
               <option value="trace_percentile">Trace latency percentile</option>
               <option value="service_level">Service-level SLO</option>
+              <option value="business_health">Business outcome error rate</option>
               <option value="connector_error_rate">Connector error rate</option>
               <option value="connector_quota">Connector quota / rate limit</option>
               <option value="connector_freshness">Connector freshness</option>
@@ -869,6 +886,40 @@
                   class="w-28 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
                 />
                 <span>ms over</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="720"
+                  bind:value={ruleWindow}
+                  class="w-20 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>min</span>
+              </label>
+            </div>
+          {:else if ruleType === 'business_health'}
+            <div class="grid gap-2 sm:grid-cols-2">
+              <label class="flex flex-col gap-1 text-xs text-zinc-500">
+                Business check name
+                <input
+                  bind:value={ruleBusinessCheckName}
+                  required
+                  maxlength="64"
+                  pattern="[a-z][a-z0-9._:-]*"
+                  placeholder="checkout.completed"
+                  class="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-xs text-zinc-500">
+                Error rate at least
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.001"
+                  bind:value={ruleThresholdValue}
+                  class="w-24 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-200 outline-none focus:border-amber-400/60"
+                />
+                <span>over</span>
                 <input
                   type="number"
                   min="1"
@@ -1342,6 +1393,7 @@
                   <option value="mcp">MCP (org-wide)</option>
                   <option value="api_key">API key (org-wide)</option>
                   <option value="dsn">DSN (project)</option>
+                  <option value="business_key">Business key (project)</option>
                 </select>
               </label>
               <label class="flex flex-col gap-1 text-xs text-zinc-500">

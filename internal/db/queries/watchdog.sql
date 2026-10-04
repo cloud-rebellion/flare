@@ -2,7 +2,7 @@
 -- ListWatchdogRules is intentionally not project-scoped; the per-project reads
 -- it drives (CountEventsForProjectSince) carry the project_id + org_id predicate.
 
--- ciguard:allow-unscoped global watchdog worker; every downstream read (CountEventsForProjectSince, GetMetricThresholdStats, GetTracePercentileStats, GetServiceLevelStats, GetConnectorErrorRateStats, GetConnectorQuotaStats, GetConnectorFreshnessStats, GetConnectorSyncHealthStats, GetServiceFreshnessStats, GetReleaseErrorRateStats, GetReleaseFreshnessStats, GetDeployFailureStats, GetDeployAcceptanceStats, GetRollbackStats, GetLogSeverityStats, GetUsageThresholdStats, GetAPIKeyHygieneStats, GetAITriageStats, GetIngestAcceptanceStats) re-scopes by project_id/org_id or org_id for org-owned API keys, and TrySetAlertRuleFired filters org_id
+-- ciguard:allow-unscoped global watchdog worker; every downstream read (CountEventsForProjectSince, GetMetricThresholdStats, GetTracePercentileStats, GetServiceLevelStats, GetBusinessHealthStats, GetConnectorErrorRateStats, GetConnectorQuotaStats, GetConnectorFreshnessStats, GetConnectorSyncHealthStats, GetServiceFreshnessStats, GetReleaseErrorRateStats, GetReleaseFreshnessStats, GetDeployFailureStats, GetDeployAcceptanceStats, GetRollbackStats, GetLogSeverityStats, GetUsageThresholdStats, GetAPIKeyHygieneStats, GetAITriageStats, GetIngestAcceptanceStats) re-scopes by project_id/org_id or org_id for org-owned API keys, and TrySetAlertRuleFired filters org_id
 -- name: ListWatchdogRules :many
 -- Enabled watchdog rules with the project name + org for dispatch.
 SELECT r.id, r.project_id, r.org_id, r.name, r.type, r.threshold, r.window_minutes,
@@ -10,12 +10,12 @@ SELECT r.id, r.project_id, r.org_id, r.name, r.type, r.threshold, r.window_minut
        r.connector_provider, r.connector_operation, r.connector_channel, r.connector_error_code, r.connector_connection_id, r.connector_sync_mode,
        r.release_version, r.service_name, r.log_severity, r.connector_quota_metric,
        r.usage_surface, r.usage_operation, r.usage_measure,
-       r.api_key_hygiene_mode, r.ai_triage_mode, r.metric_labels,
+       r.api_key_hygiene_mode, r.ai_triage_mode, r.metric_labels, r.business_check_name,
        r.connector_freshness_baseline_at, r.service_freshness_baseline_at,
        r.created_at, r.last_fired_at, p.name AS project_name
 FROM alert_rules r
 JOIN projects p ON p.id = r.project_id
-WHERE r.enabled = true AND r.type IN ('anomaly', 'silence', 'metric_threshold', 'trace_percentile', 'service_level', 'connector_error_rate', 'connector_freshness', 'connector_sync_health', 'service_freshness', 'release_freshness', 'connector_quota', 'release_error_rate', 'deploy_failure', 'deploy_acceptance', 'rollback', 'log_severity', 'usage_threshold', 'api_key_hygiene', 'ai_triage', 'ingest_acceptance');
+WHERE r.enabled = true AND r.type IN ('anomaly', 'silence', 'metric_threshold', 'trace_percentile', 'service_level', 'business_health', 'connector_error_rate', 'connector_freshness', 'connector_sync_health', 'service_freshness', 'release_freshness', 'connector_quota', 'release_error_rate', 'deploy_failure', 'deploy_acceptance', 'rollback', 'log_severity', 'usage_threshold', 'api_key_hygiene', 'ai_triage', 'ingest_acceptance');
 
 -- Sync state is organization-owned because one registered installation may be
 -- used by several project routes. The alert itself remains project-scoped for
@@ -229,7 +229,7 @@ WHERE project_id = sqlc.arg(project_id)
   AND observed_at >= sqlc.arg(since);
 
 -- Usage threshold rules aggregate only durable, payload-free one-minute
--- buckets. DSN rows are project scoped. API-key and MCP rows are org-wide and
+-- buckets. DSN and business-key rows are project scoped. API-key and MCP rows are org-wide and
 -- use an empty project_id; those surfaces use the explicit org-wide branch
 -- while preserving the owning project's tenant boundary.
 -- name: GetUsageThresholdStats :one

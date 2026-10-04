@@ -65,6 +65,33 @@ export interface ClientHealth {
   last_seen: string | null;
 }
 
+export interface BusinessHealth {
+  check_name: string;
+  attempts: number;
+  ok_count: number;
+  error_count: number;
+  error_rate: number;
+  avg_elapsed_ms: number;
+  max_elapsed_ms: number;
+  last_completed_at?: string;
+  last_ok_at?: string;
+  last_error_at?: string;
+}
+
+/** Metadata only. The confidential key is returned once on creation. */
+export interface BusinessCheckKey {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at?: string | null;
+}
+
+export interface BusinessCheckKeyCreated extends BusinessCheckKey {
+  key: string;
+}
+
 export interface ConnectorQuotaHealth {
   connection_id?: string;
   provider: string;
@@ -345,6 +372,7 @@ export interface AlertRule {
   window_minutes: number;
   metric_name?: string;
   metric_labels?: Record<string, string>;
+  business_check_name?: string;
   comparison?: AlertRuleComparison;
   threshold_value?: number;
   span_name?: string;
@@ -377,6 +405,7 @@ export type AlertRuleType =
   | 'metric_threshold'
   | 'trace_percentile'
   | 'service_level'
+  | 'business_health'
   | 'connector_error_rate'
   | 'connector_quota'
   | 'connector_freshness'
@@ -397,7 +426,7 @@ export type AlertRuleComparison = 'gt' | 'gte' | 'lt' | 'lte';
 export type AlertRuleSeverity = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 export type ConnectorQuotaMetric = 'quota_remaining' | 'retry_after_ms' | 'sync_lag_ms';
 export type AlertConnectorSyncMode = 'failed' | 'overdue';
-export type AlertUsageSurface = 'dsn' | 'api_key' | 'mcp';
+export type AlertUsageSurface = 'dsn' | 'business_key' | 'api_key' | 'mcp';
 export type AlertUsageMeasure = 'requests' | 'errors' | 'denied';
 export type AlertAPIKeyHygieneMode = 'unused' | 'expiring';
 export type AlertAITriageMode = 'failed' | 'stuck';
@@ -409,6 +438,7 @@ export interface CreateAlertRuleInput {
   window_minutes?: number;
   metric_name?: string;
   metric_labels?: Record<string, string>;
+  business_check_name?: string;
   comparison?: AlertRuleComparison;
   threshold_value?: number;
   span_name?: string;

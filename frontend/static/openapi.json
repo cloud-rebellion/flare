@@ -21,7 +21,7 @@
   "tags": [
     {
       "name": "Ingest",
-      "description": "Send events, logs, traces, metrics, and bounded connector outcomes. Authenticated by the DSN public key."
+      "description": "Send events, logs, traces, metrics, and bounded connector outcomes with the public DSN. Business checks require a separate confidential project key."
     },
     {
       "name": "Projects",
@@ -1306,6 +1306,7 @@
                       "metric_threshold",
                       "trace_percentile",
                       "service_level",
+                      "business_health",
                       "connector_error_rate",
                       "connector_quota",
                       "connector_freshness",
@@ -1335,7 +1336,7 @@
                   },
                   "threshold_value": {
                     "type": "number",
-                    "description": "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target"
+                    "description": "decimal threshold for metric, trace, connector, release, and business_health error rate rules (0-1); service_level uses it as the minimum availability target"
                   },
                   "comparison": {
                     "type": "string",
@@ -1389,6 +1390,12 @@
                     "type": "string",
                     "maxLength": 128,
                     "description": "exact span operation for trace_percentile and service_level rules"
+                  },
+                  "business_check_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9._:-]{0,63}$",
+                    "description": "exact business check series for business_health; required for that rule type"
                   },
                   "percentile": {
                     "type": "integer",
@@ -1450,9 +1457,10 @@
                     "enum": [
                       "dsn",
                       "api_key",
-                      "mcp"
+                      "mcp",
+                      "business_key"
                     ],
-                    "description": "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant"
+                    "description": "usage_threshold surface; API-key and MCP usage is org-wide, while DSN and business-key usage is project-scoped"
                   },
                   "usage_operation": {
                     "type": "string",
@@ -1968,6 +1976,178 @@
         }
       }
     },
+    "/api/{projectID}/business-checks": {
+      "post": {
+        "tags": [
+          "Ingest"
+        ],
+        "summary": "Record one business assertion outcome",
+        "description": "A confidential business key determines tenant and project. The public browser/Flutter DSN cannot authorize this endpoint. Flare derives the completion time, writes a payload-free business check and accepted ingest receipt in one transaction, and returns the receipt ID only after commit. Reuse the same Idempotency-Key after a timeout or lost response: an identical normalized assertion returns the same receipt. Authenticated non-202 responses increment business-key usage errors; a 401 after a concurrent revocation also increments denied. Pre-auth failures and rate limits have no tenant usage attribution.\n",
+        "security": [
+          {
+            "businessKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "Opaque per-operation token; reuse on retries. Only its SHA-256 hash is stored.",
+            "schema": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._~-]+$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "check_name",
+                  "outcome",
+                  "elapsed_ms"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "check_name": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9._:-]{0,63}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "ok",
+                      "error"
+                    ]
+                  },
+                  "elapsed_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0,
+                    "maximum": 86400000
+                  },
+                  "status_class": {
+                    "type": "string",
+                    "enum": [
+                      "1xx",
+                      "2xx",
+                      "3xx",
+                      "4xx",
+                      "5xx"
+                    ]
+                  },
+                  "error_code": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Business result and receipt committed; Idempotency-Replayed is true on an identical retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "accepted",
+                    "receipt_id"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "receipt_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "true when this key returned an existing accepted receipt",
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded outcome or Idempotency-Key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, unknown, expired, revoked, or wrong-project business key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Durable acceptance unavailable; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency-Key was already used with a different normalized assertion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-IP or per-key ingest rate limit reached; no tenant usage attribution",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/connector-health": {
       "get": {
         "tags": [
@@ -2016,7 +2196,8 @@
                     "properties": {
                       "connection_id": {
                         "type": "string",
-                        "description": "Opaque registered installation ID; omitted for legacy external receipts"
+                        "maxLength": 128,
+                        "description": "Opaque registered installation ID; empty/omitted for legacy or external DSN receipts."
                       },
                       "provider": {
                         "type": "string"
@@ -2052,11 +2233,6 @@
                       "last_completed_at": {
                         "type": "string",
                         "format": "date-time"
-                      },
-                      "connection_id": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "description": "Opaque registered installation ID; empty/omitted for legacy or external DSN receipts."
                       }
                     }
                   }
@@ -2271,13 +2447,120 @@
         }
       }
     },
+    "/api/projects/{id}/business-health": {
+      "get": {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Query bounded business outcome health by check name",
+        "description": "Returns project and tenant scoped counts, error rate, latency aggregates, and last observation times. No request payload or user data is returned.",
+        "security": [
+          {
+            "apiKey": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 720,
+              "default": 24
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded business outcome aggregates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "check_name": {
+                        "type": "string"
+                      },
+                      "attempts": {
+                        "type": "integer",
+                        "format": "int64"
+                      },
+                      "ok_count": {
+                        "type": "integer",
+                        "format": "int64"
+                      },
+                      "error_count": {
+                        "type": "integer",
+                        "format": "int64"
+                      },
+                      "error_rate": {
+                        "type": "number"
+                      },
+                      "avg_elapsed_ms": {
+                        "type": "number"
+                      },
+                      "max_elapsed_ms": {
+                        "type": "integer",
+                        "format": "int64"
+                      },
+                      "last_completed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                      },
+                      "last_ok_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                      },
+                      "last_error_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found"
+          }
+        }
+      }
+    },
     "/api/usage": {
       "get": {
         "tags": [
           "System"
         ],
-        "summary": "Query durable MCP, API-key, and DSN usage",
-        "description": "Returns bounded, tenant-scoped one-minute usage aggregates. The projection contains only fixed surface and operation names, opaque project or API-key row identifiers belonging to the caller's tenant, counters, and timestamps. Request bodies, credentials, user IDs, and provider payloads are never returned.\n",
+        "summary": "Query durable MCP, API-key, DSN, and business-key usage",
+        "description": "Returns bounded, tenant-scoped one-minute usage aggregates. The projection contains only fixed surface and operation names, opaque project, API-key, or business-key row identifiers belonging to the caller's tenant, counters, and timestamps. Request bodies, credentials, user IDs, and provider payloads are never returned.\n",
         "security": [
           {
             "apiKey": []
@@ -2323,14 +2606,15 @@
                       },
                       "credential_id": {
                         "type": "string",
-                        "description": "Opaque API-key row ID; omitted for sessions and DSNs"
+                        "description": "Opaque API-key or business-key row ID; omitted for sessions and DSNs"
                       },
                       "surface": {
                         "type": "string",
                         "enum": [
                           "dsn",
                           "api_key",
-                          "mcp"
+                          "mcp",
+                          "business_key"
                         ]
                       },
                       "operation": {
@@ -3834,15 +4118,6 @@
                       "type": "string",
                       "example": "2xx"
                     },
-                    "receipt_status": {
-                      "type": "string",
-                      "enum": [
-                        "accepted",
-                        "unavailable",
-                        "unscoped",
-                        "invalid"
-                      ],
-                      "description": "Whether Flare durably persisted the payload-free connector receipt; independent of provider outcome."
                     "error_code": {
                       "type": "string"
                     },
@@ -3855,6 +4130,16 @@
                       "type": "integer",
                       "format": "int64",
                       "minimum": 0
+                    },
+                    "receipt_status": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "unavailable",
+                        "unscoped",
+                        "invalid"
+                      ],
+                      "description": "Whether Flare durably persisted the payload-free connector receipt; independent of provider outcome."
                     }
                   }
                 }
@@ -3955,6 +4240,16 @@
                       "type": "string",
                       "format": "date-time",
                       "nullable": true
+                    },
+                    "receipt_status": {
+                      "type": "string",
+                      "enum": [
+                        "accepted",
+                        "unavailable",
+                        "unscoped",
+                        "invalid"
+                      ],
+                      "description": "Present when a provider call was made; whether Flare persisted its connector receipt, independently of provider outcome."
                     }
                   }
                 }
@@ -3975,6 +4270,179 @@
           },
           "422": {
             "description": "Provider is not supported by the bounded worker"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/business-keys": {
+      "get": {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "List project business-key metadata",
+        "description": "Admin session only. Returns at most 100 keys, with every active key first, without bearer secrets or hashes.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded key metadata, including revoked keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BusinessKeyMetadata"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Admin role required"
+          },
+          "404": {
+            "description": "Project not found in this organization"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Provision one confidential project business key",
+        "description": "Admin session with CSRF only. Shows the random 192-bit bearer secret once. Up to eight active unexpired keys are allowed per project; keep a spare slot to create a replacement before revoking an old key. Action is audited.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "expires_in_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "default": 90
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; key is shown once and never returned by list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/BusinessKeyMetadata"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "key"
+                      ],
+                      "properties": {
+                        "key": {
+                          "type": "string",
+                          "pattern": "^flb_[0-9a-f]{48}$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name or expiry"
+          },
+          "409": {
+            "description": "Active business key limit reached; revoke an unused key"
+          },
+          "403": {
+            "description": "Admin role required"
+          },
+          "404": {
+            "description": "Project not found in this organization"
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/business-keys/{keyID}": {
+      "delete": {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Revoke a project business key",
+        "description": "Admin session with CSRF only. Revocation is immediate for new requests and audited; historical key IDs remain attached to accepted checks.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "403": {
+            "description": "Admin role required"
+          },
+          "404": {
+            "description": "Project or active key not found in this organization"
           }
         }
       }
@@ -4004,6 +4472,11 @@
         "in": "cookie",
         "name": "session",
         "description": "Browser session cookie (dashboard only; requires CSRF on writes)."
+      },
+      "businessKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Confidential project-scoped flb_ key for backend business assertions; never embed in a browser or mobile app."
       }
     },
     "schemas": {
@@ -4322,6 +4795,7 @@
               "metric_threshold",
               "trace_percentile",
               "service_level",
+              "business_health",
               "connector_error_rate",
               "connector_quota",
               "connector_freshness",
@@ -4354,7 +4828,7 @@
           },
           "threshold_value": {
             "type": "number",
-            "description": "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target"
+            "description": "decimal threshold for metric, trace, connector, release, and business_health error rate rules (0-1); service_level uses it as the minimum availability target"
           },
           "comparison": {
             "type": "string",
@@ -4406,6 +4880,12 @@
           "span_name": {
             "type": "string",
             "description": "exact span operation for trace_percentile and service_level rules"
+          },
+          "business_check_name": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9._:-]{0,63}$",
+            "description": "exact business check series for business_health; required for that rule type"
           },
           "percentile": {
             "type": "integer",
@@ -4463,9 +4943,10 @@
             "enum": [
               "dsn",
               "api_key",
-              "mcp"
+              "mcp",
+              "business_key"
             ],
-            "description": "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant"
+            "description": "usage_threshold surface; API-key and MCP usage is org-wide, while DSN and business-key usage is project-scoped"
           },
           "usage_operation": {
             "type": "string",
@@ -4504,7 +4985,10 @@
           },
           "connector_sync_mode": {
             "type": "string",
-            "enum": ["failed", "overdue"],
+            "enum": [
+              "failed",
+              "overdue"
+            ],
             "description": "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases"
           }
         }
@@ -4615,9 +5099,11 @@
         "type": "object",
         "required": [
           "status",
+          "release",
           "db",
           "analytics",
           "retention",
+          "connector_receipts",
           "email",
           "workers",
           "queue"
@@ -4757,6 +5243,69 @@
                 "type": "boolean"
               }
             }
+          },
+          "release": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Release identity built into the running API image."
+          },
+          "connector_receipts": {
+            "type": "object",
+            "description": "Process-local receipt writer status; counters reset on restart and do not replace tenant-scoped persisted receipt queries.",
+            "required": [
+              "configured",
+              "state",
+              "durable",
+              "started",
+              "completed",
+              "succeeded",
+              "failed"
+            ],
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "unobserved",
+                  "healthy",
+                  "degraded"
+                ]
+              },
+              "durable": {
+                "type": "boolean",
+                "description": "The latest attempted receipt write succeeded."
+              },
+              "started": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "completed": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "succeeded": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "last_success_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "last_failure_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
           }
         }
       },
@@ -4821,6 +5370,43 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "BusinessKeyMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Opaque key row ID; not a bearer secret"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "prefix": {
+            "type": "string",
+            "pattern": "^flb_[0-9a-f]{8}$"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           }
         }
       }

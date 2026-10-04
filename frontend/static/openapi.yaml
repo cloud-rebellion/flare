@@ -15,7 +15,7 @@ servers:
     description: Self-host (default)
 tags:
   - name: Ingest
-    description: Send events, logs, traces, metrics, and bounded connector outcomes. Authenticated by the DSN public key.
+    description: Send events, logs, traces, metrics, and bounded connector outcomes with the public DSN. Business checks require a separate confidential project key.
   - name: Projects
     description: Manage projects and their DSNs.
   - name: Issues
@@ -54,6 +54,10 @@ components:
       in: header
       name: X-Flare-Key
       description: The DSN public key, for OTLP and native ingest.
+    businessKey:
+      type: http
+      scheme: bearer
+      description: Confidential project-scoped flb_ key for backend business assertions; never embed in a browser or mobile app.
     session:
       type: apiKey
       in: cookie
@@ -64,6 +68,16 @@ components:
       type: object
       properties:
         error: { type: string }
+    BusinessKeyMetadata:
+      type: object
+      required: [id, name, prefix, created_at, expires_at]
+      properties:
+        id: { type: string, description: Opaque key row ID; not a bearer secret }
+        name: { type: string, maxLength: 64 }
+        prefix: { type: string, pattern: '^flb_[0-9a-f]{8}$' }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
     LiveResponse:
       type: object
       required: [status]
@@ -71,9 +85,10 @@ components:
         status: { type: string, enum: [ok] }
     HealthResponse:
       type: object
-      required: [status, db, analytics, retention, email, workers, queue]
+      required: [status, release, db, analytics, retention, connector_receipts, email, workers, queue]
       properties:
         status: { type: string, enum: [ok, degraded] }
+        release: { type: string, minLength: 1, description: "Release identity built into the running API image." }
         db:
           type: object
           properties:
@@ -97,6 +112,20 @@ components:
             export_required: { type: boolean }
             cold_tier: { type: string, enum: [local, s3] }
             partition_telemetry: { type: string, enum: [log_only] }
+        connector_receipts:
+          type: object
+          description: "Process-local receipt writer status; counters reset on restart and do not replace tenant-scoped persisted receipt queries."
+          required: [configured, state, durable, started, completed, succeeded, failed]
+          properties:
+            configured: { type: boolean }
+            state: { type: string, enum: [unobserved, healthy, degraded] }
+            durable: { type: boolean, description: "The latest attempted receipt write succeeded." }
+            started: { type: integer, format: int64, minimum: 0 }
+            completed: { type: integer, format: int64, minimum: 0 }
+            succeeded: { type: integer, format: int64, minimum: 0 }
+            failed: { type: integer, format: int64, minimum: 0 }
+            last_success_at: { type: string, format: date-time }
+            last_failure_at: { type: string, format: date-time }
         email: { type: string, enum: [configured, disabled] }
         workers:
           type: object
@@ -198,10 +227,10 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
+        type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, business_health, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, release_error_rate, service_freshness, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
         threshold: { type: integer, description: "event, usage, API-key, AI receipt, or incomplete ingest receipt count for most rules; service_level uses it as the good-span latency objective in milliseconds" }
         window_minutes: { type: integer, minimum: 1, maximum: 720, description: "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period" }
-        threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target" }
+        threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, release, and business_health error rate rules (0-1); service_level uses it as the minimum availability target" }
         comparison: { type: string, enum: [gt, gte, lt, lte] }
         metric_name: { type: string }
         metric_labels:
@@ -216,18 +245,19 @@ components:
             method: { type: string, maxLength: 12, pattern: "^[A-Z]+$" }
             status_class: { type: string, enum: [1xx, 2xx, 3xx, 4xx, 5xx] }
         span_name: { type: string, description: "exact span operation for trace_percentile and service_level rules" }
+        business_check_name: { type: string, maxLength: 64, pattern: '^[a-z][a-z0-9._:-]{0,63}$', description: "exact business check series for business_health; required for that rule type" }
         percentile: { type: integer, enum: [50, 75, 90, 95, 99] }
         connector_provider: { type: string }
         connector_operation: { type: string }
         connector_channel: { type: string }
         connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
-        connector_connection_id: { type: string, maxLength: 128, description: "optional registered connector installation selector; tenant checked and provider must match" }
+        connector_connection_id: { type: string, maxLength: 128, description: "Optional registered connector installation selector; tenant checked and provider must match." }
         connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
         connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
         release_version: { type: string }
         service_name: { type: string, maxLength: 64, description: "exact bounded service name in the service-up:<service> heartbeat; pair with release_version for service_freshness" }
         log_severity: { type: string, enum: [trace, debug, info, warn, error, fatal] }
-        usage_surface: { type: string, enum: [dsn, api_key, mcp], description: "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant" }
+        usage_surface: { type: string, enum: [dsn, api_key, mcp, business_key], description: "usage_threshold surface; API-key and MCP usage is org-wide, while DSN and business-key usage is project-scoped" }
         usage_operation: { type: string, maxLength: 64, description: "fixed allowlisted operation for the usage surface" }
         usage_measure: { type: string, enum: [requests, errors, denied], description: "usage counter; denied includes tenant-known role refusals" }
         api_key_hygiene_mode: { type: string, enum: [unused, expiring], description: "org-scoped API-key hygiene mode; the response contains aggregate counts only" }
@@ -441,7 +471,7 @@ paths:
               additionalProperties: false
               properties:
                 provider: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
-                connection_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$', description: "Optional registered connector installation ID; it must belong to the authenticated workspace and match provider." }
+                connection_id: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$', description: "Optional registered connector installation ID; must belong to the authenticated workspace and match provider." }
                 operation: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
                 channel: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,31}$' }
                 outcome: { type: string, enum: [ok, error] }
@@ -455,6 +485,45 @@ paths:
         "202": { description: Stored, content: { application/json: { schema: { type: object, properties: { accepted: { type: boolean } } } } } }
         "400": { description: Invalid bounded outcome, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "401": { description: Invalid ingest key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/{projectID}/business-checks:
+    post:
+      tags: [Ingest]
+      summary: Record one business assertion outcome
+      description: >
+        A confidential business key determines tenant and project. The public
+        browser/Flutter DSN cannot authorize this endpoint. Flare
+        derives the completion time, writes a payload-free business check and
+        accepted ingest receipt in one transaction, and returns the receipt ID
+        only after commit. Reuse the same Idempotency-Key after a timeout or
+        lost response: an identical normalized assertion returns the same receipt.
+        Authenticated non-202 responses increment business-key usage errors;
+        a 401 after a concurrent revocation also increments denied. Pre-auth
+        failures and rate limits have no tenant usage attribution.
+      security: [{ businessKey: [] }]
+      parameters:
+        - { name: projectID, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, description: "Opaque per-operation token; reuse on retries. Only its SHA-256 hash is stored.", schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [check_name, outcome, elapsed_ms]
+              additionalProperties: false
+              properties:
+                check_name: { type: string, maxLength: 64, pattern: '^[a-z][a-z0-9._:-]{0,63}$' }
+                outcome: { type: string, enum: [ok, error] }
+                elapsed_ms: { type: integer, format: int64, minimum: 0, maximum: 86400000 }
+                status_class: { type: string, enum: [1xx, 2xx, 3xx, 4xx, 5xx] }
+                error_code: { type: string, maxLength: 64, pattern: '^[a-z0-9][a-z0-9._:-]{0,63}$' }
+      responses:
+        "202": { description: "Business result and receipt committed; Idempotency-Replayed is true on an identical retry", headers: { Idempotency-Replayed: { description: "true when this key returned an existing accepted receipt", schema: { type: string, enum: ['true'] } } }, content: { application/json: { schema: { type: object, required: [accepted, receipt_id], properties: { accepted: { type: boolean }, receipt_id: { type: string } } } } } }
+        "400": { description: Invalid bounded outcome or Idempotency-Key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: "Missing, unknown, expired, revoked, or wrong-project business key", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "Idempotency-Key was already used with a different normalized assertion", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { description: "Per-IP or per-key ingest rate limit reached; no tenant usage attribution", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: "Durable acceptance unavailable; retry", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /otlp/v1/logs:
     post:
       tags: [Ingest]
@@ -758,7 +827,7 @@ paths:
                 items:
                   type: object
                   properties:
-                    connection_id: { type: string, maxLength: 128, description: "Opaque registered installation ID; omitted for legacy or external DSN receipts." }
+                    connection_id: { type: string, maxLength: 128, description: "Opaque registered installation ID; empty/omitted for legacy or external DSN receipts." }
                     provider: { type: string }
                     operation: { type: string }
                     channel: { type: string }
@@ -820,14 +889,102 @@ paths:
       responses:
         "200": { description: "Bounded connector aggregates scoped to the project" }
         "404": { description: Project not found }
+  /api/projects/{id}/business-health:
+    get:
+      tags: [Projects]
+      summary: Query bounded business outcome health by check name
+      description: "Returns project and tenant scoped counts, error rate, latency aggregates, and last observation times. No request payload or user data is returned."
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 24 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+      responses:
+        "200":
+          description: Bounded business outcome aggregates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    check_name: { type: string }
+                    attempts: { type: integer, format: int64 }
+                    ok_count: { type: integer, format: int64 }
+                    error_count: { type: integer, format: int64 }
+                    error_rate: { type: number }
+                    avg_elapsed_ms: { type: number }
+                    max_elapsed_ms: { type: integer, format: int64 }
+                    last_completed_at: { type: string, format: date-time, nullable: true }
+                    last_ok_at: { type: string, format: date-time, nullable: true }
+                    last_error_at: { type: string, format: date-time, nullable: true }
+        "404": { description: Project not found }
+  /api/projects/{id}/business-keys:
+    get:
+      tags: [Projects]
+      summary: List project business-key metadata
+      description: Admin session only. Returns at most 100 keys, with every active key first, without bearer secrets or hashes.
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Bounded key metadata, including revoked keys
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/BusinessKeyMetadata" } }
+        "403": { description: Admin role required }
+        "404": { description: Project not found in this organization }
+    post:
+      tags: [Projects]
+      summary: Provision one confidential project business key
+      description: Admin session with CSRF only. Shows the random 192-bit bearer secret once. Up to eight active unexpired keys are allowed per project; keep a spare slot to create a replacement before revoking an old key. Action is audited.
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, maxLength: 64 }
+                expires_in_days: { type: integer, minimum: 1, maximum: 365, default: 90 }
+      responses:
+        "201":
+          description: Created; key is shown once and never returned by list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/BusinessKeyMetadata" }
+                  - { type: object, required: [key], properties: { key: { type: string, pattern: '^flb_[0-9a-f]{48}$' } } }
+        "400": { description: Invalid name or expiry }
+        "409": { description: Active business key limit reached; revoke an unused key }
+        "403": { description: Admin role required }
+        "404": { description: Project not found in this organization }
+  /api/projects/{id}/business-keys/{keyID}:
+    delete:
+      tags: [Projects]
+      summary: Revoke a project business key
+      description: Admin session with CSRF only. Revocation is immediate for new requests and audited; historical key IDs remain attached to accepted checks.
+      security: [{ session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: keyID, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked }
+        "403": { description: Admin role required }
+        "404": { description: Project or active key not found in this organization }
   /api/usage:
     get:
       tags: [System]
-      summary: Query durable MCP, API-key, and DSN usage
+      summary: Query durable MCP, API-key, DSN, and business-key usage
       description: >
         Returns bounded, tenant-scoped one-minute usage aggregates. The
         projection contains only fixed surface and operation names, opaque
-        project or API-key row identifiers belonging to the caller's tenant,
+        project, API-key, or business-key row identifiers belonging to the caller's tenant,
         counters, and timestamps. Request bodies, credentials, user IDs, and
         provider payloads are never returned.
       security: [{ apiKey: [] }, { session: [] }]
@@ -845,8 +1002,8 @@ paths:
                   type: object
                   properties:
                     project_id: { type: string }
-                    credential_id: { type: string, description: "Opaque API-key row ID; omitted for sessions and DSNs" }
-                    surface: { type: string, enum: [dsn, api_key, mcp] }
+                    credential_id: { type: string, description: "Opaque API-key or business-key row ID; omitted for sessions and DSNs" }
+                    surface: { type: string, enum: [dsn, api_key, mcp, business_key] }
                     operation: { type: string, description: "Fixed or allowlisted operation" }
                     requests: { type: integer, format: int64 }
                     errors: { type: integer, format: int64 }
@@ -999,7 +1156,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
       responses:
-        "200": { description: Bounded payload-free AI operation outcomes; fresh calls include an evidence_digest SHA-256 fingerprint, while cached reads leave it empty }
+        "200": { description: "Bounded payload-free AI operation outcomes; fresh calls include an evidence_digest SHA-256 fingerprint, while cached reads leave it empty" }
   /api/projects/{id}/automation-next:
     get:
       tags: [Projects]
@@ -1010,13 +1167,13 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: issue_id, in: query, required: true, schema: { type: string, maxLength: 128 } }
       responses:
-        "200": { description: "Bounded next-stage state (`ready`, `pending`, `retry`, `blocked`, `complete`, or `not_started`)" }
+        "200": { description: "Bounded next-stage state (ready, pending, retry, blocked, complete, or not_started)" }
         "400": { description: Invalid or missing issue_id }
   /api/projects/{id}/automation-claims:
     post:
       tags: [Projects]
       summary: Claim one executable workflow stage
-      description: Atomically leases one tenant-scoped stage and target revision to an external worker. The opaque claim id grants no repository, CI, deployment, or probe capability. A passed execution receipt must include the active claim id.
+      description: Atomically leases one tenant-scoped stage and target revision to an external worker. The claim id is opaque and grants no repository, CI, deployment, or probe capability. A passed execution receipt must include the active claim id.
       security: [{ apiKey: [] }, { session: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -1101,10 +1258,10 @@ paths:
               required: [name, type]
               properties:
                 name: { type: string }
-                type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, service_freshness, release_error_rate, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
+                type: { type: string, enum: [new_issue, regression, spike, anomaly, silence, metric_threshold, trace_percentile, service_level, business_health, connector_error_rate, connector_quota, connector_freshness, connector_sync_health, release_error_rate, service_freshness, release_freshness, deploy_failure, deploy_acceptance, rollback, log_severity, usage_threshold, api_key_hygiene, ai_triage, ingest_acceptance] }
                 threshold: { type: integer, description: "event, usage, API-key, AI receipt, or incomplete ingest receipt count for most rules; service_level uses it as the good-span latency objective in milliseconds" }
                 window_minutes: { type: integer, minimum: 1, maximum: 720, description: "rolling evaluation window in minutes; all watchdog rules accept 1-720 minutes; api_key_hygiene uses this as a bounded age/expiry horizon, ai_triage uses it as a failure window or stuck age, and deploy_acceptance uses it as a synthetic-verification grace period" }
-                threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, and release rules; service_level uses it as the minimum availability target" }
+                threshold_value: { type: number, description: "decimal threshold for metric, trace, connector, release, and business_health error rate rules (0-1); service_level uses it as the minimum availability target" }
                 comparison: { type: string, enum: [gt, gte, lt, lte] }
                 metric_name: { type: string, maxLength: 128 }
                 metric_labels:
@@ -1119,18 +1276,19 @@ paths:
                     method: { type: string, maxLength: 12, pattern: "^[A-Z]+$" }
                     status_class: { type: string, enum: [1xx, 2xx, 3xx, 4xx, 5xx] }
                 span_name: { type: string, maxLength: 128, description: "exact span operation for trace_percentile and service_level rules" }
+                business_check_name: { type: string, maxLength: 64, pattern: '^[a-z][a-z0-9._:-]{0,63}$', description: "exact business check series for business_health; required for that rule type" }
                 percentile: { type: integer, enum: [50, 75, 90, 95, 99] }
                 connector_provider: { type: string, maxLength: 32 }
                 connector_operation: { type: string, maxLength: 64 }
                 connector_channel: { type: string, maxLength: 32 }
                 connector_error_code: { type: string, maxLength: 64, description: "optional fixed provider error code selector, such as auth_expired" }
-                connector_connection_id: { type: string, maxLength: 128, description: "optional registered connector installation selector; tenant checked and provider must match" }
+                connector_connection_id: { type: string, maxLength: 128, description: "Optional registered connector installation selector; tenant checked and provider must match." }
                 connector_sync_mode: { type: string, enum: [failed, overdue], description: "connector_sync_health condition; failed counts recent failed states and overdue counts missed schedules or expired leases" }
                 connector_quota_metric: { type: string, enum: [quota_remaining, retry_after_ms, sync_lag_ms] }
                 release_version: { type: string, maxLength: 128 }
                 service_name: { type: string, maxLength: 64, description: "exact bounded service name in the service-up:<service> heartbeat; pair with release_version for service_freshness" }
                 log_severity: { type: string, enum: [trace, debug, info, warn, error, fatal] }
-                usage_surface: { type: string, enum: [dsn, api_key, mcp], description: "usage_threshold surface; API-key and MCP usage is org-wide within the owning tenant" }
+                usage_surface: { type: string, enum: [dsn, api_key, mcp, business_key], description: "usage_threshold surface; API-key and MCP usage is org-wide, while DSN and business-key usage is project-scoped" }
                 usage_operation: { type: string, maxLength: 64, description: "fixed allowlisted operation for the usage surface" }
                 usage_measure: { type: string, enum: [requests, errors, denied], description: "usage counter; denied includes tenant-known role refusals" }
                 api_key_hygiene_mode: { type: string, enum: [unused, expiring], description: "org-scoped API-key hygiene mode; the query returns aggregate counts only" }
@@ -1251,11 +1409,12 @@ paths:
                   claimed: { type: boolean }
                   skipped: { type: boolean }
                   skip_reason: { type: string, enum: [lease_busy] }
+                  receipt_status: { type: string, enum: [accepted, unavailable, unscoped, invalid], description: "Present when a provider call was made; whether Flare persisted its connector receipt, independently of provider outcome." }
                   next_run_at: { type: string, format: date-time, nullable: true }
         "202": { description: Another worker owns the lease; no provider call was made }
         "400": { description: Credential is not configured }
         "404": { description: Not found }
-        "409": { description: Connection is paused, revoked, or otherwise disabled }
+        "409": { description: "Connection is paused, revoked, or otherwise disabled" }
         "422": { description: Provider is not supported by the bounded worker }
   /api/channels:
     get:

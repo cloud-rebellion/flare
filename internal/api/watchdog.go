@@ -297,6 +297,18 @@ func (s *Server) watchdogReason(ctx context.Context, rule *generated.ListWatchdo
 			return ""
 		}
 		return serviceLevelReason(stats, rule.SpanName, rule.Threshold, rule.ThresholdValue, rule.WindowMinutes)
+	case "business_health":
+		stats, err := s.q.GetBusinessHealthStats(ctx, generated.GetBusinessHealthStatsParams{
+			ProjectID: rule.ProjectID,
+			OrgID:     rule.OrgID,
+			CheckName: rule.BusinessCheckName,
+			Since:     pgtype.Timestamptz{Time: windowStart, Valid: true},
+		})
+		if err != nil {
+			slog.Error("watchdog: business-health query failed, rule skipped", "rule", rule.ID, "type", rule.Type, "project", rule.ProjectID, "error", err)
+			return ""
+		}
+		return businessHealthReason(stats, rule.BusinessCheckName, rule.Comparison, rule.ThresholdValue, rule.WindowMinutes)
 	case "connector_error_rate":
 		stats, err := s.q.GetConnectorErrorRateStats(ctx, generated.GetConnectorErrorRateStatsParams{
 			ProjectID:    rule.ProjectID,

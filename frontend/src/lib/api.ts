@@ -16,6 +16,9 @@ import type {
   Release,
   ReleaseFreshness,
   ClientHealth,
+  BusinessHealth,
+  BusinessCheckKey,
+  BusinessCheckKeyCreated,
   ConnectorConnection,
   ConnectorCheckResult,
   ConnectorSyncRun,
@@ -197,6 +200,17 @@ export const api = {
       'GET',
       `/projects/${pid}/metrics/query?name=${encodeURIComponent(name)}&window=${windowMin}`
     ),
+  businessHealth: (pid: string, hours = 24, limit = 100) =>
+    req<BusinessHealth[]>('GET', `/projects/${pid}/business-health?hours=${hours}&limit=${limit}`),
+  businessKeys: (pid: string) =>
+    req<BusinessCheckKey[]>('GET', `/projects/${pid}/business-keys`),
+  createBusinessKey: (pid: string, name: string, expiresInDays: number) =>
+    req<BusinessCheckKeyCreated>('POST', `/projects/${pid}/business-keys`, {
+      name,
+      expires_in_days: expiresInDays
+    }),
+  revokeBusinessKey: (pid: string, keyID: string) =>
+    req<void>('DELETE', `/projects/${pid}/business-keys/${keyID}`),
 
   logs: (
     pid: string,
