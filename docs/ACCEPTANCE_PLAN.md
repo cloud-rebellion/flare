@@ -85,16 +85,26 @@ upload. It then uploads and reads back both sets of opaque asset names, with
 cleanup before its success receipt. Focused local tests passed. At about 45
 maps per host, a release consumes about 90 of the project's 2,000 artifact
 slots; retention needs review. Flare's artifact upload/list sizes and quota
-totals now count stored UTF-8 bytes rather than Unicode characters; a focused
-Unicode regression passed against disposable PostgreSQL 16 after migrations
-through 085. None of this establishes production capture.
+totals count stored UTF-8 bytes rather than Unicode characters. Quota
+admission now locks the project, accounts for the exact replacement row, and
+commits the quota check and upsert in one transaction. Focused Unicode,
+concurrent upload, retry-at-cap, byte-delta, and foreign-tenant regressions
+passed against disposable PostgreSQL 16 after migrations through 085. Stage
+still needs a preflight and receipt-aware retention policy that protects the
+live, rollback, and recent-event releases. Flare's own map upload currently
+runs after cutover, so quota exhaustion can leave a live release with a failed
+deployment run. None of this establishes production capture.
 
 The live backup unit was observed failing on the removed `hephaestus-core`
-container, and a Stage verified-bundle off-host snapshot was missing; repair
-and an independent restore are required before cutover. The repaired backup
-candidate preserves the installed TrustIssues WAL-safe snapshot and has a
-networkless regression fixture. That fixture checks the restore procedure; it
-does not prove a Flare boot or secret decryption from a real restored snapshot.
+container. A correctly configured read-only Restic query found zero
+Stage-tagged off-host snapshots. The repaired backup candidate preserves the
+installed TrustIssues WAL-safe snapshot and has a networkless regression
+fixture. The latest local Stage bundle (`20261004-211224.766334068`) passed a
+network-isolated restore, repository fsck, and offline `demo-local` smoke;
+evidence is retained at `/var/tmp/stage-restore-vQO19CpK` on the production
+host. This establishes a local Stage restore only. The backup-script repair,
+fresh off-host Stage and separate-secret snapshots, and an independent Flare
+database/secret restore remain required before cutover.
 
 The ten first-party browser bridges are source-wired, but public bundle
 sampling did not prove an active Flare DSN or event receipt. Most app builds
@@ -136,7 +146,11 @@ configuration and canaries. HubSpot's account probe and explicit project
 binding exist locally. Browser-bound OAuth consent, encrypted refresh, and
 provider revocation are implemented and tested; a real HubSpot app registration,
 consent, account probe, and alert remain unverified. Legacy installations still
-require an admin to bind them.
+require an admin to bind them. The connector sync watchdog now detects a bound
+active installation whose first sync never ran, after its rule-window grace;
+the project/provider/tenant and paused/revoked exclusions passed a disposable
+PostgreSQL 16 regression. An enabled scheduler and live HubSpot pass are still
+needed to prove that this alert can fire in production.
 
 The BrightCRM native metric pilot separates accepted metric batches from
 maintenance check-ins, so a healthy check-in cannot mask a stalled metric
@@ -170,7 +184,12 @@ form and emits a distinct version 3 browser receipt; the runtime could not be
 run against a local Docker daemon, so it remains disabled pending a real
 post-cutover trial. A signed-in browser journey remains an additional live
 acceptance check. The exact external receipt verifier requires a scoped Stage
-profile and live proof; no caller-provided success flag is sufficient.
+profile and live proof; no caller-provided success flag is sufficient. A
+synthetic Stage proof was rejected at Flare promotion because its expected
+pipeline was empty even though the verifier bound it to the deploy pipeline.
+The candidate now uses the bound deploy pipeline in both places; focused
+PostgreSQL-backed receipt promotion passed. No real Stage attestation has been
+promoted from a deployed release.
 
 A Flare-owned outside-in canary candidate now checks the public `/readyz` against
 an operator-pinned release, posts an idempotent native log, reads its retained
