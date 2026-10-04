@@ -13,11 +13,15 @@ import (
 
 type Config struct {
 	Environment string
-	// Release is the immutable version stamped into the running binary. The
-	// server sets it after checking FLARE_RELEASE against that build identity.
+	// Release is the version plus a full Git revision when the trusted builder
+	// provided one. The server checks runtime declarations against the binary.
 	Release string
-	Port    string
-	BaseURL string
+	// SourceCommit is the exact Git revision declared by the trusted image
+	// builder and stamped into the executable. Empty means no revision was
+	// supplied; it is never inferred from the version tag.
+	SourceCommit string
+	Port         string
+	BaseURL      string
 
 	DatabaseURL   string
 	DBMaxConns    int32

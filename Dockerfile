@@ -21,15 +21,20 @@ COPY frontend/ .
 ARG FLARE_DSN=""
 ARG FLARE_ENVIRONMENT=production
 ARG FLARE_RELEASE=v0.4.0
+ARG FLARE_COMMIT=""
 ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
     PUBLIC_FLARE_ENVIRONMENT=${FLARE_ENVIRONMENT} \
     PUBLIC_FLARE_RELEASE=${FLARE_RELEASE}
-RUN bun run build
+RUN if [ -n "${FLARE_COMMIT}" ]; then \
+      export PUBLIC_FLARE_RELEASE="${FLARE_RELEASE}+g${FLARE_COMMIT}"; \
+    fi; \
+    bun run build
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.6-bookworm AS backend
 WORKDIR /app
 ARG FLARE_RELEASE=v0.4.0
+ARG FLARE_COMMIT=""
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential gcc g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -40,11 +45,15 @@ COPY . .
 COPY --from=frontend /app/frontend/build ./cmd/server/frontend/build
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -X main.Version=${FLARE_RELEASE}" -o /flare ./cmd/server
+    CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -X main.Version=${FLARE_RELEASE} -X main.Commit=${FLARE_COMMIT}" -o /flare ./cmd/server
 
 # Stage 3: runtime (debian-slim for glibc + libstdc++, which the duckdb static
 # lib needs at runtime).
 FROM debian:bookworm-slim
+ARG FLARE_RELEASE=v0.4.0
+ARG FLARE_COMMIT=""
+LABEL org.opencontainers.image.version="${FLARE_RELEASE}" \
+      org.opencontainers.image.revision="${FLARE_COMMIT}"
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
        ca-certificates tzdata wget libstdc++6 libgcc-s1 \

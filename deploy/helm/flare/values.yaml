@@ -1,12 +1,14 @@
 image:
   repository: flare
-  # Pinned, not "latest". A floating tag means the deploy is not reproducible
-  # and there is no rollback target: two pods of the same ReplicaSet can be
-  # running different code, and "roll back" has nothing to roll back to. Bump
-  # this with flare/VERSION. This is the single release value for the chart:
-  # the deployment passes it to FLARE_RELEASE so runtime telemetry and the
-  # immutable image tag identify the same artifact.
+  # Version label. Tags can be moved by a registry; set digest for an exact
+  # image and a reliable rollback target. Keep tag aligned with flare/VERSION.
   tag: v0.4.0
+  # Optional digest of the image built from sourceCommit (sha256:<64 hex>).
+  # When present the Deployment selects repository@digest instead of the tag.
+  digest: ""
+  # Full lowercase Git object ID stamped into the image build as FLARE_COMMIT.
+  # The binary rejects a different runtime declaration. Empty is unattributed.
+  sourceCommit: ""
   pullPolicy: IfNotPresent
 
 replicaCount: 1

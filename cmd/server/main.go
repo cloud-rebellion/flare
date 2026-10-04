@@ -30,13 +30,14 @@ import (
 //go:embed all:frontend/build
 var frontendFiles embed.FS
 
-// Version is stamped by the release build so Flare can group its own
-// regressions by the exact deployed artifact. Local builds retain a readable
-// fallback rather than reporting an empty release.
+// Version and Commit are stamped by the image builder. A version alone can be
+// reused across builds; only a supplied, pipeline-bound commit distinguishes
+// one source revision from another. Local builds keep a readable fallback.
 var Version = "dev"
+var Commit = ""
 
 func main() {
-	flarereport.InitFlare("flare", Version)
+	flarereport.InitFlare("flare", exactRelease(Version, Commit))
 	defer flarereport.Flush(2 * time.Second)
 	if err := run(); err != nil {
 		// Config, migration, and database failures happen before the HTTP server
@@ -56,13 +57,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	// The chart passes its image tag as FLARE_RELEASE. Compare that declared
-	// artifact with the version baked into the executable; do not let a healthy
-	// pod advertise a release other than the code it is actually running.
+	// Compose and Helm declare the version and source commit used at build
+	// time. Reject a different runtime declaration before serving readiness.
 	cfg.Release, err = releaseIdentity(Version, os.Getenv("FLARE_RELEASE"))
 	if err != nil {
 		return err
 	}
+	cfg.SourceCommit, err = sourceCommitIdentity(Commit, os.Getenv("FLARE_COMMIT"))
+	if err != nil {
+		return err
+	}
+	cfg.Release = exactRelease(cfg.Release, cfg.SourceCommit)
 
 	level := slog.LevelInfo
 	if !cfg.IsProduction() {
@@ -242,4 +247,30 @@ func releaseIdentity(compiled, declared string) (string, error) {
 		return "", fmt.Errorf("FLARE_RELEASE %q does not match binary release %q", declared, compiled)
 	}
 	return compiled, nil
+}
+
+func sourceCommitIdentity(compiled, declared string) (string, error) {
+	compiled = strings.TrimSpace(compiled)
+	declared = strings.TrimSpace(declared)
+	if compiled != "" {
+		if len(compiled) != 40 && len(compiled) != 64 {
+			return "", fmt.Errorf("binary source commit is not a full Git object ID")
+		}
+		for _, c := range compiled {
+			if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+				return "", fmt.Errorf("binary source commit is not a lowercase Git object ID")
+			}
+		}
+	}
+	if compiled != declared {
+		return "", fmt.Errorf("FLARE_COMMIT does not match binary source commit")
+	}
+	return compiled, nil
+}
+
+func exactRelease(version, commit string) string {
+	if commit == "" {
+		return version
+	}
+	return version + "+g" + commit
 }

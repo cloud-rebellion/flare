@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReleaseIdentity(t *testing.T) {
 	for _, tc := range []struct {
@@ -24,5 +27,33 @@ func TestReleaseIdentity(t *testing.T) {
 	}
 	if _, err := releaseIdentity("v0.4.0", "development"); err == nil {
 		t.Fatal("releaseIdentity must reject development identity on a release binary")
+	}
+}
+
+func TestSourceCommitIdentityAndExactRelease(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	got, err := sourceCommitIdentity(sha, sha)
+	if err != nil || got != sha {
+		t.Fatalf("sourceCommitIdentity = %q, %v; want %q", got, err, sha)
+	}
+	if got := exactRelease("v0.4.0", sha); got != "v0.4.0+g"+sha {
+		t.Fatalf("exactRelease = %q", got)
+	}
+	if got := exactRelease("dev", ""); got != "dev" {
+		t.Fatalf("unattributed local release = %q", got)
+	}
+	if _, err := sourceCommitIdentity("", sha); err == nil {
+		t.Fatal("runtime commit declaration must not invent an unstamped revision")
+	}
+	if _, err := sourceCommitIdentity(sha, ""); err == nil {
+		t.Fatal("stamped binary must have a matching runtime commit declaration")
+	}
+	if _, err := sourceCommitIdentity(sha, strings.Repeat("b", 40)); err == nil {
+		t.Fatal("runtime commit declaration must match the binary")
+	}
+	for _, invalid := range []string{"abc123", strings.Repeat("G", 40), strings.Repeat("a", 39) + "z"} {
+		if _, err := sourceCommitIdentity(invalid, ""); err == nil {
+			t.Fatalf("accepted invalid Git object ID %q", invalid)
+		}
 	}
 }

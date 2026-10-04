@@ -20,6 +20,16 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+For a traceable release, build from a clean, exact checkout and set
+`FLARE_COMMIT` to its full lowercase Git object ID before running Compose.
+Keep `FLARE_RELEASE` as the version (for example `v0.4.0`), not a second
+commit string. Compose passes both values into the browser and server builds
+and checks the running binary against the declared values. `/readyz` then
+reports `release: v0.4.0+g<commit>` and `source_commit: <commit>`. An empty
+`source_commit` means the build was not attributed to a Git revision. Record
+the built image ID or registry digest separately; the process cannot
+independently prove which image digest the container runtime started.
+
 Open `FLARE_BASE_URL`. The first account you register becomes the workspace
 **owner**. Create a project to get a DSN, then point any `@sentry/*` SDK (just
 change the DSN) or an OTLP exporter at it.
@@ -29,10 +39,14 @@ Put a TLS terminator (Caddy, nginx, Traefik) in front for production and set
 
 ## Kubernetes (Helm)
 
-`flare/VERSION` is `v0.4.0`. Keep the chart's `image.tag` at that exact
-release value when upgrading. It is the chart's single release input: the
-deployment uses it for the immutable image tag and passes the same value as
-`FLARE_RELEASE`, so runtime telemetry can be tied to the deployed artifact.
+`flare/VERSION` is `v0.4.0`. Keep the chart's `image.tag` at that version
+when upgrading. A tag alone can be moved in the registry. For an exact image,
+set `image.digest=sha256:<64 lowercase hex digits>`; the Deployment then
+pulls `repository@digest`. Set `image.sourceCommit` to the full commit
+stamped into that image as `FLARE_COMMIT`. Flare rejects a runtime declaration
+that differs from the binary. The chart cannot verify that the supplied digest
+was built from the supplied commit; the build pipeline must record and verify
+that binding.
 
 ```bash
 helm install flare ./deploy/helm/flare \
@@ -45,6 +59,11 @@ helm install flare ./deploy/helm/flare \
   --set ingress.host=flare.example.com \
   --set ingress.className=nginx
 ```
+
+For a pinned rollout, add `--set image.digest=sha256:<digest>` and
+`--set image.sourceCommit=<full-git-sha>` to the Helm command. Verify the
+rendered image digest, the live pod image ID, and `/readyz` on the exact
+deployed revision before accepting the release.
 
 The chart bundles a single Postgres (`postgres.bundled=true`) with its own PVC.
 To use an existing database instead:

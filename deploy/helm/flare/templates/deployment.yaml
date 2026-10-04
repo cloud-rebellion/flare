@@ -30,7 +30,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: flare
+          {{- if .Values.image.digest }}
+          {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) }}
+          {{- fail "image.digest must be sha256:<64 lowercase hex digits>" }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -46,6 +53,8 @@ spec:
               value: production
             - name: FLARE_RELEASE
               value: {{ .Values.image.tag | quote }}
+            - name: FLARE_COMMIT
+              value: {{ .Values.image.sourceCommit | quote }}
             - name: PORT
               value: "8080"
             - name: BASE_URL

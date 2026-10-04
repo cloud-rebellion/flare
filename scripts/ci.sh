@@ -157,11 +157,9 @@ sqlc_check() {
   echo "internal/db/generated matches internal/db/queries and the migration schema"
 }
 
-# The runtime release identity must describe the same artifact as the image a
-# Helm install starts. Keep the single chart release input (image.tag) aligned
-# with flare/VERSION and Chart.yaml, and keep the deployment template wired to
-# pass that value through FLARE_RELEASE. Without this check a healthy pod can
-# report a stale release while its image tag points at a different build.
+# Keep version defaults aligned across builders and deployment templates. A
+# version tag alone is not immutable: the caller must pass a full source
+# revision to the builder and, for Helm, pin the registry image by digest.
 release_identity_check() {
   local release
   [ -f VERSION ] || { echo "VERSION is missing" >&2; return 1; }
@@ -179,8 +177,16 @@ release_identity_check() {
     echo "Helm deployment does not pass image.tag through FLARE_RELEASE" >&2
     return 1
   }
-  [ "$(grep -cF -- "ARG FLARE_RELEASE=$release" Dockerfile)" -eq 2 ] || {
-    echo "Dockerfile build stages do not both default to VERSION ($release)" >&2
+  [ "$(grep -cF -- "ARG FLARE_RELEASE=$release" Dockerfile)" -eq 3 ] || {
+    echo "Dockerfile build and runtime stages do not default to VERSION ($release)" >&2
+    return 1
+  }
+  [ "$(grep -cF -- 'ARG FLARE_COMMIT=""' Dockerfile)" -eq 3 ] || {
+    echo "Dockerfile stages do not share the optional full source commit" >&2
+    return 1
+  }
+  grep -qF -- 'main.Commit=${FLARE_COMMIT}' Dockerfile || {
+    echo "Dockerfile does not stamp the source commit into the binary" >&2
     return 1
   }
   for compose in docker-compose.yml deploy/docker-compose.yml; do
@@ -188,8 +194,16 @@ release_identity_check() {
       echo "$compose build and runtime release defaults do not both match VERSION ($release)" >&2
       return 1
     }
+    [ "$(grep -cF -- 'FLARE_COMMIT: "${FLARE_COMMIT:-}"' "$compose")" -eq 2 ] || {
+      echo "$compose does not pass the same source commit to build and runtime" >&2
+      return 1
+    }
   done
-  echo "Release identity is pinned to $release (Helm, Dockerfile, Compose build and runtime)"
+  grep -qF -- 'value: {{ .Values.image.sourceCommit | quote }}' deploy/helm/flare/templates/deployment.yaml || {
+    echo "Helm deployment does not pass the source commit to runtime" >&2
+    return 1
+  }
+  echo "Version defaults agree on $release; exact source identity requires FLARE_COMMIT and an immutable image digest"
 }
 
 # The dashboard is not a separate deliverable: cmd/server does //go:embed all:frontend/build,

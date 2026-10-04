@@ -18,6 +18,7 @@ services:
         FLARE_DSN: "${FLARE_DSN:-}"
         FLARE_ENVIRONMENT: "${FLARE_ENVIRONMENT:-production}"
         FLARE_RELEASE: "${FLARE_RELEASE:-v0.4.0}"
+        FLARE_COMMIT: "${FLARE_COMMIT:-}"
     image: flare:latest
     container_name: flare
     restart: unless-stopped
@@ -29,6 +30,7 @@ services:
       # Must match the FLARE_RELEASE build arg above; the server rejects a
       # release image when its runtime identity does not match the binary.
       FLARE_RELEASE: "${FLARE_RELEASE:-v0.4.0}"
+      FLARE_COMMIT: "${FLARE_COMMIT:-}"
       # Production refuses to boot without this. Fail here, at compose time,
       # with a readable message rather than in a container restart loop.
       FLARE_SECRET_KEY: "${FLARE_SECRET_KEY:?set FLARE_SECRET_KEY in .env (openssl rand -base64 32)}"

@@ -1,0 +1,22 @@
+# The production .env is preserved beside docker-compose.yml. Never send it
+# into the build context: COPY . . would otherwise retain it in a build layer.
+.env
+.env.*
+**/.env
+**/.env.*
+# Do not cache local credentials or private TLS keys in the backend build.
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/*credentials*.json
+**/.aws
+**/.ssh
+**/node_modules
+frontend/build
+cmd/server/frontend/build
+bin
+data
+.git
+**/.git

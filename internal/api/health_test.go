@@ -71,7 +71,11 @@ func TestReadinessStatusSeparatesCoreAndOptionalFailures(t *testing.T) {
 }
 
 func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
-	srv := &Server{cfg: config.Config{RetentionDays: 14}, automationOutbox: automationoutbox.New(nil)}
+	sha := strings.Repeat("a", 40)
+	srv := &Server{
+		cfg:              config.Config{RetentionDays: 14, Release: "v0.4.0+g" + sha, SourceCommit: sha},
+		automationOutbox: automationoutbox.New(nil),
+	}
 	rec := httptest.NewRecorder()
 	srv.handleReady(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -83,6 +87,9 @@ func TestHandleReadyDatabaseUnavailableReturns503AndBoundedJSON(t *testing.T) {
 	}
 	if got.Status != "degraded" || got.DB.Healthy {
 		t.Fatalf("readiness response = %#v, want degraded/unhealthy DB", got)
+	}
+	if got.Release != "v0.4.0+g"+sha || got.SourceCommit != sha {
+		t.Fatalf("readiness identity = %q / %q, want exact stamped release and source commit", got.Release, got.SourceCommit)
 	}
 	if got.Retention.Policy != "paused" || got.Retention.Days != 14 {
 		t.Fatalf("retention response = %#v, want paused/14", got.Retention)
