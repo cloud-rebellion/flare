@@ -70,6 +70,21 @@ func TestParseEnvelopeDispatchesTransaction(t *testing.T) {
 	}
 }
 
+func TestParseEnvelopeRejectsMalformedTailInsteadOfReturningPrefix(t *testing.T) {
+	cases := []string{
+		`not-json` + "\n" + `{"type":"event"}` + "\n{}\n",
+		"{}\n" + `{"type":"event"}` + "\n{}\n" + `not-json` + "\n{}\n",
+		"{}\n" + `{"type":"event"}` + "\n{}\n" + `{"type":"event"}` + "\n",
+		"{}\n" + `{"type":"event"}` + "\n{}\n" + `{}` + "\n{}\n",
+	}
+	for _, body := range cases {
+		items, err := ParseEnvelope([]byte(body))
+		if err == nil || len(items) != 0 {
+			t.Fatalf("malformed tail returned %d accepted prefix items, err=%v", len(items), err)
+		}
+	}
+}
+
 // RFC3339 string timestamps (some SDKs) must parse just like float unix seconds.
 func TestParseSentryTransactionRFC3339Timestamps(t *testing.T) {
 	payload := `{"transaction":"job","start_timestamp":"2026-07-11T20:00:00Z","timestamp":"2026-07-11T20:00:01.5Z","contexts":{"trace":{"trace_id":"t","span_id":"s","op":"function"}}}`

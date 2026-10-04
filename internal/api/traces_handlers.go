@@ -71,16 +71,13 @@ func (s *Server) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) persistSpans(ctx context.Context, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) (int, error) {
-	return persistSpansWithQueries(ctx, s.q, project, spans, budget)
+	spans = spans[:budget.take(len(spans))]
+	return persistSpansWithQueries(ctx, s.q, project, spans)
 }
 
 // persistSpansWithQueries lets Sentry envelopes use the same sanitization and
-// request budget inside their all-or-nothing database transaction.
-func persistSpansWithQueries(ctx context.Context, q *generated.Queries, project *generated.Project, spans []ingest.SpanRecord, budget *ingestBudget) (int, error) {
-	// Spend the request's row budget first. handleEnvelope calls this once per
-	// transaction item, so the budget has to be the REQUEST's, not this call's.
-	// See maxIngestRecords.
-	spans = spans[:budget.take(len(spans))]
+// transactional CopyFrom after its caller has spent the request's row budget.
+func persistSpansWithQueries(ctx context.Context, q *generated.Queries, project *generated.Project, spans []ingest.SpanRecord) (int, error) {
 	if len(spans) == 0 {
 		return 0, nil
 	}

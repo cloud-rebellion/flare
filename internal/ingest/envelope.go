@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 )
 
 // EnvelopeItem is one item from a Sentry envelope: its type ("event",
@@ -21,7 +23,8 @@ type EnvelopeItem struct {
 //
 // Limitation: length-prefixed binary items are not supported; event and
 // transaction payloads from the official SDKs are single-line JSON, which this
-// handles.
+// handles. Malformed framing fails the whole envelope before any item is stored;
+// returning a parsed prefix would otherwise make a 200 hide a lost tail.
 func ParseEnvelope(body []byte) ([]EnvelopeItem, error) {
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -35,8 +38,9 @@ func ParseEnvelope(body []byte) ([]EnvelopeItem, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	if len(lines) == 0 {
-		return nil, nil
+	var envelopeHeader map[string]json.RawMessage
+	if len(lines) == 0 || json.Unmarshal(lines[0], &envelopeHeader) != nil || envelopeHeader == nil {
+		return nil, errors.New("invalid envelope header")
 	}
 
 	var items []EnvelopeItem
@@ -46,10 +50,10 @@ func ParseEnvelope(body []byte) ([]EnvelopeItem, error) {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(lines[i], &hdr); err != nil {
-			break
+			return nil, fmt.Errorf("invalid envelope item header %d: %w", (i-1)/2, err)
 		}
-		if i+1 >= len(lines) {
-			break
+		if hdr.Type == "" || i+1 >= len(lines) {
+			return nil, fmt.Errorf("incomplete envelope item %d", (i-1)/2)
 		}
 		items = append(items, EnvelopeItem{Type: hdr.Type, Payload: lines[i+1]})
 	}

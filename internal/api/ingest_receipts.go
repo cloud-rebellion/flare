@@ -124,7 +124,7 @@ func (s *Server) finishIngestReceipt(ctx context.Context, receipt *ingestReceipt
 		OrgID:          receipt.orgID,
 		ProjectID:      receipt.projectID,
 		ReceivedCount:  receipt.received,
-		AcceptedCount:  int64(outcome.accepted),
+		AcceptedCount:  int64(outcome.accepted + outcome.deduplicated),
 		RejectedCount:  int64(outcome.invalid + outcome.failed),
 		DroppedCount:   int64(outcome.dropped),
 		PersistedCount: int64(outcome.accepted),

@@ -10,14 +10,16 @@ import (
 // tenant or project identifiers: the private /metrics endpoint is process
 // scoped and must remain cardinality-safe.
 type ingestOutcome struct {
-	accepted uint64
-	invalid  uint64
-	dropped  uint64
-	failed   uint64
+	accepted     uint64
+	deduplicated uint64
+	invalid      uint64
+	dropped      uint64
+	failed       uint64
 }
 
 func (o *ingestOutcome) add(other ingestOutcome) {
 	o.accepted += other.accepted
+	o.deduplicated += other.deduplicated
 	o.invalid += other.invalid
 	o.dropped += other.dropped
 	o.failed += other.failed
@@ -26,6 +28,7 @@ func (o *ingestOutcome) add(other ingestOutcome) {
 func (o ingestOutcome) record(signal string) {
 	signal = canonicalIngestSignal(signal)
 	metrics.Add("flare_ingest_items", map[string]string{"signal": signal, "outcome": "accepted"}, o.accepted)
+	metrics.Add("flare_ingest_items", map[string]string{"signal": signal, "outcome": "deduplicated"}, o.deduplicated)
 	metrics.Add("flare_ingest_items", map[string]string{"signal": signal, "outcome": "invalid"}, o.invalid)
 	metrics.Add("flare_ingest_items", map[string]string{"signal": signal, "outcome": "dropped"}, o.dropped)
 	metrics.Add("flare_ingest_items", map[string]string{"signal": signal, "outcome": "failed"}, o.failed)
@@ -46,10 +49,10 @@ func recordIngestRequest(transport string, o ingestOutcome, forced string) {
 }
 
 func classifyIngestRequest(o ingestOutcome) string {
-	if o.failed > 0 && o.accepted == 0 {
+	if o.failed > 0 && o.accepted+o.deduplicated == 0 {
 		return "failed"
 	}
-	if o.accepted == 0 {
+	if o.accepted+o.deduplicated == 0 {
 		if o.invalid > 0 || o.dropped > 0 {
 			return "rejected"
 		}

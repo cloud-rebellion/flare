@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bright-interaction/flare/internal/metrics"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -82,6 +83,52 @@ func (m *Manager) once(ctx context.Context) {
 			slog.Warn("partition prune failed", "table", tbl, "error", err)
 		}
 	}
+	// The Sentry replay ledger is a plain table because its project/item unique
+	// keys cannot include a time partition key. Prune it in bounded batches at
+	// the same retention horizon as hot telemetry, and expose failure/backlog.
+	if err := m.pruneSentryItemAcceptances(ctx); err != nil {
+		metrics.Inc("flare_sentry_dedup_prune", map[string]string{"outcome": "error"})
+		slog.Warn("sentry item acceptance prune failed", "error", err)
+	}
+}
+
+const sentryPruneBatch = 10000
+
+func (m *Manager) pruneSentryItemAcceptances(ctx context.Context) error {
+	cutoff := time.Now().UTC().AddDate(0, 0, -m.retentionDays).Truncate(24 * time.Hour)
+	// Bound one pass's DB work even if the service has been offline for a long
+	// time. The oldest-first index makes every later pass resume where it left.
+	const maxBatches = 100
+	var total int64
+	for i := 0; i < maxBatches; i++ {
+		pruned, err := pruneSentryItemAcceptancesBatch(ctx, m.pool, cutoff, sentryPruneBatch)
+		if err != nil {
+			return err
+		}
+		total += pruned
+		if pruned < sentryPruneBatch {
+			metrics.Add("flare_sentry_dedup_pruned", nil, uint64(total))
+			return nil
+		}
+	}
+	metrics.Add("flare_sentry_dedup_pruned", nil, uint64(total))
+	metrics.Inc("flare_sentry_dedup_prune", map[string]string{"outcome": "backlog"})
+	slog.Warn("sentry item acceptance prune backlog remains", "pruned", total, "retention_days", m.retentionDays)
+	return nil
+}
+
+func pruneSentryItemAcceptancesBatch(ctx context.Context, pool *pgxpool.Pool, cutoff time.Time, limit int) (int64, error) {
+	result, err := pool.Exec(ctx, `WITH expired AS (
+		SELECT ctid FROM sentry_item_acceptances
+		WHERE accepted_at < $1
+		ORDER BY accepted_at
+		LIMIT $2 FOR UPDATE SKIP LOCKED
+	) DELETE FROM sentry_item_acceptances
+	WHERE ctid IN (SELECT ctid FROM expired)`, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 // ensurePartition creates the dated child partition if absent. Table names come

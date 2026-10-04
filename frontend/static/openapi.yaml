@@ -68,6 +68,22 @@ components:
       type: object
       properties:
         error: { type: string }
+    SentryEnvelopeResult:
+      type: object
+      required: [id, received, accepted, persisted, deduplicated, invalid, dropped, span_dropped, failed, partial, retryable]
+      properties:
+        id: { type: string, description: Last event ID when one is available }
+        received: { type: integer, format: int64, minimum: 0, description: Parsed envelope item count }
+        accepted: { type: integer, format: int64, minimum: 0, description: Newly persisted plus previously deduplicated supported items }
+        persisted: { type: integer, format: int64, minimum: 0, description: Supported items newly persisted by this request }
+        deduplicated: { type: integer, format: int64, minimum: 0, description: Supported items already durably accepted within retention }
+        invalid: { type: integer, format: int64, minimum: 0 }
+        dropped: { type: integer, format: int64, minimum: 0, description: Capped items and spans }
+        span_dropped: { type: integer, format: int64, minimum: 0, description: Spans omitted by the request row budget }
+        failed: { type: integer, format: int64, minimum: 0 }
+        partial: { type: boolean }
+        retryable: { type: boolean }
+        error: { type: string }
     BusinessKeyMetadata:
       type: object
       required: [id, name, prefix, created_at, expires_at]
@@ -406,7 +422,10 @@ paths:
       description: >
         The endpoint modern @sentry/* SDKs post to. Point an SDK at Flare by
         changing only the DSN host; no code changes. Accepts the Sentry
-        envelope format (newline-delimited JSON).
+        envelope format (newline-delimited JSON). Supported items commit in
+        one transaction; a store failure rolls them back and returns 503.
+        Exact item replays within hot-tier retention are deduplicated. A reused
+        item ID with different payload bytes returns 409.
       security: [{ sentryKey: [] }]
       parameters:
         - name: projectID
@@ -421,11 +440,20 @@ paths:
             schema: { type: string }
       responses:
         "200":
-          description: Accepted
+          description: Accepted; counts can describe an invalid, capped, or deduplicated item
           content:
             application/json:
-              schema: { type: object, properties: { id: { type: string } } }
+              schema: { $ref: "#/components/schemas/SentryEnvelopeResult" }
+        "400": { description: Malformed envelope or no valid supported item, content: { application/json: { schema: { oneOf: [ { $ref: "#/components/schemas/SentryEnvelopeResult" }, { $ref: "#/components/schemas/Error" } ] } } } }
+        "409": { description: Sentry item ID reused with different payload bytes, content: { application/json: { schema: { $ref: "#/components/schemas/SentryEnvelopeResult" } } } }
         "401": { description: invalid ingest key, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503":
+          description: Retriable store failure; no new supported item committed
+          headers:
+            Retry-After: { description: Retry delay in seconds, schema: { type: string } }
+          content:
+            application/json:
+              schema: { oneOf: [ { $ref: "#/components/schemas/SentryEnvelopeResult" }, { $ref: "#/components/schemas/Error" } ] }
   /api/{projectID}/store:
     post:
       tags: [Ingest]

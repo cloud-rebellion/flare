@@ -560,6 +560,15 @@ type Release struct {
 	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
 }
 
+type SentryItemAcceptance struct {
+	OrgID         string             `json:"org_id"`
+	ProjectID     string             `json:"project_id"`
+	ItemType      string             `json:"item_type"`
+	ItemID        pgtype.Text        `json:"item_id"`
+	PayloadSha256 string             `json:"payload_sha256"`
+	AcceptedAt    pgtype.Timestamptz `json:"accepted_at"`
+}
+
 type Session struct {
 	Token  string             `json:"token"`
 	Data   []byte             `json:"data"`

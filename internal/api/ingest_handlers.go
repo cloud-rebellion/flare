@@ -123,35 +123,45 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	// deliberate rejection, but a later store failure rolls back all writes so
 	// a whole-envelope retry cannot repeat already committed earlier items.
 	type preparedItem struct {
-		item  ingest.EnvelopeItem
-		spans []ingest.SpanRecord
+		item        ingest.EnvelopeItem
+		spans       []ingest.SpanRecord
+		itemID      string
+		payloadHash string
 	}
 	prepared := make([]preparedItem, 0, len(items))
 	var validEvents, validTransactions int
 	for _, item := range items {
 		switch item.Type {
 		case "event":
-			if _, err := ingest.ParseEvent(item.Payload); err != nil {
+			ev, err := ingest.ParseEvent(item.Payload)
+			if err != nil || !validSentryItemID(ev.EventID) {
 				eventOutcome.invalid++
 				continue
 			}
 			validEvents++
-			prepared = append(prepared, preparedItem{item: item})
+			prepared = append(prepared, preparedItem{item: item, itemID: strings.ToLower(ev.EventID), payloadHash: sentryPayloadHash(item.Payload)})
 		case "transaction":
 			spans, err := ingest.ParseSentryTransaction(item.Payload)
 			if err != nil {
 				transactionOutcome.invalid++
 				continue
 			}
+			var identity struct {
+				EventID string `json:"event_id"`
+			}
+			if err := json.Unmarshal(item.Payload, &identity); err != nil || !validSentryItemID(identity.EventID) {
+				transactionOutcome.invalid++
+				continue
+			}
 			validTransactions++
-			prepared = append(prepared, preparedItem{item: item, spans: spans})
+			prepared = append(prepared, preparedItem{item: item, spans: spans, itemID: strings.ToLower(identity.EventID), payloadHash: sentryPayloadHash(item.Payload)})
 		default:
 			// Sessions, attachments and client reports are not supported.
 			otherOutcome.invalid++
 		}
 	}
 	if len(prepared) == 0 {
-		if eventOutcome.invalid+transactionOutcome.invalid > 0 {
+		if eventOutcome.invalid+transactionOutcome.invalid+otherOutcome.invalid > 0 {
 			receiptStatus = http.StatusBadRequest
 			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "no valid event or transaction")
 			return
@@ -177,6 +187,23 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	qtx = s.q.WithTx(tx)
 	for _, item := range prepared {
+		duplicate, claimErr := claimSentryItem(r.Context(), tx, project.OrgID, project.ID, item.item.Type, item.itemID, item.payloadHash)
+		if errors.Is(claimErr, errSentryItemIDConflict) {
+			goto identityConflict
+		}
+		if claimErr != nil {
+			err = claimErr
+			goto storeFailed
+		}
+		if duplicate {
+			if item.item.Type == "event" {
+				eventOutcome.deduplicated++
+				lastID = item.itemID
+			} else {
+				transactionOutcome.deduplicated++
+			}
+			continue
+		}
 		switch item.item.Type {
 		case "event":
 			var result ingestedEvent
@@ -189,11 +216,22 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			lastID = result.eventID
 		case "transaction":
 			var storedSpans int
-			storedSpans, err = persistSpansWithQueries(r.Context(), qtx, project, item.spans, budget)
+			// The budget belongs to the whole envelope, not one CopyFrom.
+			item.spans = item.spans[:budget.take(len(item.spans))]
+			storedSpans, err = persistSpansWithQueries(r.Context(), qtx, project, item.spans)
 			if err != nil {
 				goto storeFailed
 			}
 			if storedSpans == 0 {
+				// A budget-exhausted transaction was not accepted. Release the
+				// identity reserved above, or its retry would be falsely reported
+				// as a duplicate of persisted spans.
+				_, err = tx.Exec(r.Context(), `DELETE FROM sentry_item_acceptances
+					WHERE org_id=$1 AND project_id=$2 AND item_type='transaction' AND payload_sha256=$3`,
+					project.OrgID, project.ID, item.payloadHash)
+				if err != nil {
+					goto storeFailed
+				}
 				transactionOutcome.dropped++
 			} else {
 				transactionOutcome.accepted++
@@ -211,6 +249,22 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	writeEnvelopeResult(w, http.StatusOK, lastID, receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
 	return
 
+identityConflict:
+	// The same project and Sentry item ID cannot be rebound to different data.
+	// Roll back the entire request, including earlier item reservations/writes.
+	eventOutcome.accepted = 0
+	transactionOutcome.accepted = 0
+	eventOutcome.deduplicated = 0
+	transactionOutcome.deduplicated = 0
+	eventOutcome.invalid += uint64(validEvents)
+	transactionOutcome.invalid += uint64(validTransactions)
+	transactionOutcome.dropped = 0
+	budget = nil
+	requestOutcome = "rejected"
+	receiptStatus = http.StatusConflict
+	writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "sentry item identity reused with different payload")
+	return
+
 storeFailed:
 	// No supported item committed. Count all valid items as retryable failures,
 	// including earlier writes rolled back and later items not attempted.
@@ -218,6 +272,8 @@ storeFailed:
 	eventOutcome.accepted = 0
 	transactionOutcome.accepted = 0
 	transactionOutcome.dropped = 0
+	eventOutcome.deduplicated = 0
+	transactionOutcome.deduplicated = 0
 	eventOutcome.failed = uint64(validEvents)
 	transactionOutcome.failed = uint64(validTransactions)
 	budget = nil // no spans from the failed transaction were durably accepted
@@ -234,9 +290,10 @@ func writeEnvelopeResult(w http.ResponseWriter, status int, eventID string, rece
 	total.add(other)
 	response := map[string]any{
 		"id": eventID, "received": received,
-		"accepted": total.accepted, "invalid": total.invalid,
+		"accepted": total.accepted + total.deduplicated, "persisted": total.accepted,
+		"deduplicated": total.deduplicated, "invalid": total.invalid,
 		"dropped": total.dropped, "span_dropped": spans.dropped, "failed": total.failed,
-		"partial":   total.invalid+total.dropped > 0 && total.accepted > 0,
+		"partial":   total.invalid+total.dropped > 0 && total.accepted+total.deduplicated > 0,
 		"retryable": status == http.StatusServiceUnavailable,
 	}
 	if message != "" {
