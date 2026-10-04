@@ -363,7 +363,7 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	receipt.setReceived(1)
-	eid, committedOrAmbiguous, err := s.ingestOneWithReceipt(r.Context(), project, body, receipt)
+	eid, duplicate, committedOrAmbiguous, err := s.ingestOneWithReceipt(r.Context(), project, body, receipt)
 	receiptCommitAttempted = committedOrAmbiguous
 	if err != nil {
 		// Distinguish a client PARSE failure from a server-side store/DB failure.
@@ -377,6 +377,12 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid event")
 			return
 		}
+		if errors.Is(err, errSentryItemIDConflict) {
+			outcome.invalid = 1
+			receiptStatus = http.StatusConflict
+			writeErr(w, http.StatusConflict, "sentry item identity reused with different payload")
+			return
+		}
 		outcome.failed = 1
 		requestOutcome = "failed"
 		receiptStatus = http.StatusServiceUnavailable
@@ -385,7 +391,11 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "could not store event")
 		return
 	}
-	outcome.accepted = 1
+	if duplicate {
+		outcome.deduplicated = 1
+	} else {
+		outcome.accepted = 1
+	}
 	requestOutcome = ""
 	writeJSON(w, http.StatusOK, map[string]string{"id": eid})
 }
@@ -425,29 +435,64 @@ func (s *Server) ingestOne(ctx context.Context, project *generated.Project, raw 
 // ingestOneWithReceipt is the public /store/ acceptance boundary. Internal
 // security events continue to use ingestOne; externally accepted events need
 // their terminal receipt in the same transaction as the event and alert queue.
-// The bool means commit was attempted, so a deferred failed update must not
-// overwrite an accepted receipt if the commit outcome is ambiguous.
-func (s *Server) ingestOneWithReceipt(ctx context.Context, project *generated.Project, raw []byte, receipt *ingestReceipt) (string, bool, error) {
+// The first bool reports an exact replay; the second means commit was attempted,
+// so a deferred failed update must not overwrite an accepted receipt if the
+// commit outcome is ambiguous.
+func (s *Server) ingestOneWithReceipt(ctx context.Context, project *generated.Project, raw []byte, receipt *ingestReceipt) (string, bool, bool, error) {
 	if s.pool == nil {
-		return "", false, errors.New("event transaction unavailable")
+		return "", false, false, errors.New("event transaction unavailable")
+	}
+	// Parse before claiming an identity. ParseEvent bounds the ID used by the
+	// response, while the ledger uses the full supplied ID (up to its schema
+	// limit) to avoid collisions between distinct long client IDs.
+	ev, err := ingest.ParseEvent(raw)
+	if err != nil {
+		return "", false, false, &ingestParseError{err}
+	}
+	var identity struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return "", false, false, &ingestParseError{err}
+	}
+	if !validSentryItemID(identity.EventID) {
+		return "", false, false, &ingestParseError{errors.New("invalid event ID")}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", false, fmt.Errorf("begin event transaction: %w", err)
+		return "", false, false, fmt.Errorf("begin event transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// A missing event ID historically generates a new ID on every /store/
+	// submission. Do not turn two independent identical keyless submissions
+	// into one event by using the payload-hash-only envelope identity.
+	if identity.EventID != "" {
+		duplicate, err := claimSentryItem(ctx, tx, project.OrgID, project.ID, "event", strings.ToLower(identity.EventID), sentryPayloadHash(raw))
+		if err != nil {
+			return "", false, false, err
+		}
+		if duplicate {
+			if err := completeIngestReceipt(ctx, s.q.WithTx(tx), receipt, ingestOutcome{deduplicated: 1}, "", http.StatusOK); err != nil {
+				return "", false, false, fmt.Errorf("complete replay acceptance receipt: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return "", false, true, fmt.Errorf("commit replay receipt: %w", err)
+			}
+			return ev.EventID, true, true, nil
+		}
+	}
 	result, err := s.ingestOneInTx(ctx, project, raw, tx)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if err := completeIngestReceipt(ctx, s.q.WithTx(tx), receipt, ingestOutcome{accepted: 1}, "", http.StatusOK); err != nil {
-		return "", false, fmt.Errorf("complete event acceptance receipt: %w", err)
+		return "", false, false, fmt.Errorf("complete event acceptance receipt: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", true, fmt.Errorf("commit event and receipt: %w", err)
+		return "", false, true, fmt.Errorf("commit event and receipt: %w", err)
 	}
 	s.afterIngestOne(project, result)
-	return result.eventID, true, nil
+	return result.eventID, false, true, nil
 }
 
 type ingestedEvent struct {
