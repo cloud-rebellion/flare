@@ -34,6 +34,7 @@ test('the runtime manifest binds exact public bytes to their private map bytes',
   expect(manifest.browser_dsn_binding_sha256).toBe(browserDsnBinding('https://publicIngestKey@other.example/123456789012'));
   expect(manifest.browser_dsn_origin_sha256).toBe(browserDsnOriginBinding(dsn));
   expect(manifest.browser_dsn_origin_sha256).toBe(createHash('sha256').update('flare-browser-dsn-origin-v1\nhttps://flare.example').digest('hex'));
+  expect(manifest.browser_release).toBe(release);
   expect(manifest.browser_dsn_origin_sha256).not.toBe(browserDsnOriginBinding('https://publicIngestKey@other.example/123456789012'));
   expect(manifest.browser_dsn_binding_sha256).not.toBe(browserDsnBinding('https://otherKey@flare.example/123456789012'));
   expect(JSON.stringify(manifest)).not.toContain('publicIngestKey');
@@ -73,6 +74,7 @@ test('a configured DSN requires its exact value and full-commit release in compi
   const unconfigured = await writeBuildManifest(publicDir, mapsDir, output, '', '');
   expect(unconfigured.browser_dsn_binding_sha256).toBe('');
   expect(unconfigured.browser_dsn_origin_sha256).toBe('');
+  expect(unconfigured.browser_release).toBe('');
 });
 
 test('a private map without the deployed asset cannot receive a manifest', async () => {

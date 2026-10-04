@@ -467,8 +467,10 @@ private maps. Manifest version 2 hashes the build-time browser DSN's public
 ingest key and project ID, and separately hashes its normalized origin, without
 storing the DSN. When a DSN is configured, manifest generation requires that
 the same compiled JavaScript asset contains the DSN and a release ending in a
-full 40- or 64-character source commit. The final runtime image carries only
-that small manifest and the embedded public `build/` files; map bytes stay out
+full 40- or 64-character source commit. It records that exact public release
+as `browser_release` so an uploader can match the map release to the bundle.
+The final runtime image carries only that small manifest and the embedded
+public `build/` files; map bytes stay out
 of it. Stage's optional
 Flare source-map upload gate compares the running image manifest with a
 separately extracted frontend target and verifies every file hash before it

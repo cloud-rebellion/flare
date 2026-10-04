@@ -96,7 +96,8 @@ export async function writeBuildManifest(publicRoot, privateRoot, output, browse
     public_files: publicFiles,
     source_maps: sourceMaps,
     browser_dsn_binding_sha256: browserDsnBinding(browserDSN),
-    browser_dsn_origin_sha256: browserDsnOriginBinding(browserDSN)
+    browser_dsn_origin_sha256: browserDsnOriginBinding(browserDSN),
+    browser_release: browserDSN?.trim() ? browserRelease : ''
   };
   await writeFile(outputFile, `${JSON.stringify(manifest)}\n`, { flag: 'w', mode: 0o600 });
   return manifest;
