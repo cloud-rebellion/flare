@@ -3,9 +3,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { flareBrowserAssetName, installFlareBrowserCapture, scrubFlareBrowserPath } from '../src/lib/flare-client';
 import { sourceMapNameForURL } from '../../examples/browser/source-map-name.mjs';
-import { uploadBrowserSourceMaps } from '../../examples/browser/upload-source-maps.mjs';
+import { sourceMapBundleDigest, uploadBrowserSourceMaps } from '../../examples/browser/upload-source-maps.mjs';
 import { stageSourceMaps } from '../scripts/stage-source-maps.mjs';
 
 test('browser paths retain route shape without arbitrary tokens', () => {
@@ -228,29 +229,54 @@ test('CI stages private maps and uploads them under the frame name', async () =>
 		expect(existsSync(join(build, asset))).toBe(true);
 
 		const uploads = [];
+		let accepted;
 		const fetcher = async (url, request) => {
+			if (request.method === 'GET') {
+				uploads.push({ url: url.href, method: request.method, authorization: request.headers.Authorization });
+				return { status: 200, json: async () => accepted };
+			}
 			const body = JSON.parse(request.body);
-			uploads.push({ url: url.href, authorization: request.headers.Authorization, body });
-			return { status: 201, json: async () => ({ id: 'artifact-1', name: body.name, release: body.release, parse_status: 'valid' }) };
+			uploads.push({ url: url.href, method: request.method, authorization: request.headers.Authorization, body });
+			accepted = {
+				id: 'bundle-1', project_id: 'project-1', release: body.release, digest: body.digest,
+				artifact_count: body.artifacts.length, created_at: '2026-10-05T00:00:00Z',
+				total_bytes: body.artifacts.reduce((sum, item) => sum + Buffer.byteLength(item.content), 0),
+				artifacts: body.artifacts.map((item) => ({
+					id: 'artifact-1', release: body.release, name: item.name, size: Buffer.byteLength(item.content),
+					parse_status: 'valid', created_at: '2026-10-05T00:00:00Z',
+					content_sha256: createHash('sha256').update(item.content).digest('hex')
+				}))
+			};
+			return { status: 201, json: async () => accepted };
 		};
 		const receipts = await uploadBrowserSourceMaps({
 			mapsDir: maps, publicBase: 'https://app.example/', flareBase: 'https://flare.example/',
 			projectID: 'project-1', release: 'release-123', memberKey: 'test-key', fetcher
 		});
 		expect(receipts).toEqual([{ id: 'artifact-1', name: sourceMapNameForURL(`https://app.example/${asset}`), release: 'release-123' }]);
-		expect(uploads).toEqual([{
-			url: 'https://flare.example/api/projects/project-1/artifacts', authorization: 'Bearer test-key',
-			body: { release: 'release-123', name: receipts[0].name, content: sourceMap }
-		}]);
+		expect(uploads).toEqual([
+			{ url: 'https://flare.example/api/projects/project-1/artifact-bundles', method: 'POST', authorization: 'Bearer test-key',
+				body: { release: 'release-123', digest: sourceMapBundleDigest('release-123', [{ name: receipts[0].name, content: sourceMap }]),
+					artifacts: [{ name: receipts[0].name, content: sourceMap }] } },
+			{ url: 'https://flare.example/api/projects/project-1/artifact-bundles/bundle-1', method: 'GET', authorization: 'Bearer test-key' }
+		]);
 		await expect(uploadBrowserSourceMaps({
 			mapsDir: maps, publicBase: 'https://app.example/', flareBase: 'https://flare.example/',
 			projectID: 'project-1', release: 'release-123', memberKey: 'test-key',
 			fetcher: async (_url, request) => {
-				const { name, release } = JSON.parse(request.body);
-				return { status: 201, json: async () => ({ id: 'artifact-2', name, release, parse_status: 'invalid_mappings' }) };
+				const { release, digest, artifacts } = JSON.parse(request.body);
+				return { status: 201, json: async () => ({
+					id: 'bundle-2', project_id: 'project-1', release, digest, artifact_count: 1, total_bytes: Buffer.byteLength(sourceMap),
+					artifacts: [{ id: 'artifact-2', release, name: artifacts[0].name, parse_status: 'invalid_mappings' }]
+				}) };
 			}
-		})).rejects.toThrow('valid matching artifact receipt');
+		})).rejects.toThrow('valid matching artifact receipts');
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test('source-map bundle digest uses portable exact-byte framing', () => {
+	expect(sourceMapBundleDigest('web-42', [{ name: 'one.js', content: '{"version":3,"sources":["app.ts"],"names":[],"mappings":"AAAA"}' }]))
+		.toBe('sha256:bcafca89a915667a7f88e7849843c75734ff1b478e68e51328b05b079dfec36d');
 });

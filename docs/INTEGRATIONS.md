@@ -242,7 +242,7 @@ per-DSN rate limit (`INGEST_RATE_PER_MIN`); it does not use a browser session.
 | Distributed tracing | Sentry transactions or OTLP spans | Trace waterfall, span attributes, trace ID, and latency analytics. SDK sampling is controlled by `FLARE_TRACES_SAMPLE_RATE` (default `0.1`; `0` disables). Flare avoids tracing its own ingest and health routes. For sampled backend HTTP requests, the transaction also records the bounded response status code and Sentry's standard HTTP status classification. The forwarding wrapper preserves `http.Flusher`, `http.Hijacker`, `http.Pusher`, and `io.ReaderFrom` when the underlying server supports them, so streaming and upgrades continue to work. | `GET /api/projects/{id}/analytics/span-latency?hours=24` returns p50/p95/p99; `trace_percentile` rules alert on one operation's p50/p75/p90/p95/p99 latency, and the service-level endpoint reports sampled-span availability and error-budget consumption. |
 | Scheduled-job check-ins | `GET` or `POST /api/{projectID}/checkins/{slug}` with the project DSN; `?status=error` marks a failed run | A monitor is auto-created on first check-in. The dashboard shows interval, grace, last ping, last status, and state (`new`, `ok`, `failed`, `missing`). | A failed check-in and its routed alert notices commit together before HTTP 200; a worker delivers them asynchronously. The watchdog pages overdue check-ins and re-notifies after 24 hours. A project can have at most 500 monitors: new check-in slugs and dashboard-created monitors are admitted transactionally, while existing slugs continue at capacity. Quiet, unconfigured monitors are pruned after 30 days when space is needed. |
 | External SaaS and app connectors | `POST /api/{projectID}/connector-attempts` with `X-Flare-Key` (or `sentry_key`) | A bridge in any web, Flutter, backend, or vendor app can submit one bounded provider/operation/channel result plus optional `quota_remaining`, `retry_after_ms`, and observed `sync_lag_ms` integers. Flare stores it with `client_reported` provenance and no registered installation ID; it is a caller assertion, not proof that a provider call happened. The attempt and terminal receipt commit together before `202`. | `connector_error_rate` and `connector_quota` rules can page on this series only when `connector_source_kind` is explicitly `client_reported`. The request accepts only safe bounded tokens, `ok`/`error`, an HTTP status class or safe error code, elapsed milliseconds, and bounded provider hints; response bodies, URLs, credentials, and user data are rejected by the contract. |
-| Releases and source maps | Authenticated `POST /api/projects/{id}/releases` and `POST /api/projects/{id}/artifacts` | Release version and registry creation time, new-issue count, source-map artifact name and size, symbolication for matching releases, bounded release health via `GET /api/projects/{id}/release-health?hours=24&limit=100`, release freshness via `GET /api/projects/{id}/release-freshness?hours=24&limit=100`, and source-map coverage via `GET /api/projects/{id}/symbolication-health?hours=24&limit=100`. | Release registry is capped at 2,000 versions per project. Source maps are capped at 30 MiB per upload, 2,000 artifacts, and 2 GiB per project. Release, freshness, and symbolication health report aggregate metadata without raw payloads; `release_error_rate` can page on an explicit or latest recent release, while `release_freshness` requires an explicit deployed release and its canonical heartbeat. |
+| Releases and source maps | Authenticated `POST /api/projects/{id}/releases`, `POST /api/projects/{id}/artifact-bundles` for atomic release admission, and legacy `POST /api/projects/{id}/artifacts` | Release version and registry creation time, new-issue count, source-map bundle digest and receipt, source-map artifact name and size, symbolication for matching releases, bounded release health via `GET /api/projects/{id}/release-health?hours=24&limit=100`, release freshness via `GET /api/projects/{id}/release-freshness?hours=24&limit=100`, and source-map coverage via `GET /api/projects/{id}/symbolication-health?hours=24&limit=100`. | Release registry is capped at 2,000 versions per project. Individual source maps are capped at 30 MiB; atomic bundles at 200 maps and 64 MiB. Project retention is capped at 2,000 artifacts and 2 GiB. Release, freshness, and symbolication health report aggregate metadata without raw payloads; `release_error_rate` can page on an explicit or latest recent release, while `release_freshness` requires an explicit deployed release and its canonical heartbeat. |
 | Flutter/Dart and native mobile symbols | Authenticated `POST /api/projects/{id}/symbol-artifacts` with a member API key or session | Stores one bounded, release-scoped `dart_symbols`, `proguard`, `breakpad`, `dsym`, or `elf` artifact for Flutter, Android, or iOS. Flare records a SHA-256 digest, size, platform, format, upload receipt, and durable upload-time `validation_status`; list responses never return symbol bytes. | Artifact count is capped at 2,000 and native-symbol storage at 2 GiB per project, with 30 MiB per artifact. Upload acceptance proves durable retention; Flutter container validation is explicit, while format-specific frame rewriting remains pending until its resolver is enabled. |
 | Client/runtime health | Authenticated `GET /api/projects/{id}/client-health?hours=24&limit=100` | Browser, Flutter, mobile, and backend SDK dimensions grouped by platform, environment, and release, with event volume, actionable errors and rate, affected issues, and first/last seen. | The hot-window query is bounded to 1--720 hours and 1--100 groups and returns no event bodies, stacktraces, labels, or tenant IDs. Emit a bounded web-vitals or request metric and use a `metric_threshold` rule when a client performance or availability threshold should page. |
 
@@ -491,8 +491,10 @@ bun examples/browser/source-map-name.mjs "$FLARE_PUBLIC_SCRIPT_URL"
 ```
 
 For all maps extracted from the exact bundle, the CI uploader names each
-`.js.map` using its public base URL and requires a matching `201` receipt with
-`parse_status: valid`:
+`.js.map` using its public base URL and sends one atomic release bundle. It
+requires a matching `201` admission (or `200` for an exact retry), checks every
+map's `content_sha256` and `parse_status: valid`, then reads the durable bundle
+receipt back by ID:
 
 ```bash
 bun examples/browser/upload-source-maps.mjs \
@@ -500,9 +502,43 @@ bun examples/browser/upload-source-maps.mjs \
   "$FLARE_PROJECT_ID" "$FLARE_BROWSER_RELEASE"
 ```
 
-Keep the member key in CI, outside browser bundles. Check the upload response
-for `parse_status: valid`, then send a staging error from that exact bundle and
-check its issue event for `symbolicated: true` on the frame. The
+The authenticated bundle API is `POST /api/projects/{id}/artifact-bundles`
+with `release`, `artifacts: [{name, content}]`, and an optional `digest`
+assertion. Its response contains `id`, `project_id`, `release`, `digest`, `artifact_count`,
+`total_bytes`, `created_at`, and per-artifact IDs, names, byte sizes, validation
+statuses, and SHA-256 content hashes. `GET /api/projects/{id}/artifact-bundles/{id}`
+returns the retained receipt without map bytes. A successful upload commits
+all maps and the receipt in one transaction. A replay with the same release and
+exact bytes returns the same IDs and timestamps; another set or changed bytes
+for that release returns `409`. A pre-existing unlisted map for the release
+also returns `409`, so a partial legacy upload cannot be silently declared a
+complete bundle. The member single-map upload and delete routes cannot change
+a release after a bundle is admitted. Bundle retirement needs an explicit
+receipt-aware operation with live-release checks; it is not exposed by the
+single-map delete route.
+
+Bundle uploads are limited to 200 maps, a 64 MiB JSON request, 64 MiB total
+stored UTF-8 bytes, and 30 MiB per map. Invalid maps fail the whole request;
+quota failures return `507`, oversized bodies or maps return `413`. These are
+hard deployment gate limits: a build outside them needs a reviewed larger
+transport or an adjusted release layout before deployment. The maps are stored
+byte-for-byte after valid UTF-8 JSON/source-map validation. Release and names
+must already equal their trimmed and sanitized forms. The `digest` is
+`sha256:<lowercase hex>` of ASCII `flare-source-map-bundle-v1` plus NUL,
+followed by each UTF-8 field's 8-byte big-endian length and bytes: first the
+release, then each name and content pair sorted by name's UTF-8 bytes. For example,
+release `web-42`, name `one.js`, and content
+`{"version":3,"sources":["app.ts"],"names":[],"mappings":"AAAA"}`
+produce bundle digest
+`sha256:bcafca89a915667a7f88e7849843c75734ff1b478e68e51328b05b079dfec36d`.
+CI and Stage should send this assertion, compare all per-map hashes and the
+readback receipt, and fail closed on any disagreement. A receipt proves map
+retention for the stated project and release; it does not prove the public
+bundle actually loaded or that a browser error symbolicated.
+
+Keep the member key in CI, outside browser bundles. After upload, send a
+staging error from that exact bundle and check its issue event for
+`symbolicated: true` on the frame. The
 `symbolication-health` coverage count proves only artifact-name selection; it
 does not prove that a source map resolved a position. Existing Sentry SDKs that
 send full script filenames may still use their previous artifact names.

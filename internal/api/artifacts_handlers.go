@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -101,6 +103,10 @@ func (s *Server) handleUploadSourceMap(w http.ResponseWriter, r *http.Request) {
 		ParseStatus: string(parseStatus),
 	}
 	row, quotaExceeded, err := s.acceptSourceMap(r.Context(), artifact)
+	if errors.Is(err, errSourceMapBundleConflict) {
+		writeErr(w, http.StatusConflict, "release has an immutable source map bundle")
+		return
+	}
 	if err != nil {
 		slogError(w, "accept source map", err)
 		return
@@ -138,6 +144,13 @@ func (s *Server) acceptSourceMapWithLimits(parent context.Context, artifact gene
 	var projectID string
 	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id=$1 AND org_id=$2 FOR UPDATE`, artifact.ProjectID, artifact.OrgID).Scan(&projectID); err != nil {
 		return nil, false, err
+	}
+	var bundled bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM source_map_bundles WHERE project_id=$1 AND org_id=$2 AND release=$3)`, artifact.ProjectID, artifact.OrgID, artifact.Release).Scan(&bundled); err != nil {
+		return nil, false, err
+	}
+	if bundled {
+		return nil, false, errSourceMapBundleConflict
 	}
 	qtx := generated.New(tx)
 	used, err := qtx.GetSourceMapArtifactQuota(ctx, generated.GetSourceMapArtifactQuotaParams{
@@ -177,11 +190,11 @@ func (s *Server) handleListSourceMaps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSourceMap(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.q.DeleteSourceMap(r.Context(), generated.DeleteSourceMapParams{
-		ID:        chi.URLParam(r, "artifactID"),
-		ProjectID: chi.URLParam(r, "id"),
-		OrgID:     orgIDFrom(r.Context()),
-	})
+	rows, err := s.deleteSourceMap(r.Context(), chi.URLParam(r, "id"), orgIDFrom(r.Context()), chi.URLParam(r, "artifactID"))
+	if errors.Is(err, errSourceMapBundleConflict) {
+		writeErr(w, http.StatusConflict, "source map belongs to an immutable bundle")
+		return
+	}
 	if err != nil {
 		slogError(w, "delete source map", err)
 		return
@@ -192,4 +205,50 @@ func (s *Server) handleDeleteSourceMap(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), "sourcemap.delete", chi.URLParam(r, "artifactID"))
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// The same project row lock used by single and bundle uploads serializes a
+// legacy delete with bundle admission. A bound map can only be retired by a
+// future receipt-aware lifecycle operation, not an arbitrary artifact DELETE.
+func (s *Server) deleteSourceMap(parent context.Context, projectID, orgID, artifactID string) (int64, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		cleanup, done := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
+		defer done()
+		_ = tx.Rollback(cleanup)
+	}()
+	var locked string
+	if err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE id=$1 AND org_id=$2 FOR UPDATE`, projectID, orgID).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var release string
+	if err := tx.QueryRow(ctx, `SELECT release FROM source_map_artifacts WHERE id=$1 AND project_id=$2 AND org_id=$3`, artifactID, projectID, orgID).Scan(&release); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var bundled bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM source_map_bundles WHERE project_id=$1 AND org_id=$2 AND release=$3)`, projectID, orgID, release).Scan(&bundled); err != nil {
+		return 0, err
+	}
+	if bundled {
+		return 0, errSourceMapBundleConflict
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM source_map_artifacts WHERE id=$1 AND project_id=$2 AND org_id=$3`, artifactID, projectID, orgID)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
