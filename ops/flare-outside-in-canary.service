@@ -1,0 +1,28 @@
+[Unit]
+Description=Independent public Flare ingest and query canary
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=flare-canary
+Group=flare-canary
+UMask=0077
+StateDirectory=flare-outside-in-canary
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /usr/local/libexec/flare_outside_in_canary.py
+RuntimeMaxSec=90s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flare-outside-in-canary

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run independent public Flare canary every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=30s
+Persistent=true
+Unit=flare-outside-in-canary.service
+
+[Install]
+WantedBy=timers.target
