@@ -162,13 +162,18 @@ func TestSourceMapUploadRejectsForeignTenantWithoutOverwrite(t *testing.T) {
 	if first.Code != http.StatusCreated {
 		t.Fatalf("initial upload = %d %s", first.Code, first.Body.String())
 	}
+	var original string
+	if err := pool.QueryRow(context.Background(), `SELECT content FROM source_map_artifacts
+		WHERE project_id=$1 AND org_id=$2 AND release='web-42' AND name='app.js'`, victim.ID, victim.OrgID).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
 	foreign := sendSourceMapArtifact(s, victim.ID, attacker.OrgID, "web-42", "app.js", sourceMapQuotaFixture+" ")
 	if foreign.Code != http.StatusNotFound {
 		t.Fatalf("foreign tenant overwrite = %d %s", foreign.Code, foreign.Body.String())
 	}
 	var stored string
 	if err := pool.QueryRow(context.Background(), `SELECT content FROM source_map_artifacts
-		WHERE project_id=$1 AND org_id=$2 AND release='web-42' AND name='app.js'`, victim.ID, victim.OrgID).Scan(&stored); err != nil || stored != sourceMapQuotaFixture {
+		WHERE project_id=$1 AND org_id=$2 AND release='web-42' AND name='app.js'`, victim.ID, victim.OrgID).Scan(&stored); err != nil || stored != original {
 		t.Fatalf("foreign upload changed victim map: content=%q err=%v", stored, err)
 	}
 	if count, _ := sourceMapUsage(t, pool, attacker); count != 0 {
