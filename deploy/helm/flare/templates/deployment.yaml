@@ -55,6 +55,10 @@ spec:
               value: {{ .Values.image.tag | quote }}
             - name: FLARE_COMMIT
               value: {{ .Values.image.sourceCommit | quote }}
+            - name: FLARE_STAGE_VERIFY_URL
+              value: {{ .Values.stageVerifier.url | quote }}
+            - name: FLARE_STAGE_VERIFY_PEER_IP
+              value: {{ .Values.stageVerifier.peerIP | quote }}
             - name: PORT
               value: "8080"
             - name: BASE_URL

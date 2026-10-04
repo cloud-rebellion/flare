@@ -165,6 +165,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Post("/issues/{id}/triage", s.handleTriageIssue)
 					r.Post("/projects/{id}/automation-claims", s.handleCreateAutomationClaim)
 					r.Post("/projects/{id}/automation-receipts", s.handleCreateAutomationReceipt)
+					r.Post("/projects/{id}/automation-receipts/{receiptID}/verify", s.handleVerifyAutomationReceipt)
 					r.Post("/channels", s.handleCreateChannel)
 					r.Post("/channels/{id}/test", s.handleTestChannel)
 					r.Patch("/channels/{id}", s.handleUpdateChannel)
@@ -228,6 +229,9 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					// connector health, but only an administrator can alter provider
 					// installation metadata or rotate a credential.
 					r.Get("/connector-connections", s.handleListConnectorConnections)
+					r.Get("/projects/{id}/stage-verifier", s.handleGetStageVerifierBinding)
+					r.Put("/projects/{id}/stage-verifier", s.handleSetStageVerifierBinding)
+					r.Delete("/projects/{id}/stage-verifier", s.handleDeleteStageVerifierBinding)
 					r.Post("/connector-connections", s.handleCreateConnectorConnection)
 					r.Get("/connector-connections/{id}", s.handleGetConnectorConnection)
 					r.Patch("/connector-connections/{id}", s.handleUpdateConnectorConnection)

@@ -16,6 +16,13 @@ replicaCount: 1
 # Public URL Flare is reached at (used in DSNs + email links).
 baseURL: https://flare.example.com
 
+# Operator-owned Stage proof endpoint; leave empty to keep external execution
+# receipts advisory. peerIP pins one private Stage peer while TLS validates the
+# URL hostname. Stage profile credentials are configured per Flare project.
+stageVerifier:
+  url: ""
+  peerIP: ""
+
 # Days telemetry is kept in Postgres before export-to-Parquet + drop.
 retentionDays: 30
 

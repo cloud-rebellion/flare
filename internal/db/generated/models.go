@@ -160,6 +160,44 @@ type AutomationReceipt struct {
 	VerificationStatus string             `json:"verification_status"`
 }
 
+type AutomationReceiptAttestation struct {
+	ReceiptID         string             `json:"receipt_id"`
+	OrgID             string             `json:"org_id"`
+	ProjectID         string             `json:"project_id"`
+	IssueID           string             `json:"issue_id"`
+	StageTenantID     string             `json:"stage_tenant_id"`
+	StageCredentialID string             `json:"stage_credential_id"`
+	AttestationID     string             `json:"attestation_id"`
+	Repository        string             `json:"repository"`
+	ProgramID         string             `json:"program_id"`
+	Pipeline          string             `json:"pipeline"`
+	Kind              string             `json:"kind"`
+	RunRef            string             `json:"run_ref"`
+	EvidenceRef       string             `json:"evidence_ref"`
+	SourceRevision    string             `json:"source_revision"`
+	TargetRevision    string             `json:"target_revision"`
+	ImageRef          string             `json:"image_ref"`
+	ImageID           string             `json:"image_id"`
+	StageVerifiedAt   pgtype.Timestamptz `json:"stage_verified_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+type AutomationStageBinding struct {
+	ProjectID            string             `json:"project_id"`
+	OrgID                string             `json:"org_id"`
+	StageTenantID        string             `json:"stage_tenant_id"`
+	StageCredentialID    string             `json:"stage_credential_id"`
+	Repository           string             `json:"repository"`
+	ProgramID            string             `json:"program_id"`
+	CiPipeline           string             `json:"ci_pipeline"`
+	MergePipeline        string             `json:"merge_pipeline"`
+	DeployPipeline       string             `json:"deploy_pipeline"`
+	CredentialCiphertext string             `json:"credential_ciphertext"`
+	BindingEpoch         string             `json:"binding_epoch"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+}
+
 type BusinessCheck struct {
 	ID                 string             `json:"id"`
 	OrgID              string             `json:"org_id"`

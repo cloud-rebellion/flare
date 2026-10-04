@@ -34,6 +34,7 @@ import (
 	"github.com/bright-interaction/flare/internal/secretbox"
 	"github.com/bright-interaction/flare/internal/slack"
 	"github.com/bright-interaction/flare/internal/sourcemaps"
+	"github.com/bright-interaction/flare/internal/stagereceipt"
 	"github.com/bright-interaction/flare/internal/telemetry"
 	"github.com/bright-interaction/flare/internal/telemetry/pgstore"
 )
@@ -58,6 +59,8 @@ type Server struct {
 	symbolicator       *sourcemaps.Resolver
 	ai                 *ai.Client
 	secrets            *secretbox.Cipher // encrypts integration secrets at rest
+	stageVerifier      stageReceiptVerifier
+	stageVerifyLimiter *ratelimit.Limiter
 	hubspotProbe       connectorProbe
 	connectorProbes    connectorcheck.Registry
 	hubspotSync        *connectorsync.HubSpotWorker
@@ -340,6 +343,8 @@ func NewServer(pool *pgxpool.Pool, sessions *scs.SessionManager, cfg config.Conf
 		ai:                         ai.New(!allowPrivateAI),
 		allowPrivateAI:             allowPrivateAI,
 		secrets:                    secretCipher,
+		stageVerifier:              stagereceipt.NewClient(cfg.StageVerifyPeerIP),
+		stageVerifyLimiter:         ratelimit.New(30, time.Minute),
 		hubspotProbe:               hubspotClient,
 		connectorProbes:            connectorProbes,
 		hubspotSync:                hubspotWorker,

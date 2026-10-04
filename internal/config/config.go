@@ -101,6 +101,14 @@ type Config struct {
 	// fail-safe: when unset those secrets are stored plaintext (current behavior)
 	// rather than the service failing. Provisioned by the deploy pipeline.
 	SecretKey string
+	// StageVerifyURL is an operator-owned, fixed HTTPS attestation endpoint.
+	// Project admins supply only scoped Stage credentials and identity binding,
+	// never the outbound destination.
+	StageVerifyURL string
+	// StageVerifyPeerIP pins an operator-approved peer (for example Stage's
+	// Tailscale address). Only this exact IP may bypass the private-IP dial
+	// guard; the HTTPS URL hostname still controls TLS certificate validation.
+	StageVerifyPeerIP string
 }
 
 func (c Config) IsProduction() bool { return c.Environment == "production" }
@@ -146,6 +154,8 @@ func Load() (Config, error) {
 		SMTPFromName:           env("SMTP_FROM_NAME", "Flare"),
 		SMTPTLS:                env("SMTP_TLS", "starttls"),
 		SecretKey:              env("FLARE_SECRET_KEY", ""),
+		StageVerifyURL:         env("FLARE_STAGE_VERIFY_URL", ""),
+		StageVerifyPeerIP:      env("FLARE_STAGE_VERIFY_PEER_IP", ""),
 		// isTrue, not == "true". Both of these currently fail SAFE, but three
 		// booleans parsed three ways in one struct literal is how the next one
 		// lands on the wrong side.

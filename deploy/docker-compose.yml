@@ -31,6 +31,8 @@ services:
       # release image when its runtime identity does not match the binary.
       FLARE_RELEASE: "${FLARE_RELEASE:-v0.4.0}"
       FLARE_COMMIT: "${FLARE_COMMIT:-}"
+      FLARE_STAGE_VERIFY_URL: "${FLARE_STAGE_VERIFY_URL:-}"
+      FLARE_STAGE_VERIFY_PEER_IP: "${FLARE_STAGE_VERIFY_PEER_IP:-}"
       # Production refuses to boot without this. Fail here, at compose time,
       # with a readable message rather than in a container restart loop.
       FLARE_SECRET_KEY: "${FLARE_SECRET_KEY:?set FLARE_SECRET_KEY in .env (openssl rand -base64 32)}"
