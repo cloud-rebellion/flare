@@ -47,33 +47,50 @@ green tests are necessary evidence, but they are not live acceptance.
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
 plan are local release candidates. Combined Flare PostgreSQL 16 API and query
 tests through migration 080, focused Go tests, frontend type check/build,
-pinned SQL generation, and the backup Bash fixture have passed locally. A
-hidden-source-map build moved 45 JavaScript maps to a private build directory
-and left zero maps in the served frontend directory. These checks do not
-establish production capture. The live backup unit was observed failing on the
-removed `hephaestus-core` container, and a Stage verified-bundle off-host
-snapshot was missing; repair and an independent restore are required before
-cutover. The repaired backup candidate preserves the installed TrustIssues
-WAL-safe snapshot and has a networkless regression fixture.
+pinned SQL generation, and the backup Bash fixture have passed locally. Newer
+Sentry, native-log, client connector-attempt, OTLP, and native-symbol paths have
+focused PostgreSQL 16 rollback, concurrency, and scope tests on their isolated
+branches; run one integrated test pass against the final combined candidate
+before asking Stage to merge it. A hidden-source-map build moved 45 JavaScript
+maps to a private build directory and left zero maps in the served frontend
+directory. The build manifest binds each public asset to its private map and
+the compiled DSN project identity. Stage's matching-map upload gate is local
+and disabled by default. None of these checks establishes production capture.
+
+The live backup unit was observed failing on the removed `hephaestus-core`
+container, and a Stage verified-bundle off-host snapshot was missing; repair
+and an independent restore are required before cutover. The repaired backup
+candidate preserves the installed TrustIssues WAL-safe snapshot and has a
+networkless regression fixture. That fixture checks the restore procedure; it
+does not prove a Flare boot or secret decryption from a real restored snapshot.
 
 The ten first-party browser bridges are source-wired, but public bundle
-sampling did not prove an active Flare DSN or event receipt. Their new private
-asset IDs still need app-specific rollout and a live upload/resolution canary.
-A Flutter starter exists without a selected production app repository. Backend
-DSNs and provider connections still need deployed configuration and canaries.
-HubSpot's initial account probe and explicit project binding exist locally;
-legacy installations require an admin to bind them, while consent and broader
-provider workflows require separate account authorization. The BrightCRM
-native metric pilot reuses one batch key and exact body on retry; the matching
-Flare candidate commits metric rows and the terminal receipt together and
-replays the result for seven days. Older Flare servers, keyless senders, and a
-BrightCRM process restart before delivery still need separate failure handling.
-Native-symbol upload
-acceptance does not itself prove frame resolution. Stage's public synthetic
-verifies the shell, immutable assets, readiness, and release identity, while a
-signed-in browser journey remains an additional live acceptance check. The
-exact external receipt verifier requires a scoped Stage profile and live proof;
-no caller-provided success flag is sufficient.
+sampling did not prove an active Flare DSN or event receipt. Their opaque asset
+IDs still need app-specific rollout and a live upload/resolution canary. A
+Flutter starter has framework, zone, platform, HTTP, frame, and metric hooks,
+but no production Flutter app repository or Dart/Flutter build has been
+selected. Backend DSNs and provider connections still need deployed
+configuration and canaries. HubSpot's account probe and explicit project
+binding exist locally; legacy installations require an admin to bind them,
+while user consent and token refresh require a separately verified app flow.
+
+The BrightCRM native metric pilot reuses one batch key and exact body on retry;
+the Flare candidate commits metric rows and their terminal receipt together
+and replays the result for seven days. Native logs and client connector-attempts
+have the same optional key contract. Sentry envelope items use a project-scoped
+replay ledger; Sentry Store events have an atomic receipt but no replay ledger.
+OTLP rows and their terminal receipt commit atomically, but stock exporters
+cannot supply a new per-batch key through a static header setting. A keyless
+ambiguous retry can duplicate data. Older Flare servers and a BrightCRM
+process restart before delivery still need separate failure handling. Native
+symbol upload acceptance does not itself prove frame resolution.
+
+The public Flare `/metrics` probe currently returns the SPA shell at the live
+hostname, so a successful HTTP status is not a scrape. Stage's public
+synthetic verifies the shell, immutable assets, readiness, and release
+identity, while a signed-in browser journey remains an additional live
+acceptance check. The exact external receipt verifier requires a scoped Stage
+profile and live proof; no caller-provided success flag is sufficient.
 
 Keep the rollout ledger explicit: `local`, `pushed`, `exact CI`, `merged`,
 `deployed`, `live accepted`, and `restored` are separate states for every
