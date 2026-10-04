@@ -393,7 +393,7 @@ func stagePipelineForKind(b stageBinding, kind string) string {
 		return b.CIPipeline
 	case "merge":
 		return b.MergePipeline
-	case "deploy":
+	case "deploy", "synthetic":
 		return b.DeployPipeline
 	default:
 		return ""

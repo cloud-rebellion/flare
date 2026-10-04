@@ -173,6 +173,87 @@ func TestStageBindingAndReceiptPromotionTransaction(t *testing.T) {
 	}
 }
 
+func TestSyntheticStageReceiptPromotionUsesDeployPipeline(t *testing.T) {
+	pool := newTestDB(t)
+	project := seedProjectForIngest(t, pool)
+	ctx := context.Background()
+	issue, err := generated.New(pool).UpsertIssue(ctx, generated.UpsertIssueParams{
+		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID, Fingerprint: id.New(),
+		Title: "Synthetic Stage verify", Culprit: "test", Level: "error", Platform: "go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed an advisory result directly to isolate the final Stage proof
+	// transaction from the preceding claim and workflow stage checks.
+	receiptID := id.New()
+	evidenceDigest := strings.Repeat("b", 64)
+	_, err = pool.Exec(ctx, `INSERT INTO automation_receipts
+		(id, org_id, project_id, issue_id, stage, status, idempotency_key,
+		 evidence_ref, source_revision, target_revision, run_ref, completed_at)
+		VALUES ($1,$2,$3,$4,'synthetic','passed',$5,$6,$7,$7,$8,now())`,
+		receiptID, project.OrgID, project.ID, issue.ID, id.New(), evidenceDigest,
+		stageTestSHA, "deploy-run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serverForDB(pool)
+	s.secrets = secretbox.New("a dedicated test secret")
+	s.cfg.StageVerifyURL = "https://stage.example.test/attestations/verify"
+	put := httptest.NewRecorder()
+	s.handleSetStageVerifierBinding(put, stageHandlerRequest(http.MethodPut, project.ID, "", project.OrgID, stageBindingJSON(project.ID)))
+	if put.Code != http.StatusOK {
+		t.Fatalf("bind = %d: %s", put.Code, put.Body.String())
+	}
+	matchedPipeline := false
+	s.stageVerifier = stageVerifierFunc(func(_ context.Context, _, _, tenant, credential string, claim stagereceipt.Claim) (stagereceipt.Attestation, error) {
+		if claim.Kind != "synthetic" || claim.Pipeline != "deploy-flare" || claim.ProjectID != project.ID ||
+			claim.Repository != "repo-1" || claim.ProgramID != "flare" || claim.RunRef != "deploy-run-1" ||
+			claim.EvidenceRef != evidenceDigest || claim.SourceRevision != stageTestSHA || claim.TargetRevision != stageTestSHA {
+			t.Fatalf("wrong synthetic claim: %#v", claim)
+		}
+		pipeline := "other-pipeline"
+		if matchedPipeline {
+			pipeline = claim.Pipeline
+		}
+		return stagereceipt.Attestation{
+			Verified: true, AttestationID: "stgatt_" + strings.Repeat("c", 64),
+			ProjectID: claim.ProjectID, TenantID: tenant, CredentialID: credential,
+			Repository: claim.Repository, ProgramID: claim.ProgramID, Pipeline: pipeline,
+			Kind: claim.Kind, RunRef: claim.RunRef, EvidenceRef: claim.EvidenceRef,
+			SourceRevision: claim.SourceRevision, TargetRevision: claim.TargetRevision,
+			ImageRef: "flare@sha256:" + strings.Repeat("d", 64),
+			ImageID:  "sha256:" + strings.Repeat("d", 64), VerifiedAt: time.Now().UTC(),
+		}, nil
+	})
+	bad := httptest.NewRecorder()
+	s.handleVerifyAutomationReceipt(bad, stageHandlerRequest(http.MethodPost, project.ID, receiptID, project.OrgID, ""))
+	if bad.Code != http.StatusConflict {
+		t.Fatalf("wrong pipeline promoted synthetic receipt: %d: %s", bad.Code, bad.Body.String())
+	}
+	matchedPipeline = true
+	ok := httptest.NewRecorder()
+	s.handleVerifyAutomationReceipt(ok, stageHandlerRequest(http.MethodPost, project.ID, receiptID, project.OrgID, ""))
+	if ok.Code != http.StatusOK || !strings.Contains(ok.Body.String(), `"verification_status":"verified"`) {
+		t.Fatalf("matching synthetic proof = %d: %s", ok.Code, ok.Body.String())
+	}
+	var status, pipeline, kind, imageID string
+	if err := pool.QueryRow(ctx, `SELECT r.verification_status, a.pipeline, a.kind, a.image_id
+		FROM automation_receipts r JOIN automation_receipt_attestations a ON a.receipt_id=r.id
+		WHERE r.id=$1 AND r.org_id=$2 AND r.project_id=$3`,
+		receiptID, project.OrgID, project.ID).Scan(&status, &pipeline, &kind, &imageID); err != nil ||
+		status != "verified" || pipeline != "deploy-flare" || kind != "synthetic" || imageID != "sha256:"+strings.Repeat("d", 64) {
+		t.Fatalf("synthetic proof/status = %q %q %q %q %v", status, pipeline, kind, imageID, err)
+	}
+}
+
+func TestStagePipelineForSyntheticMatchesBoundDeployPipeline(t *testing.T) {
+	b := stageBinding{CIPipeline: "ci-flare", MergePipeline: "controlled-merge", DeployPipeline: "deploy-flare"}
+	if got := stagePipelineForKind(b, "synthetic"); got != b.DeployPipeline {
+		t.Fatalf("synthetic pipeline = %q, want deploy pipeline %q", got, b.DeployPipeline)
+	}
+}
+
 func TestStageClaimRequiresStageFields(t *testing.T) {
 	b := stageBinding{CIPipeline: "ci-flare", MergePipeline: "controlled-merge", DeployPipeline: "deploy-flare", Repository: "repo", ProgramID: "flare"}
 	for _, tc := range []struct {
