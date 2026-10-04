@@ -24,10 +24,9 @@ async function hashes(root) {
 }
 
 // The browser DSN is injected into the compiled frontend by this same build.
-// Bind its project and public ingest key to the image without retaining the
-// DSN itself in the runtime manifest. Stage compares this digest with an
-// authenticated project read before uploading private source maps.
-export function browserDsnBinding(dsn) {
+// Keep its public key/project and origin as separate digests so a project
+// binding alone cannot accept a bundle pointing at another ingest host.
+function parseBrowserDsn(dsn) {
   if (!dsn?.trim()) return '';
   let url;
   try {
@@ -41,10 +40,36 @@ export function browserDsnBinding(dsn) {
     throw new Error('invalid browser DSN build input');
   }
   const projectID = url.pathname.replace(/\/$/, '').slice(1);
-  return createHash('sha256').update(`flare-browser-dsn-v1\n${url.username}\n${projectID}`).digest('hex');
+  return { url, projectID };
 }
 
-export async function writeBuildManifest(publicRoot, privateRoot, output, browserDSN = process.env.PUBLIC_FLARE_DSN ?? '') {
+export function browserDsnBinding(dsn) {
+  const parsed = parseBrowserDsn(dsn);
+  if (!parsed) return '';
+  return createHash('sha256').update(`flare-browser-dsn-v1\n${parsed.url.username}\n${parsed.projectID}`).digest('hex');
+}
+
+export function browserDsnOriginBinding(dsn) {
+  const parsed = parseBrowserDsn(dsn);
+  if (!parsed) return '';
+  return createHash('sha256').update(`flare-browser-dsn-origin-v1\n${parsed.url.origin}`).digest('hex');
+}
+
+async function verifyCompiledBrowserTelemetry(publicDir, publicFiles, browserDSN, browserRelease) {
+  // A configured DSN must carry the exact source commit into browser events.
+  // Docker sets PUBLIC_FLARE_RELEASE to FLARE_RELEASE+gFLARE_COMMIT.
+  if (!/\+g(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(browserRelease)) {
+    throw new Error('configured browser DSN requires a release with a full source commit');
+  }
+  for (const name of Object.keys(publicFiles)) {
+    if (!name.endsWith('.js')) continue;
+    const code = await readFile(join(publicDir, name), 'utf8');
+    if (code.includes(browserDSN) && code.includes(browserRelease)) return;
+  }
+  throw new Error('configured browser DSN and release are missing from one compiled JavaScript asset');
+}
+
+export async function writeBuildManifest(publicRoot, privateRoot, output, browserDSN = process.env.PUBLIC_FLARE_DSN ?? '', browserRelease = process.env.PUBLIC_FLARE_RELEASE ?? '') {
   const publicDir = resolve(publicRoot);
   const privateDir = resolve(privateRoot);
   const outputFile = resolve(output);
@@ -62,11 +87,16 @@ export async function writeBuildManifest(publicRoot, privateRoot, output, browse
       throw new Error('each source map must match a public file');
     }
   }
+  if (browserDSN?.trim()) {
+    browserDsnBinding(browserDSN); // validate before searching the public build
+    await verifyCompiledBrowserTelemetry(publicDir, publicFiles, browserDSN.trim(), browserRelease);
+  }
   const manifest = {
     version: 2,
     public_files: publicFiles,
     source_maps: sourceMaps,
-    browser_dsn_binding_sha256: browserDsnBinding(browserDSN)
+    browser_dsn_binding_sha256: browserDsnBinding(browserDSN),
+    browser_dsn_origin_sha256: browserDsnOriginBinding(browserDSN)
   };
   await writeFile(outputFile, `${JSON.stringify(manifest)}\n`, { flag: 'w', mode: 0o600 });
   return manifest;
