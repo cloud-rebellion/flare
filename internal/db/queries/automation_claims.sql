@@ -2,7 +2,15 @@
 -- opaque references and a lease; Flare never executes the claimed operation.
 
 -- name: ClaimAutomationStage :one
-WITH eligible AS (
+WITH latest_patch AS (
+    SELECT target_revision, created_at
+    FROM automation_receipts
+    WHERE org_id = sqlc.arg(org_id) AND project_id = sqlc.arg(project_id)
+      AND issue_id = sqlc.arg(issue_id) AND stage = 'patch'
+      AND target_revision <> ''
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+), eligible AS (
     SELECT 1
     WHERE NOT EXISTS (
         SELECT 1
@@ -12,7 +20,10 @@ WITH eligible AS (
           AND done.issue_id = sqlc.arg(issue_id)
           AND done.stage = sqlc.arg(stage)
           AND done.status = 'passed'
-          AND done.target_revision = sqlc.arg(target_revision)
+          -- A merge claim is leased against the branch source revision. The
+          -- merge result does not exist yet when the claim is created.
+          AND (CASE WHEN done.stage = 'merge' THEN done.source_revision ELSE done.target_revision END) = sqlc.arg(target_revision)
+          AND (done.stage = 'patch' OR done.created_at > (SELECT created_at FROM latest_patch))
           -- A caller's opaque run_ref cannot consume the stage forever. Patch
           -- has its own triage digest check; external stages need trusted proof.
           AND (done.stage = 'patch' OR (
@@ -42,6 +53,8 @@ WITH eligible AS (
                 AND prior.stage = 'review'
                 AND prior.status = 'approved'
                 AND prior.target_revision = sqlc.arg(target_revision)
+                AND prior.target_revision = (SELECT target_revision FROM latest_patch)
+                AND prior.created_at > (SELECT created_at FROM latest_patch)
                 AND prior.actor_user_id IS NOT NULL
           ))
           OR (sqlc.arg(stage) = 'merge' AND EXISTS (
@@ -53,6 +66,8 @@ WITH eligible AS (
                 AND prior.stage = 'ci'
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
+                AND prior.target_revision = (SELECT target_revision FROM latest_patch)
+                AND prior.created_at > (SELECT created_at FROM latest_patch)
                 AND prior.run_ref <> ''
                 AND prior.verification_status = 'verified'
           ))
@@ -65,6 +80,8 @@ WITH eligible AS (
                 AND prior.stage = 'merge'
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
+                AND prior.source_revision = (SELECT target_revision FROM latest_patch)
+                AND prior.created_at > (SELECT created_at FROM latest_patch)
                 AND prior.run_ref <> ''
                 AND prior.verification_status = 'verified'
           ))
@@ -77,8 +94,18 @@ WITH eligible AS (
                 AND prior.stage = 'deploy'
                 AND prior.status = 'passed'
                 AND prior.target_revision = sqlc.arg(target_revision)
+                AND prior.created_at > (SELECT created_at FROM latest_patch)
                 AND prior.run_ref <> ''
                 AND prior.verification_status = 'verified'
+                AND EXISTS (
+                    SELECT 1 FROM automation_receipts merged
+                    WHERE merged.org_id = prior.org_id AND merged.project_id = prior.project_id
+                      AND merged.issue_id = prior.issue_id AND merged.stage = 'merge'
+                      AND merged.status = 'passed' AND merged.verification_status = 'verified'
+                      AND merged.source_revision = (SELECT target_revision FROM latest_patch)
+                      AND merged.target_revision = prior.target_revision
+                      AND merged.created_at > (SELECT created_at FROM latest_patch)
+                )
           ))
       )
 )

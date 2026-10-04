@@ -96,6 +96,15 @@ func (q *Queries) GetAutomationVerificationStats(ctx context.Context, arg GetAut
 }
 
 const hasAutomationReceiptEvidence = `-- name: HasAutomationReceiptEvidence :one
+WITH latest_patch AS (
+    SELECT id, target_revision, created_at
+    FROM automation_receipts
+    WHERE org_id = $1 AND project_id = $2
+      AND issue_id = $3 AND stage = 'patch'
+      AND target_revision <> ''
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+)
 SELECT EXISTS (
     SELECT 1
     FROM automation_receipts ar
@@ -105,6 +114,26 @@ SELECT EXISTS (
       AND ar.stage = $4
       AND ar.status = $5
       AND ar.target_revision = $6
+      AND (
+          (ar.stage = 'patch' AND ar.id = (SELECT id FROM latest_patch))
+          OR (ar.stage IN ('review', 'ci')
+              AND ar.target_revision = (SELECT target_revision FROM latest_patch)
+              AND ar.created_at > (SELECT created_at FROM latest_patch))
+          OR (ar.stage = 'merge'
+              AND ar.source_revision = (SELECT target_revision FROM latest_patch)
+              AND ar.created_at > (SELECT created_at FROM latest_patch))
+          OR (ar.stage = 'deploy'
+              AND ar.created_at > (SELECT created_at FROM latest_patch)
+              AND EXISTS (
+                  SELECT 1 FROM automation_receipts merged
+                  WHERE merged.org_id = ar.org_id AND merged.project_id = ar.project_id
+                    AND merged.issue_id = ar.issue_id AND merged.stage = 'merge'
+                    AND merged.status = 'passed' AND merged.verification_status = 'verified'
+                    AND merged.source_revision = (SELECT target_revision FROM latest_patch)
+                    AND merged.target_revision = ar.target_revision
+                    AND merged.created_at > (SELECT created_at FROM latest_patch)
+              ))
+      )
       AND (
           -- A review approval remains human evidence only while its actor
           -- identity is retained; the table check rejects actor deletion
@@ -210,11 +239,14 @@ WITH claim AS (
       AND ac.project_id = $3
       AND ac.issue_id = $4
       AND ac.stage = $5
-      AND ac.target_revision = $6
+      -- Merge claims bind the pre-merge source SHA. The passed receipt's
+      -- target SHA is the newly produced merge result.
+      AND ac.target_revision = CASE WHEN ac.stage = 'merge' AND $6 = 'passed'
+                                    THEN $7 ELSE $8 END
       -- Only patch claims carry AI evidence. CI, merge, deploy, and
       -- synthetic claims bind the stage/revision/lease; their receipt may
       -- carry its own bounded run or probe evidence reference.
-      AND (ac.stage <> 'patch' OR ac.evidence_ref = $7)
+      AND (ac.stage <> 'patch' OR ac.evidence_ref = $9)
       AND ac.status = 'active'
       AND ac.leased_until > now()
     FOR UPDATE
@@ -224,9 +256,9 @@ WITH claim AS (
         evidence_ref, source_revision, target_revision, run_ref, actor_user_id,
         retryable, error_code, completed_at, claim_id
     )
-    SELECT $8, $2, $3, $4,
-           $5, $9, $10,
-           $7, $11, $6,
+    SELECT $10, $2, $3, $4,
+           $5, $6, $11,
+           $9, $7, $8,
            $12, $13, $14,
            $15, $16, NULLIF(COALESCE($1::text, ''), '')
     FROM issues i
@@ -236,7 +268,7 @@ WITH claim AS (
       AND i.project_id = $3
       AND (
           (COALESCE($1::text, '') = '' AND (
-              $9 <> 'passed'
+              $6 <> 'passed'
               OR $5 NOT IN ('patch', 'ci', 'merge', 'deploy', 'synthetic')
           ))
           OR c.id IS NOT NULL
@@ -245,7 +277,7 @@ WITH claim AS (
     RETURNING id, org_id, project_id, issue_id, stage, status, idempotency_key, evidence_ref, source_revision, target_revision, run_ref, actor_user_id, retryable, error_code, created_at, updated_at, completed_at, claim_id, verification_status
 ), consumed AS (
     UPDATE automation_claims ac
-    SET status = CASE WHEN $9 = 'passed' AND $5 = 'patch' THEN 'consumed' ELSE ac.status END,
+    SET status = CASE WHEN $6 = 'passed' AND $5 = 'patch' THEN 'consumed' ELSE ac.status END,
         updated_at = now()
     FROM inserted i
     WHERE ac.id = i.claim_id
@@ -262,12 +294,12 @@ type InsertAutomationReceiptParams struct {
 	ProjectID      string             `json:"project_id"`
 	IssueID        string             `json:"issue_id"`
 	Stage          string             `json:"stage"`
+	Status         interface{}        `json:"status"`
+	SourceRevision string             `json:"source_revision"`
 	TargetRevision string             `json:"target_revision"`
 	EvidenceRef    string             `json:"evidence_ref"`
 	ID             string             `json:"id"`
-	Status         string             `json:"status"`
 	IdempotencyKey string             `json:"idempotency_key"`
-	SourceRevision string             `json:"source_revision"`
 	RunRef         string             `json:"run_ref"`
 	ActorUserID    pgtype.Text        `json:"actor_user_id"`
 	Retryable      bool               `json:"retryable"`
@@ -312,12 +344,12 @@ func (q *Queries) InsertAutomationReceipt(ctx context.Context, arg InsertAutomat
 		arg.ProjectID,
 		arg.IssueID,
 		arg.Stage,
+		arg.Status,
+		arg.SourceRevision,
 		arg.TargetRevision,
 		arg.EvidenceRef,
 		arg.ID,
-		arg.Status,
 		arg.IdempotencyKey,
-		arg.SourceRevision,
 		arg.RunRef,
 		arg.ActorUserID,
 		arg.Retryable,

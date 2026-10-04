@@ -184,7 +184,9 @@ func TestStageClaimRequiresStageFields(t *testing.T) {
 		{"merge", "", stageTestSHA, "", "merge:branch", false},
 		{"deploy", stageTestSHA, stageTestSHA, strings.Repeat("a", 64), "run", true},
 		{"deploy", "", stageTestSHA, strings.Repeat("a", 64), "run", false},
+		{"synthetic", stageTestSHA, stageTestSHA, strings.Repeat("b", 64), "deploy-run", true},
 		{"synthetic", stageTestSHA, stageTestSHA, "probe", "run", false},
+		{"synthetic", "", stageTestSHA, strings.Repeat("b", 64), "deploy-run", false},
 	} {
 		_, ok := stageClaimForReceipt("p", b, stageReceiptSnapshot{Stage: tc.stage, Status: "passed", VerificationStatus: "unverified", SourceRevision: tc.source, TargetRevision: tc.target, EvidenceRef: tc.evidence, RunRef: tc.run})
 		if ok != tc.want {

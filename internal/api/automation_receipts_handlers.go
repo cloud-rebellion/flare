@@ -38,8 +38,9 @@ var (
 
 // Completed workflow evidence is ordered by the revision it advances. A
 // receipt endpoint must not let a caller mint a "deploy passed" row without a
-// human-approved review and the preceding CI/merge receipts for that same
-// revision. Failed or blocked stages remain recordable without a predecessor
+// human-approved review and the preceding CI/merge receipts. CI proves the
+// source revision, merge moves it to a result revision, and deploy proves that
+// result. Failed or blocked stages remain recordable without a predecessor
 // so the workflow can explain where it stopped.
 var automationReceiptPrerequisites = map[string]struct {
 	stage  string
@@ -169,16 +170,20 @@ func (s *Server) handleCreateAutomationReceipt(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if prerequisite, ok := automationReceiptPrerequisite(normalized); ok {
+		prerequisiteRevision := normalized.TargetRevision
+		if normalized.Stage == "merge" {
+			prerequisiteRevision = normalized.SourceRevision
+		}
 		exists, checkErr := s.q.HasAutomationReceiptEvidence(r.Context(), generated.HasAutomationReceiptEvidenceParams{
 			OrgID: project.OrgID, ProjectID: project.ID, IssueID: normalized.IssueID,
-			Stage: prerequisite.stage, Status: prerequisite.status, TargetRevision: normalized.TargetRevision,
+			Stage: prerequisite.stage, Status: prerequisite.status, TargetRevision: prerequisiteRevision,
 		})
 		if checkErr != nil {
 			slogError(w, "check automation receipt prerequisite", checkErr)
 			return
 		}
 		if !exists {
-			writeErr(w, http.StatusConflict, "workflow prerequisite is not satisfied for this target revision")
+			writeErr(w, http.StatusConflict, "workflow prerequisite is not satisfied for this revision")
 			return
 		}
 	}
@@ -309,28 +314,28 @@ func (s *Server) handleGetAutomationNext(w http.ResponseWriter, r *http.Request)
 }
 
 // automationNextAction computes a bounded state-machine handoff from rows
-// ordered oldest-first by the query. Only a target revision's valid terminal
-// predecessor can make the next stage available; pending work is surfaced as
-// state=pending and failed/blocked work is retryable. Empty or malformed rows
-// never grant an action.
+// ordered oldest-first by the query. The latest patch anchors the branch
+// revision. A verified merge moves the remaining stages to its result
+// revision. Pending work is surfaced as state=pending and failed/blocked work
+// is retryable. Empty or malformed rows never grant an action.
 func automationNextAction(issueID string, rows []*generated.AutomationReceipt) automationNextResponse {
 	out := automationNextResponse{IssueID: issueID, State: "not_started"}
-	latestRevision := ""
-	for _, row := range rows {
-		if row == nil || !automationWorkflowStage(row.Stage) || row.TargetRevision == "" {
-			continue
+	patchIndex := -1
+	for i, row := range rows {
+		if row != nil && row.Stage == "patch" && row.TargetRevision != "" {
+			patchIndex = i
 		}
-		latestRevision = row.TargetRevision
 	}
-	if latestRevision == "" {
+	if patchIndex < 0 {
 		return out
 	}
-	out.TargetRevision = latestRevision
+	sourceRevision := rows[patchIndex].TargetRevision
+	out.TargetRevision = sourceRevision
 
 	latest := make(map[string]*generated.AutomationReceipt, len(automationWorkflowStages))
 	completed := make(map[string]*generated.AutomationReceipt, len(automationWorkflowStages))
-	for _, row := range rows {
-		if row == nil || row.TargetRevision != latestRevision || !automationWorkflowStage(row.Stage) {
+	for _, row := range rows[patchIndex:] {
+		if row == nil || row.TargetRevision != sourceRevision || (row.Stage != "patch" && row.Stage != "review" && row.Stage != "ci") {
 			continue
 		}
 		latest[row.Stage] = row
@@ -338,10 +343,35 @@ func automationNextAction(issueID string, rows []*generated.AutomationReceipt) a
 			completed[row.Stage] = row
 		}
 	}
+	for _, row := range rows[patchIndex:] {
+		if row == nil || row.Stage != "merge" || (row.SourceRevision != sourceRevision && (row.SourceRevision != "" || row.TargetRevision != sourceRevision)) {
+			continue
+		}
+		latest[row.Stage] = row
+		if row.SourceRevision == sourceRevision && automationReceiptStageComplete(row) {
+			completed[row.Stage] = row
+		}
+	}
+	mergeRevision := ""
+	if merge := completed["merge"]; merge != nil {
+		mergeRevision = merge.TargetRevision
+		for _, row := range rows[patchIndex:] {
+			if row == nil || row.TargetRevision != mergeRevision || (row.Stage != "deploy" && row.Stage != "synthetic") {
+				continue
+			}
+			latest[row.Stage] = row
+			if automationReceiptStageComplete(row) {
+				completed[row.Stage] = row
+			}
+		}
+	}
 
 	for index, stage := range automationWorkflowStages {
 		row := latest[stage]
 		if completed[stage] != nil {
+			if stage == "merge" {
+				out.TargetRevision = mergeRevision
+			}
 			continue
 		}
 		if row != nil && row.Status == "pending" {
@@ -489,6 +519,9 @@ func normalizeAutomationReceiptRequest(req createAutomationReceiptRequest) (crea
 		}
 		if req.Stage == "patch" && !validAIEvidenceDigest(req.EvidenceRef) {
 			return req, errors.New("passed patch receipts require a 64-character lowercase AI evidence digest in evidence_ref")
+		}
+		if req.Stage == "merge" && req.SourceRevision == "" {
+			return req, errors.New("passed merge receipts require source_revision")
 		}
 		switch req.Stage {
 		case "ci", "merge", "deploy", "rollback", "synthetic":

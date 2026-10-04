@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -35,6 +38,7 @@ func TestAutomationPassedReceiptOnePerLiveClaimReturnsConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedAutomationPatchFixture(t, pool, project.OrgID, project.ID, issue.ID, "rev-1", "patch-before-ci-claim")
 	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
 		Stage: "review", Status: "approved", IdempotencyKey: "review-claim",
@@ -75,6 +79,131 @@ func TestAutomationPassedReceiptOnePerLiveClaimReturnsConflict(t *testing.T) {
 	second := submit("ci-claim-second")
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second pass under live claim = %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestAutomationMergeClaimMovesSourceRevisionToDeployRevision(t *testing.T) {
+	pool := newTestDB(t)
+	project := seedProjectForIngest(t, pool)
+	q := generated.New(pool)
+	ctx := context.Background()
+	const sourceRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const mergeRevision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	issue, err := q.UpsertIssue(ctx, generated.UpsertIssueParams{
+		ID: id.New(), ProjectID: project.ID, OrgID: project.OrgID,
+		Fingerprint: id.New(), Title: "Merge revision", Culprit: "test", Level: "error", Platform: "go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, err := q.CreateUser(ctx, generated.CreateUserParams{
+		ID: id.New(), OrgID: project.OrgID, Email: id.New() + "@example.test", PasswordHash: "hash", Role: "member",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAutomationPatchFixture(t, pool, project.OrgID, project.ID, issue.ID, sourceRevision, "patch-before-merge-transition")
+	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+		Stage: "review", Status: "approved", IdempotencyKey: "review-merge-revision",
+		TargetRevision: sourceRevision, ActorUserID: pgtype.Text{String: actor.ID, Valid: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lease := pgtype.Timestamptz{Time: time.Now().Add(time.Minute), Valid: true}
+	claim := func(stage, revision string) (*generated.AutomationClaim, error) {
+		return q.ClaimAutomationStage(ctx, generated.ClaimAutomationStageParams{
+			ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+			Stage: stage, TargetRevision: revision, WorkerRef: "test-worker", LeasedUntil: lease,
+		})
+	}
+	ciClaim, err := claim("ci", sourceRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
+		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+		Stage: "ci", Status: "passed", IdempotencyKey: "ci-merge-revision",
+		TargetRevision: sourceRevision, RunRef: "ci-run", ClaimID: ciClaim.ID,
+		CompletedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The SQL transition test starts after a trusted verifier has established
+	// the CI proof. The verifier itself has separate exact-proof tests.
+	if _, err := pool.Exec(ctx, `UPDATE automation_receipts SET verification_status = 'verified' WHERE id = $1`, ci.ID); err != nil {
+		t.Fatal(err)
+	}
+	mergeClaim, err := claim("merge", sourceRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := serverForDB(pool)
+	body, err := json.Marshal(createAutomationReceiptRequest{
+		IssueID: issue.ID, Stage: "merge", Status: "passed", IdempotencyKey: "merge-source-to-result",
+		ClaimID: mergeClaim.ID, SourceRevision: sourceRevision, TargetRevision: mergeRevision, RunRef: "merge:branch",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/automation-receipts", strings.NewReader(string(body)))
+	route := chi.NewRouteContext()
+	route.URLParams.Add("id", project.ID)
+	rctx := context.WithValue(req.Context(), chi.RouteCtxKey, route)
+	req = req.WithContext(context.WithValue(rctx, ctxOrgID, project.OrgID))
+	out := httptest.NewRecorder()
+	s.handleCreateAutomationReceipt(out, req)
+	if out.Code != http.StatusCreated {
+		t.Fatalf("merge receipt = %d: %s", out.Code, out.Body.String())
+	}
+	var merged automationReceiptResponse
+	if err := json.Unmarshal(out.Body.Bytes(), &merged); err != nil {
+		t.Fatal(err)
+	}
+	if merged.SourceRevision != sourceRevision || merged.TargetRevision != mergeRevision || merged.VerificationStatus != "unverified" {
+		t.Fatalf("merge receipt lost revision transition: %#v", merged)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE automation_receipts SET verification_status = 'verified' WHERE id = $1`, merged.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claim("merge", sourceRevision); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("verified merge source revision remained claimable: %v", err)
+	}
+	if _, err := claim("deploy", sourceRevision); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("unmerged source revision became deployable: %v", err)
+	}
+	deployClaim, err := claim("deploy", mergeRevision)
+	if err != nil {
+		t.Fatalf("verified merge result revision was not deployable: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE automation_claims SET leased_until = now() - interval '1 second' WHERE id = $1`, deployClaim.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedAutomationPatchFixture(t, pool, project.OrgID, project.ID, issue.ID,
+		"cccccccccccccccccccccccccccccccccccccccc", "newer-patch-generation")
+	if _, err := claim("deploy", mergeRevision); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("old merge result remained deployable after a newer patch: %v", err)
+	}
+	previousMerge, err := q.HasAutomationReceiptEvidence(ctx, generated.HasAutomationReceiptEvidenceParams{
+		OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
+		Stage: "merge", Status: "passed", TargetRevision: mergeRevision,
+	})
+	if err != nil || previousMerge {
+		t.Fatalf("old merge satisfied current patch prerequisite: evidence=%v, err=%v", previousMerge, err)
+	}
+}
+
+func seedAutomationPatchFixture(t *testing.T, pool *pgxpool.Pool, orgID, projectID, issueID, revision, key string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO automation_receipts (id, org_id, project_id, issue_id, stage, status,
+			idempotency_key, evidence_ref, target_revision, completed_at)
+		VALUES ($1, $2, $3, $4, 'patch', 'passed', $5, $6, $7, now())`,
+		id.New(), orgID, projectID, issueID, key,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", revision)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -151,6 +280,7 @@ func TestNormalizeAutomationReceiptRequestStrict(t *testing.T) {
 		"patch pass without AI evidence":      {IssueID: "i", Stage: "patch", Status: "passed", IdempotencyKey: "k", TargetRevision: "rev-1"},
 		"patch pass with invalid AI evidence": {IssueID: "i", Stage: "patch", Status: "passed", IdempotencyKey: "k", TargetRevision: "rev-1", EvidenceRef: "not-a-digest"},
 		"ci pass without run":                 {IssueID: "i", Stage: "ci", Status: "passed", IdempotencyKey: "k", TargetRevision: "rev-1"},
+		"merge pass without source":           {IssueID: "i", Stage: "merge", Status: "passed", IdempotencyKey: "k", TargetRevision: "rev-2", RunRef: "merge-1", ClaimID: "claim-1"},
 		"synthetic pass without evidence":     {IssueID: "i", Stage: "synthetic", Status: "passed", IdempotencyKey: "k", TargetRevision: "rev-1", RunRef: "synthetic-17"},
 		"rollback missing source":             {IssueID: "i", Stage: "rollback", Status: "pending", IdempotencyKey: "k", TargetRevision: "rev-1"},
 		"rollback missing target":             {IssueID: "i", Stage: "rollback", Status: "pending", IdempotencyKey: "k", SourceRevision: "rev-2"},
@@ -224,6 +354,9 @@ func automationNextRow(id, stage, status, revision string) *generated.Automation
 	}
 	if stage == "ci" || stage == "merge" || stage == "deploy" || stage == "synthetic" {
 		row.RunRef = id + "-run"
+		if stage == "merge" {
+			row.SourceRevision = revision
+		}
 		if status == "passed" {
 			// This fixture represents a receipt promoted by a future trusted verifier.
 			row.VerificationStatus = "verified"
@@ -243,6 +376,7 @@ func TestAutomationNextActionIsTenantSafeStateMachine(t *testing.T) {
 		state     string
 		stage     string
 		prereqID  string
+		revision  string
 	}{
 		{name: "not started", state: "not_started"},
 		{
@@ -337,7 +471,41 @@ func TestAutomationNextActionIsTenantSafeStateMachine(t *testing.T) {
 			name: "wrong revision cannot satisfy", rows: []*generated.AutomationReceipt{
 				automationNextRow("patch-1", "patch", "passed", "rev-1"),
 				automationNextRow("review-2", "review", "approved", "rev-2"),
-			}, state: "not_started",
+			}, available: true, state: "ready", stage: "review", prereqID: "patch-1",
+		},
+		{
+			name: "verified merge moves deploy to result revision", rows: func() []*generated.AutomationReceipt {
+				merge := automationNextRow("merge-1", "merge", "passed", "rev-2")
+				merge.SourceRevision = "rev-1"
+				return []*generated.AutomationReceipt{
+					automationNextRow("patch-1", "patch", "passed", "rev-1"),
+					automationNextRow("review-1", "review", "approved", "rev-1"),
+					automationNextRow("ci-1", "ci", "passed", "rev-1"), merge,
+				}
+			}(), available: true, state: "ready", stage: "deploy", prereqID: "merge-1", revision: "rev-2",
+		},
+		{
+			name: "unverified merge cannot move revision", rows: func() []*generated.AutomationReceipt {
+				merge := automationNextRow("merge-1", "merge", "passed", "rev-2")
+				merge.SourceRevision = "rev-1"
+				merge.VerificationStatus = "unverified"
+				return []*generated.AutomationReceipt{
+					automationNextRow("patch-1", "patch", "passed", "rev-1"),
+					automationNextRow("review-1", "review", "approved", "rev-1"),
+					automationNextRow("ci-1", "ci", "passed", "rev-1"), merge,
+				}
+			}(), state: "verification_pending", stage: "merge", prereqID: "ci-1",
+		},
+		{
+			name: "wrong merge source cannot move revision", rows: func() []*generated.AutomationReceipt {
+				merge := automationNextRow("merge-1", "merge", "passed", "rev-2")
+				merge.SourceRevision = "other-branch"
+				return []*generated.AutomationReceipt{
+					automationNextRow("patch-1", "patch", "passed", "rev-1"),
+					automationNextRow("review-1", "review", "approved", "rev-1"),
+					automationNextRow("ci-1", "ci", "passed", "rev-1"), merge,
+				}
+			}(), available: true, state: "ready", stage: "merge", prereqID: "ci-1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -345,8 +513,11 @@ func TestAutomationNextActionIsTenantSafeStateMachine(t *testing.T) {
 			if got.Available != tc.available || got.State != tc.state || got.Stage != tc.stage || got.PrerequisiteReceiptID != tc.prereqID {
 				t.Fatalf("next action = %#v, want available=%v state=%q stage=%q prerequisite=%q", got, tc.available, tc.state, tc.stage, tc.prereqID)
 			}
-			if got.IssueID != "issue-1" || (got.TargetRevision != "" && got.TargetRevision != "rev-1" && tc.name != "wrong revision cannot satisfy") {
+			if got.IssueID != "issue-1" || (got.TargetRevision != "" && got.TargetRevision != "rev-1" && got.TargetRevision != "rev-2") {
 				t.Fatalf("next action provenance = %#v", got)
+			}
+			if tc.revision != "" && got.TargetRevision != tc.revision {
+				t.Fatalf("next target revision = %q, want %q", got.TargetRevision, tc.revision)
 			}
 		})
 	}

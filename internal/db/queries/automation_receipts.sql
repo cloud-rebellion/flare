@@ -17,7 +17,10 @@ WITH claim AS (
       AND ac.project_id = sqlc.arg(project_id)
       AND ac.issue_id = sqlc.arg(issue_id)
       AND ac.stage = sqlc.arg(stage)
-      AND ac.target_revision = sqlc.arg(target_revision)
+      -- Merge claims bind the pre-merge source SHA. The passed receipt's
+      -- target SHA is the newly produced merge result.
+      AND ac.target_revision = CASE WHEN ac.stage = 'merge' AND sqlc.arg(status) = 'passed'
+                                    THEN sqlc.arg(source_revision) ELSE sqlc.arg(target_revision) END
       -- Only patch claims carry AI evidence. CI, merge, deploy, and
       -- synthetic claims bind the stage/revision/lease; their receipt may
       -- carry its own bounded run or probe evidence reference.
@@ -110,6 +113,15 @@ WHERE org_id = sqlc.arg(org_id)::text
 -- approved revision that it claims to advance. Keep all tenant, project, issue,
 -- stage, status, and revision predicates in this query; a revision string is
 -- caller supplied and cannot identify a workflow by itself.
+WITH latest_patch AS (
+    SELECT id, target_revision, created_at
+    FROM automation_receipts
+    WHERE org_id = sqlc.arg(org_id) AND project_id = sqlc.arg(project_id)
+      AND issue_id = sqlc.arg(issue_id) AND stage = 'patch'
+      AND target_revision <> ''
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+)
 SELECT EXISTS (
     SELECT 1
     FROM automation_receipts ar
@@ -119,6 +131,26 @@ SELECT EXISTS (
       AND ar.stage = sqlc.arg(stage)
       AND ar.status = sqlc.arg(status)
       AND ar.target_revision = sqlc.arg(target_revision)
+      AND (
+          (ar.stage = 'patch' AND ar.id = (SELECT id FROM latest_patch))
+          OR (ar.stage IN ('review', 'ci')
+              AND ar.target_revision = (SELECT target_revision FROM latest_patch)
+              AND ar.created_at > (SELECT created_at FROM latest_patch))
+          OR (ar.stage = 'merge'
+              AND ar.source_revision = (SELECT target_revision FROM latest_patch)
+              AND ar.created_at > (SELECT created_at FROM latest_patch))
+          OR (ar.stage = 'deploy'
+              AND ar.created_at > (SELECT created_at FROM latest_patch)
+              AND EXISTS (
+                  SELECT 1 FROM automation_receipts merged
+                  WHERE merged.org_id = ar.org_id AND merged.project_id = ar.project_id
+                    AND merged.issue_id = ar.issue_id AND merged.stage = 'merge'
+                    AND merged.status = 'passed' AND merged.verification_status = 'verified'
+                    AND merged.source_revision = (SELECT target_revision FROM latest_patch)
+                    AND merged.target_revision = ar.target_revision
+                    AND merged.created_at > (SELECT created_at FROM latest_patch)
+              ))
+      )
       AND (
           -- A review approval remains human evidence only while its actor
           -- identity is retained; the table check rejects actor deletion

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -253,6 +254,7 @@ func TestSyntheticReceiptCanCarryProbeEvidence(t *testing.T) {
 	now := pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
 	leaseUntil := pgtype.Timestamptz{Time: time.Now().UTC().Add(10 * time.Minute), Valid: true}
 	const revision = "release-1"
+	seedAutomationPatchForSQLTest(t, pool, org, project, issue, revision, "synthetic-patch")
 	acceptanceParams := generated.GetDeployAcceptanceStatsParams{
 		OrgID: org, ProjectID: project,
 		Since:       pgtype.Timestamptz{Time: now.Time.Add(-time.Hour), Valid: true},
@@ -275,10 +277,14 @@ func TestSyntheticReceiptCanCarryProbeEvidence(t *testing.T) {
 		if claimErr != nil || claim == nil {
 			t.Fatalf("claim %s stage: %v", stage, claimErr)
 		}
+		sourceRevision := ""
+		if stage == "merge" {
+			sourceRevision = revision
+		}
 		receipt, receiptErr := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 			ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
 			Stage: stage, Status: "passed", IdempotencyKey: key,
-			TargetRevision: revision, RunRef: runRef, CompletedAt: now, ClaimID: claim.ID,
+			SourceRevision: sourceRevision, TargetRevision: revision, RunRef: runRef, CompletedAt: now, ClaimID: claim.ID,
 		})
 		if receiptErr != nil {
 			t.Fatalf("insert %s receipt: %v", stage, receiptErr)
@@ -364,6 +370,7 @@ func TestUnverifiedCIClaimCanBeRetriedAfterLeaseExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedAutomationPatchForSQLTest(t, pool, org, project, issue, "rev-1", "recover-patch")
 	if _, err := q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
 		Stage: "review", Status: "approved", IdempotencyKey: "recover-review",
@@ -417,5 +424,18 @@ func TestUnverifiedCIClaimCanBeRetriedAfterLeaseExpiry(t *testing.T) {
 	}
 	if got := claimStageOnly(t, ctx, q, org, project, issue, "merge", "rev-1", lease); got == nil {
 		t.Fatal("verified CI did not permit merge claim")
+	}
+}
+
+func seedAutomationPatchForSQLTest(t *testing.T, pool *pgxpool.Pool, orgID, projectID, issueID, revision, key string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO automation_receipts (id, org_id, project_id, issue_id, stage, status,
+			idempotency_key, evidence_ref, target_revision, completed_at)
+		VALUES ($1, $2, $3, $4, 'patch', 'passed', $5, $6, $7, now())`,
+		id.New(), orgID, projectID, issueID, key,
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", revision)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

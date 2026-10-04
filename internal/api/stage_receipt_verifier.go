@@ -225,9 +225,10 @@ func stageClaimForReceipt(projectID string, b stageBinding, row stageReceiptSnap
 		claim.Pipeline = b.DeployPipeline
 		return claim, row.SourceRevision == row.TargetRevision && stageDigest.MatchString(row.EvidenceRef)
 	case "synthetic":
-		// Stage currently has no retained synthetic producer. Keep the row
-		// advisory until that producer and an explicit binding exist.
-		return claim, false
+		// The external probe is a later output of the exact deploy-flare run.
+		// Stage must bind its digest to the same immutable image and cutover.
+		claim.Pipeline = b.DeployPipeline
+		return claim, row.SourceRevision == row.TargetRevision && stageDigest.MatchString(row.EvidenceRef)
 	default:
 		return claim, false
 	}

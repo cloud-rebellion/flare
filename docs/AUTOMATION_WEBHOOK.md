@@ -84,8 +84,13 @@ actor; Flare records stage receipts, while the worker and the deployment system
 remain responsible for any separately authorized CI/deploy/synthetic actions.
 Caller-reported passed CI, merge, deploy, and synthetic outcomes remain
 `unverified` and cannot advance the next stage or accepted-deploy watchdog.
-Stage outcome attestation is still required before Flare can complete that
-chain; the project verification summary shows the pending 30-day backlog.
+The project verification summary shows the pending 30-day backlog. A project
+administrator can bind a revocable Stage profile, then a member can verify
+each exact CI, merge, deploy, and synthetic receipt through Flare's Stage
+verifier route. Flare persists Stage's matched proof before those receipts
+advance the chain. Synthetic completion requires Stage's optional external
+probe to run after cutover and retain a result bound to the same deploy run,
+source commit, and image; an opaque worker result alone stays unverified.
 
 Delivery health is visible through the channel's last-attempt/last-success
 fields, alerts integration metrics, and aggregate `automation_outbox` state on

@@ -200,7 +200,7 @@ func (c *Client) Verify(ctx context.Context, endpoint, token, tenantID, credenti
 		proof.SourceRevision != claim.SourceRevision || proof.TargetRevision != claim.TargetRevision {
 		return Attestation{}, ErrNoProof
 	}
-	if claim.Kind == "deploy" && (proof.ImageRef == "" || len(proof.ImageRef) > 512 || !digestPattern.MatchString(proof.ImageID)) {
+	if (claim.Kind == "deploy" || claim.Kind == "synthetic") && (proof.ImageRef == "" || len(proof.ImageRef) > 512 || !digestPattern.MatchString(proof.ImageID)) {
 		return Attestation{}, ErrNoProof
 	}
 	if len(proof.ImageRef) > 512 || len(proof.ImageID) > 256 {

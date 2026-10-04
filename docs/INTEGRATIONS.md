@@ -878,19 +878,24 @@ healthy from a deploy receipt alone.
 
 Caller-submitted passed CI, merge, deploy, and synthetic receipts are stored as
 `verification_status: "unverified"`, including rows created before migration 073.
-Their bounded `run_ref` and probe `evidence_ref` values are audit references,
-not trusted Stage outcomes. They do not unlock later stages or count as accepted
-deployments. Flare currently has no trusted promotion endpoint; Stage must
-provide an authenticated, exact-run attestation path before these stages can
-complete. Failed and blocked receipts remain usable diagnostics.
-The future verifier needs a defined attestation contract and migration for
-server-owned provenance: Stage run identity, exact source and target commits,
-CI result, merged commit, deployed immutable image or artifact digest, and
-synthetic probe result bound to the same project, issue, and revision. It must
-authenticate Stage's outcome, check each stage against that exact lineage,
-and store the attestation reference or digest before setting
-`verification_status` to `verified`. The current opaque `run_ref` and
-`evidence_ref` cannot supply those guarantees by themselves.
+Their bounded `run_ref` and `evidence_ref` values are audit references, not
+trusted Stage outcomes. They do not unlock later stages or count as accepted
+deployments. Failed and blocked receipts remain usable diagnostics. When an
+operator configures the fixed HTTPS `FLARE_STAGE_VERIFY_URL` and a project
+administrator binds a revocable Stage profile at
+`PUT /api/projects/{id}/stage-verifier`, the member-scoped
+`POST /api/projects/{id}/automation-receipts/{receiptID}/verify` checks an
+exact Stage-owned CI, merge, deploy, or synthetic proof. Flare matches tenant, profile,
+repository, program, pipeline, run, source and target revisions, and evidence
+reference, then writes the immutable attestation, `verified` status, and audit
+entry in one transaction. The credential is encrypted at rest and never
+returned by the binding read API. An unavailable or mismatched Stage proof
+leaves the receipt unverified. Synthetic verification requires Stage's optional
+post-cutover external probe (`STAGE_FLARE_SYNTHETIC_PROBE_ENABLED=true` on its
+runner). Without that retained Stage output, synthetic passes remain
+unverified. The synthetic receipt uses the exact deploy run ID, `M` as both
+source and target revision, and the lowercase SHA-256 of Stage's retained
+`flare-external-synthetic.json` in `evidence_ref`.
 
 The worker can persist each bounded coding-loop stage with
 `POST /api/projects/{id}/automation-receipts` using a member session or
@@ -929,7 +934,7 @@ target revision, eligible next stage, prerequisite receipt ID, and a bounded
 state (`ready`, `pending`, `verification_pending`, `retry`, `blocked`,
 `complete`, or `not_started`).
 `ready` is returned only after the immediately preceding stage is valid for the
-same target revision; review approvals require a retained human actor, and a
+current patch generation; review approvals require a retained human actor, and a
 synthetic pass requires both a runner and evidence reference. The endpoint
 never checks out code, calls CI, deploys, or dereferences an evidence reference.
 The worker performs that action externally, then posts its idempotent stage
@@ -951,16 +956,23 @@ the stage can be reclaimed and retried with a fresh claim. Failed or pending rec
 recorded without a claim for backward-compatible diagnostics and cannot advance
 the workflow. Expired claims can be reclaimed; consumed claims cannot.
 
-Completed workflow evidence is ordered by the target revision. A passed patch
+Completed workflow evidence follows a source-to-result revision transition. A passed patch
 must name `target_revision` and put the lowercase SHA-256 `evidence_digest`
 from a completed, fresh `ai_action_receipts` triage row in `evidence_ref`.
 Flare checks that digest with the same organization, project, and issue before
 accepting the patch receipt; a cached triage row has no digest and cannot be
 used as patch evidence. An approved review must name that same revision
-and a human actor; then Flare records passed CI, merge, deploy, and synthetic
-receipts only when the immediately preceding trusted receipt exists for the same
-issue, project, organization, and revision. CI, merge, deploy, and synthetic
-passes also require a bounded `run_ref`. A passed synthetic receipt additionally
+and a human actor; CI proves that source revision `P`. The merge claim also
+names `P`, while its passed receipt must name `source_revision=P` and the
+resulting merged `target_revision=M`. Once the exact merge is verified,
+`automation-next` returns `M` for deploy and synthetic claims. A Stage deploy
+receipt names `source_revision=M`, `target_revision=M`, its Stage run ID in
+`run_ref`, and the lowercase SHA-256 of Stage's retained deploy identity output
+in `evidence_ref`. Claims and receipt prerequisites are fenced to the latest
+patch for the issue, so an older verified merge cannot deploy after a newer
+patch. A successful patch SHA cannot be reused as a new generation for the
+same issue; create a new commit SHA for a new attempt. CI, merge, deploy, and
+synthetic passes also require a bounded `run_ref`. A passed synthetic receipt additionally
 requires a bounded `evidence_ref` identifying the observed canary or probe
 result; Flare treats that value as opaque and never dereferences it. A caller's
 reference alone cannot establish that the check passed. Failed or blocked stages can be recorded without a

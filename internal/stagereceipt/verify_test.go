@@ -80,28 +80,32 @@ func TestVerifyRequiresExactStageProof(t *testing.T) {
 	}
 }
 
-func TestVerifyDeployRequiresImageIdentity(t *testing.T) {
-	c := testClaim()
-	c.Kind = "deploy"
-	c.SourceRevision = c.TargetRevision
-	c.Pipeline = "deploy-flare"
-	c.EvidenceRef = strings.Repeat("a", 64)
-	p := testProof()
-	p.Kind = c.Kind
-	p.SourceRevision = c.SourceRevision
-	p.Pipeline = c.Pipeline
-	p.EvidenceRef = c.EvidenceRef
-	client := &Client{http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		body, _ := json.Marshal(p)
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
-	})}}
-	if _, err := client.Verify(context.Background(), testEndpoint, "scoped-token", "tenant-1", "flare:project-1:v2", c); !errors.Is(err, ErrNoProof) {
-		t.Fatalf("missing image accepted: %v", err)
-	}
-	p.ImageRef = "registry.example/flare:release"
-	p.ImageID = "sha256:" + strings.Repeat("b", 64)
-	if _, err := client.Verify(context.Background(), testEndpoint, "scoped-token", "tenant-1", "flare:project-1:v2", c); err != nil {
-		t.Fatalf("valid deploy proof rejected: %v", err)
+func TestVerifyDeployAndSyntheticRequireImageIdentity(t *testing.T) {
+	for _, kind := range []string{"deploy", "synthetic"} {
+		t.Run(kind, func(t *testing.T) {
+			c := testClaim()
+			c.Kind = kind
+			c.SourceRevision = c.TargetRevision
+			c.Pipeline = "deploy-flare"
+			c.EvidenceRef = strings.Repeat("a", 64)
+			p := testProof()
+			p.Kind = c.Kind
+			p.SourceRevision = c.SourceRevision
+			p.Pipeline = c.Pipeline
+			p.EvidenceRef = c.EvidenceRef
+			client := &Client{http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				body, _ := json.Marshal(p)
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})}}
+			if _, err := client.Verify(context.Background(), testEndpoint, "scoped-token", "tenant-1", "flare:project-1:v2", c); !errors.Is(err, ErrNoProof) {
+				t.Fatalf("missing image accepted: %v", err)
+			}
+			p.ImageRef = "registry.example/flare:release"
+			p.ImageID = "sha256:" + strings.Repeat("b", 64)
+			if _, err := client.Verify(context.Background(), testEndpoint, "scoped-token", "tenant-1", "flare:project-1:v2", c); err != nil {
+				t.Fatalf("valid proof rejected: %v", err)
+			}
+		})
 	}
 }
 
