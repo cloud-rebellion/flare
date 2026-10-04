@@ -965,6 +965,11 @@ pending transactions. The access and refresh tokens are encrypted at rest;
 the access token is refreshed before expiry and the installation's HubSpot
 account ID is checked against the selected account on health probes. The
 response and receipts never include HubSpot account details or CRM records.
+If an on-demand check or worker pass cannot refresh a grant, it records one
+payload-free, scoped attempt before the account probe. A rejected OAuth
+`invalid_grant` is reported as `auth_expired`, so a filtered connector alert
+can page on the expired authorization. Receipt durability is reported
+separately from the provider outcome.
 
 Re-authorizing the same HubSpot account replaces its grant under the same
 connection ID. If the administrator selected another project, the same

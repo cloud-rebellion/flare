@@ -106,7 +106,7 @@ func (s TokenStore) Resolve(ctx context.Context, orgID, connectionID string) (st
 	}
 	cred, manual, isOAuth, err := DecodeOAuthCredential(s.Cipher, ciphertext)
 	if err != nil {
-		return "", err
+		return "", preflightFailure("invalid_config", "")
 	}
 	if !isOAuth {
 		if err := tx.Commit(ctx); err != nil {
@@ -116,7 +116,7 @@ func (s TokenStore) Resolve(ctx context.Context, orgID, connectionID string) (st
 	}
 	if cred.OrgID != orgID || cred.ConnectionID != connectionID || cred.ProjectID != projectID ||
 		strconv.FormatInt(cred.HubID, 10) != installationID {
-		return "", errors.New("hubspot oauth credential scope mismatch")
+		return "", preflightFailure("invalid_config", "")
 	}
 	now := time.Now().UTC()
 	if s.Now != nil {
@@ -130,13 +130,19 @@ func (s TokenStore) Resolve(ctx context.Context, orgID, connectionID string) (st
 	}
 	tokens, err := s.Client.Refresh(ctx, cred.RefreshToken)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if _, _, ok := PreflightFailureDetails(err); ok {
+			return "", err
+		}
+		return "", preflightFailure("provider_error", "")
 	}
 	if tokens.HubID != cred.HubID {
-		return "", errors.New("hubspot refreshed token changed account")
+		return "", preflightFailure("account_mismatch", "2xx")
 	}
 	if len(tokens.Scopes) != 1 || tokens.Scopes[0] != "oauth" {
-		return "", errors.New("hubspot refreshed token changed scope")
+		return "", preflightFailure("invalid_config", "2xx")
 	}
 	cred.AccessToken, cred.RefreshToken = tokens.AccessToken, tokens.RefreshToken
 	cred.ExpiresAt = now.Add(time.Duration(tokens.ExpiresIn) * time.Second)

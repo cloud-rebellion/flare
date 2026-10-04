@@ -236,7 +236,11 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 		}
 	}
 	if err != nil || token == "" {
-		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, "invalid_config", errors.New("credential unavailable"))
+		code, statusClass := "invalid_config", ""
+		if observedCode, observedStatus, ok := hubspot.PreflightFailureDetails(err); ok {
+			code, statusClass = observedCode, observedStatus
+		}
+		return w.completeFailure(ctx, result, conn.ProjectID, orgID, connectionID, workerID, code, statusClass)
 	}
 	probe := w.Probe
 	if probe == nil {
@@ -258,13 +262,14 @@ func (w *HubSpotWorker) run(ctx context.Context, orgID, connectionID, workerID s
 	return completed, nil
 }
 
-func (w *HubSpotWorker) completeFailure(ctx context.Context, result RunResult, projectID, orgID, connectionID, workerID, code string, _ error) (RunResult, error) {
+func (w *HubSpotWorker) completeFailure(ctx context.Context, result RunResult, projectID, orgID, connectionID, workerID, code, statusClass string) (RunResult, error) {
 	result.Outcome = "error"
 	result.ErrorCode = code
+	result.StatusClass = statusClass
 	// The probe was not reached, so emit the same payload-free connector receipt
 	// shape as the provider adapter would have emitted.
 	receiptErr := integration.RecordResult(integration.WithScope(ctx, integration.Scope{OrgID: orgID, ProjectID: projectID, ConnectionID: connectionID}), integration.Attempt{
-		Provider: "hubspot", Operation: HubSpotAccountDetailsOperation, Channel: "worker", Outcome: "error", ErrorCode: code,
+		Provider: "hubspot", Operation: HubSpotAccountDetailsOperation, Channel: "worker", Outcome: "error", StatusClass: statusClass, ErrorCode: code,
 		AttemptedAt: time.Now().UTC(), CompletedAt: time.Now().UTC(),
 	})
 	result.ReceiptStatus = integration.ReceiptStatus(receiptErr)

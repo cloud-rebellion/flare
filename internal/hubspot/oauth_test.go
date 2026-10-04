@@ -3,6 +3,7 @@ package hubspot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -95,6 +96,48 @@ func TestOAuthRejectsBadResponseWithoutProviderLeak(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), "provider-secret") || strings.Contains(err.Error(), "access") || strings.Contains(err.Error(), "refresh") {
 			t.Fatalf("unsafe OAuth error: %v", err)
 		}
+	}
+}
+
+func TestOAuthRefreshFailureUsesOnlyFixedHealthCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantCode, wantStatus string
+		status                           int
+	}{
+		{"revoked grant", `{"error":"invalid_grant","error_description":"private provider detail"}`, "auth_expired", "4xx", http.StatusBadRequest},
+		{"bad client", `{"error":"invalid_client","error_description":"private provider detail"}`, "invalid_config", "4xx", http.StatusBadRequest},
+		{"unknown bad request", `{"error":"private provider detail"}`, "invalid_config", "4xx", http.StatusBadRequest},
+		{"rate limit", `{"error":"private provider detail"}`, "rate_limited", "4xx", http.StatusTooManyRequests},
+		{"provider outage", `{"error":"private provider detail"}`, "provider_error", "5xx", http.StatusServiceUnavailable},
+		{"malformed success", `{"access_token":"private provider detail"}`, "invalid_response", "2xx", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: oauthRoundTrip(func(_ *http.Request) (*http.Response, error) {
+				return oauthResponse(tc.status, tc.body), nil
+			})}
+			oauth := OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://flare.example/callback", HTTPClient: client}
+			_, err := oauth.Refresh(context.Background(), "refresh-token")
+			code, statusClass, observed := PreflightFailureDetails(err)
+			if !observed || code != tc.wantCode || statusClass != tc.wantStatus {
+				t.Fatalf("refresh classification = %q/%q/%v, err=%v", code, statusClass, observed, err)
+			}
+			if strings.Contains(err.Error(), "private provider detail") || strings.Contains(err.Error(), "refresh-token") {
+				t.Fatalf("refresh error leaked provider data: %v", err)
+			}
+		})
+	}
+}
+
+func TestOAuthRefreshCanceledRequestIsNotProviderHealth(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	oauth := OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURI: "https://flare.example/callback"}
+	_, err := oauth.Refresh(ctx, "refresh-token")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled refresh = %v", err)
+	}
+	if code, _, observed := PreflightFailureDetails(err); observed {
+		t.Fatalf("canceled request reported provider health code %q", code)
 	}
 }
 

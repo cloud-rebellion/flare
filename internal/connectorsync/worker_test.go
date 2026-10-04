@@ -3,6 +3,8 @@ package connectorsync
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +117,42 @@ func TestHubSpotWorkerCompletesCredentialFailureWithBoundedCode(t *testing.T) {
 	got, err := worker.Run(context.Background(), "org-1", "conn-1", "worker-a")
 	if err != nil || got.ErrorCode != "invalid_config" || states.completeOutcome != "error" || states.completeErrorCode != "invalid_config" {
 		t.Fatalf("credential failure = %#v err %v complete=%q/%q", got, err, states.completeOutcome, states.completeErrorCode)
+	}
+}
+
+type workerOAuthRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f workerOAuthRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestHubSpotWorkerRefreshRejectionRecordsAuthExpiry(t *testing.T) {
+	oauth := hubspot.OAuthClient{
+		ClientID: "client", ClientSecret: "secret", RedirectURI: "https://flare.example/callback",
+		HTTPClient: &http.Client{Transport: workerOAuthRoundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"invalid_grant","error_description":"private detail"}`))}, nil
+		})},
+	}
+	_, refreshErr := oauth.Refresh(context.Background(), "refresh-token")
+	states := &fakeStateStore{claimed: State{ID: "sync-1"}}
+	connections := &fakeConnectionStore{connection: Connection{ID: "conn-1", OrgID: "org-1", ProjectID: "project-1", Provider: "hubspot", Status: "active", CredentialConfigured: true}}
+	probe := &fakeHubSpotProbe{}
+	worker := &HubSpotWorker{States: states, Connections: connections, Probe: probe, ResolveToken: func(context.Context, string, string) (string, error) {
+		return "", refreshErr
+	}}
+	receipts := 0
+	integration.SetRecorderWithError(func(_ context.Context, a integration.Attempt) error {
+		receipts++
+		if a.Scope.OrgID != "org-1" || a.Scope.ProjectID != "project-1" || a.Scope.ConnectionID != "conn-1" ||
+			a.Provider != "hubspot" || a.Operation != HubSpotAccountDetailsOperation || a.Channel != "worker" ||
+			a.Outcome != "error" || a.StatusClass != "4xx" || a.ErrorCode != "auth_expired" {
+			t.Fatalf("refresh receipt = %#v", a)
+		}
+		return nil
+	})
+	t.Cleanup(func() { integration.SetRecorder(nil) })
+	got, err := worker.Run(context.Background(), "org-1", "conn-1", "worker-a")
+	if err != nil || got.ErrorCode != "auth_expired" || got.StatusClass != "4xx" || got.ReceiptStatus != "accepted" ||
+		states.completeErrorCode != "auth_expired" || receipts != 1 || probe.token != "" {
+		t.Fatalf("worker refresh failure = %#v err=%v complete=%q receipts=%d probe=%q", got, err, states.completeErrorCode, receipts, probe.token)
 	}
 }
 

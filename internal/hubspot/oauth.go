@@ -41,6 +41,29 @@ type OAuthTokens struct {
 	ExpiresIn    int64    `json:"expires_in"`
 }
 
+// PreflightFailure is a fixed, payload-free outcome for a credential or token
+// refresh failure that happened before the account-details probe. Database
+// failures are not represented by this type, so callers can keep them as
+// infrastructure errors instead of reporting a false provider observation.
+type PreflightFailure struct {
+	code        string
+	statusClass string
+}
+
+func (f *PreflightFailure) Error() string { return "hubspot credential preflight failed" }
+
+func preflightFailure(code, statusClass string) error {
+	return &PreflightFailure{code: code, statusClass: statusClass}
+}
+
+func PreflightFailureDetails(err error) (code, statusClass string, ok bool) {
+	var failure *PreflightFailure
+	if !errors.As(err, &failure) {
+		return "", "", false
+	}
+	return failure.code, failure.statusClass, true
+}
+
 func (c OAuthClient) Configured() bool {
 	u, err := url.Parse(c.RedirectURI)
 	return err == nil && u.Scheme != "" && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" &&
@@ -76,28 +99,53 @@ func (c OAuthClient) Exchange(ctx context.Context, code string) (OAuthTokens, er
 
 func (c OAuthClient) Refresh(ctx context.Context, refreshToken string) (OAuthTokens, error) {
 	if refreshToken == "" || len(refreshToken) > 4096 || strings.ContainsAny(refreshToken, "\r\n") {
-		return OAuthTokens{}, errors.New("hubspot refresh token is invalid")
+		return OAuthTokens{}, preflightFailure("invalid_config", "")
 	}
 	return c.token(ctx, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}})
 }
 
 func (c OAuthClient) token(ctx context.Context, form url.Values) (OAuthTokens, error) {
 	if !c.Configured() {
-		return OAuthTokens{}, errors.New("hubspot oauth is unavailable")
+		return OAuthTokens{}, preflightFailure("invalid_config", "")
 	}
 	form.Set("client_id", c.ClientID)
 	form.Set("client_secret", c.ClientSecret)
 	response, err := c.postForm(ctx, oauthTokenPath, form)
 	if err != nil {
-		return OAuthTokens{}, err
+		if ctx.Err() != nil {
+			return OAuthTokens{}, ctx.Err()
+		}
+		return OAuthTokens{}, preflightFailure("provider_error", "")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return OAuthTokens{}, errors.New("hubspot token exchange failed")
+		code := "provider_error"
+		switch response.StatusCode {
+		case http.StatusBadRequest:
+			// Only the standard OAuth invalid_grant code proves the stored
+			// refresh grant is rejected. Never retain error_description or a
+			// provider response body in a receipt or public error.
+			var providerError struct {
+				Error string `json:"error"`
+			}
+			if form.Get("grant_type") == "refresh_token" {
+				_ = json.NewDecoder(io.LimitReader(response.Body, oauthResponseLimit)).Decode(&providerError)
+				if providerError.Error == "invalid_grant" {
+					code = "auth_expired"
+				} else {
+					code = "invalid_config"
+				}
+			}
+		case http.StatusUnauthorized, http.StatusForbidden:
+			code = "invalid_config"
+		case http.StatusTooManyRequests:
+			code = "rate_limited"
+		}
+		return OAuthTokens{}, preflightFailure(code, statusClass(response.StatusCode))
 	}
 	var tokens OAuthTokens
 	if err := json.NewDecoder(io.LimitReader(response.Body, oauthResponseLimit)).Decode(&tokens); err != nil {
-		return OAuthTokens{}, errors.New("hubspot token response is invalid")
+		return OAuthTokens{}, preflightFailure("invalid_response", "2xx")
 	}
 	if tokens.TokenType != "bearer" && tokens.TokenType != "Bearer" ||
 		tokens.AccessToken == "" || tokens.RefreshToken == "" ||
@@ -105,19 +153,19 @@ func (c OAuthClient) token(ctx context.Context, form url.Values) (OAuthTokens, e
 		strings.ContainsAny(tokens.AccessToken+tokens.RefreshToken, "\r\n") ||
 		tokens.HubID <= 0 || tokens.ExpiresIn <= 0 || tokens.ExpiresIn > 3600 ||
 		len(tokens.Scopes) > 64 {
-		return OAuthTokens{}, errors.New("hubspot token response is invalid")
+		return OAuthTokens{}, preflightFailure("invalid_response", "2xx")
 	}
 	foundOAuth := false
 	for _, scope := range tokens.Scopes {
 		if len(scope) > 128 {
-			return OAuthTokens{}, errors.New("hubspot token scopes are invalid")
+			return OAuthTokens{}, preflightFailure("invalid_response", "2xx")
 		}
 		if scope == "oauth" {
 			foundOAuth = true
 		}
 	}
 	if !foundOAuth {
-		return OAuthTokens{}, errors.New("hubspot token lacks account health scope")
+		return OAuthTokens{}, preflightFailure("invalid_response", "2xx")
 	}
 	return tokens, nil
 }

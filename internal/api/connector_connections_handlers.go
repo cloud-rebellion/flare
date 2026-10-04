@@ -431,7 +431,7 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		InstallationName: values.installationName, Status: values.status, Scopes: values.scopes,
 		SecretCiphertext: secret, ReplaceSecret: supplied,
 		ExpectedSecretCiphertext: ciphertext,
-		BindProject: bindProject, ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
+		BindProject:              bindProject, ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -523,6 +523,25 @@ func (s *Server) handleCheckConnectorConnection(w http.ResponseWriter, r *http.R
 		}
 	}
 	if err != nil {
+		if row.Provider == "hubspot" {
+			if code, statusClass, observed := hubspot.PreflightFailureDetails(err); observed {
+				// Token refresh and credential validation are part of this
+				// server-owned check. The account probe was not reached, so
+				// record one bounded failed attempt without a provider body.
+				receiptErr := integration.RecordResult(integration.WithScope(ctx, integration.Scope{
+					OrgID: org, ProjectID: row.ProjectID.String, ConnectionID: connectionID,
+				}), integration.Attempt{
+					Provider: "hubspot", Operation: adapter.Operation, Channel: "http",
+					Outcome: "error", StatusClass: statusClass, ErrorCode: code,
+				})
+				s.audit(ctx, "connector.check", connectionID)
+				writeJSON(w, http.StatusOK, connectorCheckResponse{
+					Provider: "hubspot", Operation: adapter.Operation, Outcome: "error",
+					StatusClass: statusClass, ErrorCode: code, ReceiptStatus: integration.ReceiptStatus(receiptErr),
+				})
+				return
+			}
+		}
 		writeErr(w, http.StatusServiceUnavailable, "connector credential is unavailable")
 		return
 	}
