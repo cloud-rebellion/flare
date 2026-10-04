@@ -66,17 +66,46 @@ void main() {
   });
 
   test('native response checks reject partial and malformed acknowledgements', () {
-    expect(flareMetricResponseAccepted(200, '{"accepted":1}', 1), isTrue);
-    expect(flareMetricResponseAccepted(200, '{"accepted":1}', 2), isFalse);
-    expect(flareMetricResponseAccepted(202, '{"accepted":1}', 1), isFalse);
-    expect(flareMetricResponseAccepted(200, '{"accepted":1.0}', 1), isFalse);
-    expect(flareMetricResponseAccepted(200, '{"accepted":true}', 1), isFalse);
+    const accepted =
+        '{"accepted":1,"rejected":0,"dropped":0,"receipt_id":"receipt-1"}';
+    expect(flareMetricResponseAccepted(200, accepted, 1), isTrue);
+    expect(flareMetricResponseAccepted(200, accepted, 2), isFalse);
+    expect(flareMetricResponseAccepted(202, accepted, 1), isFalse);
+    expect(flareMetricResponseAccepted(200, '{"accepted":1}', 1), isFalse);
+    expect(
+        flareMetricResponseAccepted(
+            200, '{"accepted":1,"rejected":1,"dropped":0,"receipt_id":"r"}', 1),
+        isFalse);
+    expect(
+        flareMetricResponseAccepted(
+            200, '{"accepted":1,"rejected":0,"dropped":0,"receipt_id":""}', 1),
+        isFalse);
+    expect(
+        flareMetricResponseAccepted(
+            200, '{"accepted":1.0,"rejected":0,"dropped":0,"receipt_id":"r"}', 1),
+        isFalse);
+    expect(
+        flareMetricResponseAccepted(
+            200, '{"accepted":true,"rejected":0,"dropped":0,"receipt_id":"r"}', 1),
+        isFalse);
     expect(flareMetricResponseAccepted(200, '<html>ok</html>', 1), isFalse);
     expect(flareConnectorResponseAccepted(202, '{"accepted":true}'), isTrue);
     expect(flareConnectorResponseAccepted(200, '{"accepted":true}'), isFalse);
     expect(flareConnectorResponseAccepted(202, '{"accepted":false}'), isFalse);
     expect(flareConnectorResponseAccepted(202, '{"accepted":1}'), isFalse);
     expect(flareConnectorResponseAccepted(202, 'not json'), isFalse);
+  });
+
+  test('a metric retry retains one opaque key and exact body bytes', () {
+    final point = FlareMetricPoint(name: 'client.flutter.startup_ms', value: 12);
+    expect(point.idempotencyKey, matches(RegExp(r'^[A-Za-z0-9_-]{16,128}$')));
+    expect(point.requestBody, point.requestBody);
+    expect(point.requestBody, encodeFlareMetricBatch([point]));
+    expect(point.requestBody, isNot(contains(point.idempotencyKey)));
+    expect(
+        FlareMetricPoint(name: 'client.flutter.startup_ms', value: 12)
+            .idempotencyKey,
+        isNot(point.idempotencyKey));
   });
 
   test('failed sinks send only normalized retry items to the app queue', () async {
@@ -124,6 +153,7 @@ void main() {
     final reporter = FlareHealthReporter(
       metricSink: metrics.add,
       connectorSink: attempts.add,
+      allowedOperations: const {'GET /orders'},
     );
 
     final responseStatus = await reporter.trackApi<int>(
@@ -136,6 +166,44 @@ void main() {
     expect(attempts.single.outcome, 'error');
     expect(attempts.single.statusClass, '5xx');
     expect(metrics.map((point) => point.name), contains('client.flutter.api_errors.get_orders'));
+  });
+
+  test('unknown operation values collapse to a shared private bucket', () async {
+    final metrics = <FlareMetricPoint>[];
+    final attempts = <FlareConnectorAttempt>[];
+    final reporter = FlareHealthReporter(
+        metricSink: metrics.add, connectorSink: attempts.add);
+    await reporter.trackApi<int>(
+      'GET /users/alice?email=alice@example.com',
+      () async => 500,
+      statusCodeOf: (status) => status,
+    );
+    expect(metrics.map((point) => point.name),
+        contains('client.flutter.api_errors.unknown_operation'));
+    expect(attempts.single.operation, 'unknown_operation');
+    expect(sanitizeFlareOperation('GET /users/alice'), 'get_users_id');
+    expect(jsonEncode(attempts.single.toJson()), isNot(contains('alice')));
+  });
+
+  test('status and error-code callback failures preserve the request outcome', () async {
+    final attempts = <FlareConnectorAttempt>[];
+    final reporter = FlareHealthReporter(connectorSink: attempts.add);
+    expect(
+      await reporter.trackApi<int>('GET /orders', () async => 201,
+          statusCodeOf: (_) => throw StateError('status callback failed')),
+      201,
+    );
+    expect(attempts, isEmpty);
+
+    final original = StateError('request failed');
+    await expectLater(
+      reporter.trackApi<void>('GET /orders', () async {
+        throw original;
+      },
+          errorCode: (_) => throw StateError('classifier failed')),
+      throwsA(same(original)),
+    );
+    expect(attempts.single.errorCode, 'stateerror');
   });
 
   test('reporter emits bounded frame and API health without surfacing sink errors', () async {

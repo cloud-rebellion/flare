@@ -19,6 +19,9 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 ///
 /// The DSN is normally provided with `--dart-define=FLARE_SENTRY_DSN=...`.
 /// An empty DSN disables sending, which is useful for local development.
+/// Supply app-owned [beforeSend] and [beforeBreadcrumb] filters before enabling
+/// production traffic. Disabling default PII does not clean exception messages
+/// or custom breadcrumbs supplied by the application.
 Future<void> initializeFlareObservability({
   required FutureOr<void> Function() appRunner,
   String? dsn,
@@ -27,6 +30,8 @@ Future<void> initializeFlareObservability({
   String? dist,
   double tracesSampleRate = 0,
   bool captureFailedRequests = false,
+  BeforeSendCallback? beforeSend,
+  BeforeBreadcrumbCallback? beforeBreadcrumb,
 }) async {
   if (tracesSampleRate < 0 || tracesSampleRate > 1) {
     throw ArgumentError.value(
@@ -56,6 +61,8 @@ Future<void> initializeFlareObservability({
       options.attachStacktrace = true;
       options.captureFailedRequests = captureFailedRequests;
       options.tracesSampleRate = tracesSampleRate;
+      options.beforeSend = beforeSend;
+      options.beforeBreadcrumb = beforeBreadcrumb;
     },
     appRunner: appRunner,
   );
@@ -112,11 +119,15 @@ Future<T> runFlareGuarded<T>(
   try {
     return await operation();
   } catch (error, stackTrace) {
-    await captureFlareException(
-      error,
-      stackTrace: stackTrace,
-      operation: operationName,
-    );
+    try {
+      await captureFlareException(
+        error,
+        stackTrace: stackTrace,
+        operation: operationName,
+      );
+    } catch (_) {
+      // A telemetry failure must not replace the application exception.
+    }
     rethrow;
   }
 }

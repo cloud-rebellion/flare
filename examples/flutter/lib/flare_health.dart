@@ -10,6 +10,7 @@ library flare_health;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 const int maxFlareMetricNameLength = 128;
 const int maxFlareMetricTokenLength = 64;
@@ -45,13 +46,18 @@ class FlareMetricPoint {
         value = sanitizeFlareMetricValue(value),
         kind = _metricKind(kind),
         labels = sanitizeFlareMetricLabels(labels),
-        observedAt = (observedAt ?? DateTime.now()).toUtc();
+        observedAt = (observedAt ?? DateTime.now()).toUtc(),
+        idempotencyKey = _newFlareMetricKey();
 
   final String name;
   final double value;
   final String kind;
   final Map<String, String> labels;
   final DateTime observedAt;
+  /// Reuse this key and [requestBody] byte-for-byte on every retry. Flare's
+  /// native metric endpoint commits the points and terminal receipt together.
+  final String idempotencyKey;
+  late final String requestBody = encodeFlareMetricBatch(<FlareMetricPoint>[this]);
 
   Map<String, Object> toJson() {
     final out = <String, Object>{
@@ -149,6 +155,23 @@ class FlareDeliveryFailure {
   final FlareConnectorAttempt? connectorAttempt;
 }
 
+int _fallbackMetricKeySequence = 0;
+
+String _newFlareMetricKey() {
+  try {
+    final random = Random.secure();
+    return base64Url.encode(List<int>.generate(16, (_) => random.nextInt(256)))
+        .replaceAll('=', '');
+  } on UnsupportedError {
+    // The key prevents accidental duplicate delivery; it is not an auth key.
+    // Keep telemetry working on platforms without a secure random source.
+    final sequence = _fallbackMetricKeySequence++;
+    final random = Random();
+    return 'flutter_${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}_'
+        '${sequence.toRadixString(16)}_${random.nextInt(0x100000000).toRadixString(16)}';
+  }
+}
+
 typedef FlareDeliveryFailureHandler = FutureOr<void> Function(
     FlareDeliveryFailure failure);
 
@@ -162,7 +185,12 @@ bool flareMetricResponseAccepted(int statusCode, String body, int sentCount) {
     final decoded = jsonDecode(body);
     if (decoded is! Map<String, dynamic>) return false;
     final accepted = decoded['accepted'];
-    return accepted is int && accepted == sentCount;
+    return accepted is int &&
+        accepted == sentCount &&
+        decoded['rejected'] == 0 &&
+        decoded['dropped'] == 0 &&
+        decoded['receipt_id'] is String &&
+        (decoded['receipt_id'] as String).isNotEmpty;
   } catch (_) {
     return false;
   }
@@ -252,8 +280,10 @@ class FlareHealthReporter {
     DateTime Function()? now,
     String? environment,
     String? release,
+    Set<String> allowedOperations = const <String>{},
   })  : _now = now ?? DateTime.now,
-        _metricLabels = _sanitizeFlareReporterContext(environment, release);
+        _metricLabels = _sanitizeFlareReporterContext(environment, release),
+        _allowedOperations = Set<String>.unmodifiable(allowedOperations.take(64));
 
   final FlareMetricSink? metricSink;
   final FlareConnectorSink? connectorSink;
@@ -263,6 +293,9 @@ class FlareHealthReporter {
   // path already carries environment/release, but metrics are a separate
   // ingest shape and otherwise cannot be selected safely by a release alert.
   final Map<String, String> _metricLabels;
+  // Only explicitly registered, static operation names become series labels.
+  // A URL or user-provided operation falls back to one shared safe bucket.
+  final Set<String> _allowedOperations;
   bool _startupRecorded = false;
 
   Future<void> recordStartup(Duration elapsed) async {
@@ -318,58 +351,78 @@ class FlareHealthReporter {
     String? Function(Object error)? errorCode,
   }) async {
     final started = Stopwatch()..start();
-    final safeOperation = sanitizeFlareOperation(operation);
+    final safeOperation = _allowedOperations.contains(operation)
+        ? sanitizeFlareOperation(operation)
+        : 'unknown_operation';
+    late T value;
     try {
-      final value = await request();
+      value = await request();
+    } catch (error) {
       final elapsed = _elapsedMs(started);
-      final statusCode = statusCodeOf?.call(value) ?? successStatusCode ?? 200;
-      final failed = statusCode >= 400 && statusCode <= 599;
       await _metric('client.flutter.api_latency_ms.$safeOperation', elapsed);
-      if (failed) {
-        await _metric('client.flutter.api_errors.$safeOperation', 1);
+      await _metric('client.flutter.api_errors.$safeOperation', 1);
+      String? safeErrorCode;
+      try {
+        safeErrorCode = errorCode?.call(error);
+      } catch (_) {
+        // An application-owned classification callback must never replace the
+        // actual request exception.
       }
       await _connector(
         FlareConnectorAttempt(
           provider: 'backend',
           operation: safeOperation,
           channel: channel,
-          outcome: failed ? 'error' : 'ok',
-          statusClass: _statusClass(statusCode),
-          elapsedMs: elapsed,
-        ),
-      );
-      return value;
-    } catch (error) {
-      final elapsed = _elapsedMs(started);
-      await _metric('client.flutter.api_latency_ms.$safeOperation', elapsed);
-      await _metric('client.flutter.api_errors.$safeOperation', 1);
-      await _connector(
-        FlareConnectorAttempt(
-          provider: 'backend',
-          operation: safeOperation,
-          channel: channel,
           outcome: 'error',
-          errorCode: errorCode?.call(error) ?? error.runtimeType.toString(),
+          errorCode: safeErrorCode ?? error.runtimeType.toString(),
           elapsedMs: elapsed,
         ),
       );
       rethrow;
     }
+    int statusCode;
+    try {
+      statusCode = statusCodeOf?.call(value) ?? successStatusCode ?? 200;
+    } catch (_) {
+      // Do not turn a successful request into an app failure or falsely report
+      // a successful HTTP result when its status cannot be classified.
+      return value;
+    }
+    final elapsed = _elapsedMs(started);
+    final failed = statusCode >= 400 && statusCode <= 599;
+    await _metric('client.flutter.api_latency_ms.$safeOperation', elapsed);
+    if (failed) {
+      await _metric('client.flutter.api_errors.$safeOperation', 1);
+    }
+    await _connector(
+      FlareConnectorAttempt(
+        provider: 'backend',
+        operation: safeOperation,
+        channel: channel,
+        outcome: failed ? 'error' : 'ok',
+        statusClass: _statusClass(statusCode),
+        elapsedMs: elapsed,
+      ),
+    );
+    return value;
   }
 
   Future<void> _metric(String name, num value) async {
     final sink = metricSink;
     if (sink == null) return;
-    final point = FlareMetricPoint(
-      name: name,
-      value: value,
-      labels: _metricLabels,
-      observedAt: _now(),
-    );
+    FlareMetricPoint? point;
     try {
+      point = FlareMetricPoint(
+        name: name,
+        value: value,
+        labels: _metricLabels,
+        observedAt: _now(),
+      );
       await sink(point);
     } catch (_) {
-      await _deliveryFailed(FlareDeliveryFailure.metric(point));
+      if (point != null) {
+        await _deliveryFailed(FlareDeliveryFailure.metric(point));
+      }
     }
   }
 
@@ -403,6 +456,16 @@ String sanitizeFlareMetricName(String raw) {
 
 String sanitizeFlareOperation(String raw) {
   var value = raw.trim().toLowerCase().replaceAll(_queryPattern, '');
+  // A caller may accidentally pass a concrete URL instead of a route name.
+  // Keep only the method and first resource, never a later user-controlled
+  // path component such as /users/alice or /orders/abc.
+  final route = RegExp(r'^([a-z]+)\s+/([a-z][a-z0-9_-]*)(/.*)?$').firstMatch(value);
+  if (route != null) {
+    final suffix = route.group(3) == null ? '' : '_id';
+    return sanitizeFlareToken('${route.group(1)}_${route.group(2)}$suffix',
+        fallback: 'unknown_operation');
+  }
+  if (value.contains('/') || value.contains('@')) return 'unknown_operation';
   value = value.replaceAll(_longIDPattern, 'id');
   return sanitizeFlareToken(value, fallback: 'unknown_operation');
 }

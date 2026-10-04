@@ -1,6 +1,8 @@
 /// Flutter binding adapters for the payload-free health reporter.
 library flare_flutter_health;
 
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 
 import 'flare_health.dart';
@@ -31,13 +33,13 @@ class FlareFlutterHealthHandle with WidgetsBindingObserver {
     final binding = WidgetsBinding.instance;
     binding.addObserver(this);
     binding.addTimingsCallback(_onTimings);
-    binding.addPostFrameCallback((_) {
+    unawaited(binding.waitUntilFirstFrameRasterized.then((_) async {
       if (_disposed) return;
       _started.stop();
-      // The callback runs after the first frame has been rasterized. It is
-      // intentionally fire-and-forget: reporter failures are swallowed.
-      _reporter.recordStartup(_started.elapsed);
-    });
+      // This future completes after rasterization, unlike a post-frame
+      // callback, which only observes the end of the Dart rendering pipeline.
+      await _reporter.recordStartup(_started.elapsed);
+    }));
   }
 
   void _onTimings(List<FrameTiming> timings) {

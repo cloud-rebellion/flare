@@ -27,6 +27,10 @@ known event and confirm that the issue appears in the same Flare project.
 Flutter may remove some layout errors in release builds before an error hook is
 called, so a staging test cannot prove that every debug-only layout warning
 will appear in production.
+Flare currently accepts Sentry event and transaction envelope items. SDK
+session, attachment, and client-report items are not monitoring coverage here;
+check the project's ingest receipts for rejected or dropped items after a
+version upgrade.
 
 ## Add the dependency
 
@@ -38,8 +42,8 @@ flutter pub add sentry_flutter
 
 Copy [`lib/flare_observability.dart`](lib/flare_observability.dart) into the
 application or a shared internal Dart package. The helper was written against
-the current `sentry_flutter` API; keep the package version managed by the
-application's `pubspec.lock` and run `flutter pub upgrade` deliberately.
+the stable `sentry_flutter` 9.x API; pin the tested version in the application's
+`pubspec.lock` and upgrade deliberately.
 
 ## Initialize before the first widget is built
 
@@ -69,6 +73,8 @@ Future<void> main() async {
     // FLARE_RELEASE from --dart-define.
     tracesSampleRate: 0.1,
     captureFailedRequests: true,
+    // Pass app-owned beforeSend and beforeBreadcrumb callbacks here after
+    // reviewing exception messages, request URLs, route names, and extras.
   );
 }
 
@@ -127,11 +133,15 @@ Future<User> loadUser(String id) async {
   try {
     return await api.fetchUser(id);
   } catch (error, stackTrace) {
-    await captureFlareException(
-      error,
-      stackTrace: stackTrace,
-      operation: 'user.fetch',
-    );
+    try {
+      await captureFlareException(
+        error,
+        stackTrace: stackTrace,
+        operation: 'user.fetch',
+      );
+    } catch (_) {
+      // Preserve the original request failure if telemetry itself fails.
+    }
     rethrow;
   }
 }
@@ -144,9 +154,11 @@ Future<void> refresh() => runFlareGuarded(
 
 Do not include access tokens, authorization headers, email addresses, message
 contents, document names, or unbounded IDs in exception messages, tags, or
-breadcrumbs. The helper disables default PII. Add a `beforeSend` scrubber in
-the `SentryFlutter.init` options for any application-specific fields, and
-review it with the app's data owner before enabling production traffic.
+breadcrumbs. The helper disables default PII. Pass an application-owned
+`beforeSend` scrubber for events and `beforeBreadcrumb` for breadcrumbs to
+`initializeFlareObservability`; review both with the app's data owner before
+enabling production traffic. `sendDefaultPii: false` does not sanitize an
+exception's own message or a manually attached URL.
 
 ## Navigation, network, and performance signals
 
@@ -197,18 +209,24 @@ import 'flare_flutter_health.dart';
 
 final dsn = FlareDsn.parse(const String.fromEnvironment('FLARE_SENTRY_DSN'));
 // appOfflineQueue is your app's bounded, persistent queue. It stores only the
-// normalized metric or connector attempt in FlareDeliveryFailure, never the
-// DSN, HTTP response, exception, or credentials.
+// normalized metric body and retry key, or connector attempt, never the DSN,
+// HTTP response, exception, or credentials.
 final health = FlareHealthReporter(
   // Keep these byte-for-byte aligned with initializeFlareObservability below.
   // They become bounded metric labels for release-specific thresholds.
   environment: const String.fromEnvironment('FLARE_ENV', defaultValue: 'development'),
   release: const String.fromEnvironment('FLARE_RELEASE'),
+  // Register only compile-time operation names. Unknown or dynamic values
+  // share one bucket rather than becoming labels or metric names.
+  allowedOperations: const {'GET /orders', 'sync.refresh'},
   metricSink: dsn == null ? null : (point) async {
     final response = await http.post(
       dsn.metricEndpoint,
-      headers: {'content-type': 'application/json'},
-      body: encodeFlareMetricBatch([point]),
+      headers: {
+        'content-type': 'application/json',
+        'Idempotency-Key': point.idempotencyKey,
+      },
+      body: point.requestBody,
     ).timeout(const Duration(seconds: 5));
     if (!flareMetricResponseAccepted(response.statusCode, response.body, 1)) {
       throw const FormatException('metric delivery was not accepted');
@@ -245,23 +263,40 @@ payload-free connector attempt. Public DSN reports are labeled
 server-side provider adapter owns `server_observed` receipts and the
 installation ID. The operation is reduced to a stable token;
 request URLs, response bodies, exception messages, credentials, and user data
-never enter these signals. A failed transport is swallowed so telemetry cannot
-break the app. The sample checks HTTP 200 with `accepted == 1` for its one
-metric and HTTP 202 with `accepted == true` for a connector attempt. Those
-responses acknowledge the signal write; they do not prove the separate ingest
-receipt completion was written. A timeout can occur after Flare commits, so a
-retry may create another signal. The `onDeliveryFailure` callback receives only
-the normalized signal, not the transport exception, response body, URL, or DSN.
+never enter these signals. Only entries in `allowedOperations` receive their own
+series; an unlisted value becomes `unknown_operation`. Keep that set in source
+as compile-time route or operation constants, never populate it from a request.
+A failed transport is swallowed so telemetry cannot
+break the app. The sample requires HTTP 200 with `accepted == 1`, zero rejected
+and dropped points, and a nonempty `receipt_id` for its one metric. Flare
+commits the metric and terminal ingest receipt together. A replay with the same
+`Idempotency-Key` and exact body returns the original receipt without another
+point for seven days. HTTP 202 with `accepted == true` acknowledges a connector
+attempt row, but its separate receipt completion is still written after the
+response and the endpoint has no retry key yet. An ambiguous connector timeout
+can therefore produce another client-reported attempt on replay. The
+`onDeliveryFailure` callback receives only the normalized signal, not the
+transport exception, response body, URL, or DSN.
 For HTTP clients such as `package:http` that return 4xx/5xx responses without
 throwing, pass `statusCodeOf: (response) => response.statusCode`. The helper
 then counts that response as an API error and records its status class while
-returning the response unchanged. Without this callback, only thrown failures
-are counted as errors.
+returning the response unchanged. If a status classifier throws, the helper
+returns the original response and omits that health observation. A failing
+error-code classifier does not replace the request exception. Without
+`statusCodeOf`, only thrown failures are counted as errors. `trackApi` awaits
+the configured telemetry sinks, so keep their timeouts short and budget this
+overhead when wrapping latency-sensitive requests.
 Implement `appOfflineQueue.enqueue` with bounded persistent storage and replay
-with backoff using the same response checks. Queue failures are also swallowed
-to keep telemetry from breaking the app; monitor the queue's own health through
-app diagnostics. If the DSN is absent, sinks are disabled and no failed item is
-queued. Report queue depth with
+with backoff using the same response checks. For a failed metric, persist
+`failure.metric!.idempotencyKey` and `failure.metric!.requestBody` as one queue
+entry; replay those exact bytes and header, without reconstructing a new point
+or timestamp. If delivery remains uncertain beyond seven days, quarantine that
+entry rather than assuming the key still deduplicates it. Connector entries
+contain only `failure.connectorAttempt!.toJson()` and may duplicate after an
+ambiguous timeout. Put a storage quota, expiry, and retry budget around the
+queue, and expose its failure and depth in app diagnostics. Queue failures are
+also swallowed to keep telemetry from breaking the app. If the DSN is absent,
+sinks are disabled and no failed item is queued. Report queue depth with
 `health.recordOfflineQueueDepth(appOfflineQueue.length)` after bounded changes (the
 helper caps it at 10,000). `environment` and `release` are sanitized into
 bounded `environment` and `release` labels on every metric (for example,
@@ -345,7 +380,13 @@ that the artifact is retained for the release, while format-specific Dart,
 Android, and iOS frame resolvers are still pending. Keep the original event and
 release tags and do not claim native frames are readable until a resolver has
 verified them. Flutter web builds can use the existing source-map upload path
-after a release is registered, subject to its size and artifact limits.
+after a release is registered, subject to its size and artifact limits. Build
+JavaScript Flutter web with `flutter build web --source-maps`, upload the
+matching `.js.map` privately with the exact minified script basename and
+release, and remove all `.map` files from the public build before deployment.
+Flutter Wasm `.wasm.map` generation is available, but Flare's current JavaScript
+source-map resolver is not evidence of Wasm frame support. See Flutter's
+[source-map deployment guidance](https://docs.flutter.dev/deployment/web#source-maps).
 
 ## Isolates and background work
 
@@ -368,6 +409,13 @@ it; put the check-in on the backend or scheduler for availability guarantees.
 6. For Flutter web, upload the generated source map and verify one readable
    frame. For Android/iOS, retain symbol files and record native symbolication
    as pending until Flare supports that artifact type.
+
+For Flutter web on a different origin from Flare, first install a same-origin
+collector edge route or a narrowly allow-listed CORS policy for Sentry and
+native metric/connector requests. The metric `Idempotency-Key` header causes a
+browser preflight; the current Flare API does not provide a general cross-origin
+ingest CORS response. Test the deployed browser network path and the matching
+Flare receipt; an SDK call that merely queued locally is insufficient.
 
 This example does not create a Flutter app or modify another application's
 `pubspec.yaml`; it is a reusable integration boundary for apps outside the
