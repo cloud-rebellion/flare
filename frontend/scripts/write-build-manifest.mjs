@@ -35,12 +35,12 @@ export function browserDsnBinding(dsn) {
   } catch {
     throw new Error('invalid browser DSN build input');
   }
-  const projectID = url.pathname.replace(/\/+$/, '').split('/').at(-1);
   if (!['http:', 'https:'].includes(url.protocol) || !url.host || url.password ||
       url.search || url.hash || !/^[A-Za-z0-9_-]{1,64}$/.test(url.username) ||
-      !/^[A-Za-z0-9_-]{1,64}$/.test(projectID ?? '')) {
+      !/^\/[0-9]{1,20}\/?$/.test(url.pathname)) {
     throw new Error('invalid browser DSN build input');
   }
+  const projectID = url.pathname.replace(/\/$/, '').slice(1);
   return createHash('sha256').update(`flare-browser-dsn-v1\n${url.username}\n${projectID}`).digest('hex');
 }
 

@@ -28,6 +28,7 @@ test('the runtime manifest binds exact public bytes to their private map bytes',
   expect(manifest.public_files[asset]).toBe(createHash('sha256').update(js).digest('hex'));
   expect(manifest.source_maps[`${asset}.map`]).toBe(createHash('sha256').update(map).digest('hex'));
   expect(manifest.browser_dsn_binding_sha256).toBe(browserDsnBinding(dsn));
+  expect(manifest.browser_dsn_binding_sha256).toBe('cc35dd84cc57957b4ee2db717e53805ce4b6834f654f36fdb28db1c993b8d234');
   expect(manifest.browser_dsn_binding_sha256).toBe(browserDsnBinding('https://publicIngestKey@other.example/123456789012'));
   expect(manifest.browser_dsn_binding_sha256).not.toBe(browserDsnBinding('https://otherKey@flare.example/123456789012'));
   expect(JSON.stringify(manifest)).not.toContain('publicIngestKey');
@@ -38,6 +39,7 @@ test('the runtime manifest binds exact public bytes to their private map bytes',
 test('missing DSN does not prevent a build but cannot satisfy the upload gate', () => {
   expect(browserDsnBinding('')).toBe('');
   expect(() => browserDsnBinding('https://key:password@flare.example/123456789012')).toThrow('invalid browser DSN build input');
+  expect(() => browserDsnBinding('https://key@flare.example/wrong/123456789012')).toThrow('invalid browser DSN build input');
 });
 
 test('a private map without the deployed asset cannot receive a manifest', async () => {
