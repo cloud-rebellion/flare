@@ -159,6 +159,24 @@ func normalizeConnectorSecret(secret *string) (string, bool, error) {
 	return *secret, true, nil
 }
 
+// encryptConnectorSecret refuses to persist a newly supplied credential unless
+// it is actually encrypted. secretbox deliberately permits plaintext legacy
+// reads and nonproduction boot without a key; neither is safe for new writes.
+// Metadata-only updates keep the existing column untouched.
+func (s *Server) encryptConnectorSecret(secret string) (string, error) {
+	if secret == "" {
+		return "", nil
+	}
+	if s.secrets == nil || !s.secrets.Enabled() {
+		return "", errors.New("connector credential encryption is unavailable")
+	}
+	ciphertext := s.secrets.Encrypt(secret)
+	if !strings.HasPrefix(ciphertext, "enc:v1:") {
+		return "", errors.New("connector credential encryption failed")
+	}
+	return ciphertext, nil
+}
+
 func connectorScopes(raw json.RawMessage) []string {
 	var out []string
 	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
@@ -246,6 +264,11 @@ func (s *Server) handleCreateConnectorConnection(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusBadRequest, "an active connection requires a secret")
 		return
 	}
+	secretCiphertext, err := s.encryptConnectorSecret(secret)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "connector credential encryption is unavailable")
+		return
+	}
 	projectID := strings.TrimSpace(req.ProjectID)
 	if projectID == "" && values.provider == "hubspot" && values.status == "active" {
 		writeErr(w, http.StatusBadRequest, "an active HubSpot connection requires project_id")
@@ -269,7 +292,7 @@ func (s *Server) handleCreateConnectorConnection(w http.ResponseWriter, r *http.
 	row, err := s.q.CreateConnectorConnection(r.Context(), generated.CreateConnectorConnectionParams{
 		ID: id.New(), OrgID: orgIDFrom(r.Context()), Provider: values.provider,
 		InstallationID: values.installationID, InstallationName: values.installationName,
-		Status: values.status, Scopes: values.scopes, SecretCiphertext: s.secrets.Encrypt(secret),
+		Status: values.status, Scopes: values.scopes, SecretCiphertext: secretCiphertext,
 		ProjectID: pgtype.Text{String: projectID, Valid: projectID != ""},
 	})
 	if err != nil {
@@ -363,7 +386,11 @@ func (s *Server) handleUpdateConnectorConnection(w http.ResponseWriter, r *http.
 		return
 	}
 	if supplied {
-		secret = s.secrets.Encrypt(secret)
+		secret, err = s.encryptConnectorSecret(secret)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "connector credential encryption is unavailable")
+			return
+		}
 	}
 	// Omitted secret is an explicit keep-existing operation in SQL, so a
 	// metadata-only PATCH cannot erase or race away a stored credential. An

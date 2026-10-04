@@ -93,6 +93,27 @@ func TestConnectorConnectionSecretUsesSecretbox(t *testing.T) {
 	}
 }
 
+func TestConnectorCredentialWriteFailsClosedWithoutEncryption(t *testing.T) {
+	for _, s := range []*Server{{}, {secrets: secretbox.New("")}} {
+		if stored, err := s.encryptConnectorSecret("provider-token"); err == nil || stored != "" {
+			t.Fatalf("unencrypted connector write accepted: stored %q, error %v", stored, err)
+		}
+		// A pending connection without a credential and a metadata-only PATCH
+		// still have no new secret to protect.
+		if stored, err := s.encryptConnectorSecret(""); err != nil || stored != "" {
+			t.Fatalf("empty connector secret = %q, %v", stored, err)
+		}
+	}
+	s := &Server{secrets: secretbox.New("connector-test-key")}
+	stored, err := s.encryptConnectorSecret("provider-token")
+	if err != nil || !strings.HasPrefix(stored, "enc:v1:") || stored == "provider-token" {
+		t.Fatalf("encrypted connector write = %q, %v", stored, err)
+	}
+	if got, err := s.secrets.Decrypt(stored); err != nil || got != "provider-token" {
+		t.Fatalf("round trip = %q, %v", got, err)
+	}
+}
+
 func TestConnectorConnectionMigrationAndRoutes(t *testing.T) {
 	migration, err := os.ReadFile("../db/migrations/057_connector_connections.sql")
 	if err != nil {
