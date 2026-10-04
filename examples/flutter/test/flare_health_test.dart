@@ -130,6 +130,26 @@ void main() {
     expect(await reporter.trackApi<int>('sync', () async => 7), 7);
   });
 
+  test('returned HTTP error response is reported without changing app result', () async {
+    final metrics = <FlareMetricPoint>[];
+    final attempts = <FlareConnectorAttempt>[];
+    final reporter = FlareHealthReporter(
+      metricSink: metrics.add,
+      connectorSink: attempts.add,
+    );
+
+    final responseStatus = await reporter.trackApi<int>(
+      'GET /orders',
+      () async => 503,
+      statusCodeOf: (status) => status,
+    );
+
+    expect(responseStatus, 503);
+    expect(attempts.single.outcome, 'error');
+    expect(attempts.single.statusClass, '5xx');
+    expect(metrics.map((point) => point.name), contains('client.flutter.api_errors.get_orders'));
+  });
+
   test('reporter emits bounded frame and API health without surfacing sink errors', () async {
     final metrics = <FlareMetricPoint>[];
     final attempts = <FlareConnectorAttempt>[];

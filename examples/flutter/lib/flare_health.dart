@@ -309,14 +309,17 @@ class FlareHealthReporter {
 
   /// Measures an API call and emits the existing connector-attempt shape.
   ///
-  /// Only the sanitized operation and error type are sent. The exception is
-  /// rethrown to preserve the application's normal error handling.
+  /// Use [statusCodeOf] when the HTTP client returns 4xx/5xx responses instead
+  /// of throwing. The response is returned unchanged while a status >= 400 is
+  /// reported as an error. Only the sanitized operation, status class, and
+  /// error type are sent. Exceptions are rethrown to preserve app behavior.
   Future<T> trackApi<T>(
     String operation,
     Future<T> Function() request, {
     String channel = 'api',
     String? connectionId,
     int? successStatusCode,
+    int? Function(T response)? statusCodeOf,
     String? Function(Object error)? errorCode,
   }) async {
     final started = Stopwatch()..start();
@@ -324,15 +327,20 @@ class FlareHealthReporter {
     try {
       final value = await request();
       final elapsed = _elapsedMs(started);
+      final statusCode = statusCodeOf?.call(value) ?? successStatusCode ?? 200;
+      final failed = statusCode >= 400 && statusCode <= 599;
       await _metric('client.flutter.api_latency_ms.$safeOperation', elapsed);
+      if (failed) {
+        await _metric('client.flutter.api_errors.$safeOperation', 1);
+      }
       await _connector(
         FlareConnectorAttempt(
           provider: 'backend',
           connectionId: connectionId,
           operation: safeOperation,
           channel: channel,
-          outcome: 'ok',
-          statusClass: _statusClass(successStatusCode ?? 200),
+          outcome: failed ? 'error' : 'ok',
+          statusClass: _statusClass(statusCode),
           elapsedMs: elapsed,
         ),
       );

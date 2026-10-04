@@ -252,6 +252,11 @@ responses acknowledge the signal write; they do not prove the separate ingest
 receipt completion was written. A timeout can occur after Flare commits, so a
 retry may create another signal. The `onDeliveryFailure` callback receives only
 the normalized signal, not the transport exception, response body, URL, or DSN.
+For HTTP clients such as `package:http` that return 4xx/5xx responses without
+throwing, pass `statusCodeOf: (response) => response.statusCode`. The helper
+then counts that response as an API error and records its status class while
+returning the response unchanged. Without this callback, only thrown failures
+are counted as errors.
 Implement `appOfflineQueue.enqueue` with bounded persistent storage and replay
 with backoff using the same response checks. Queue failures are also swallowed
 to keep telemetry from breaking the app; monitor the queue's own health through
