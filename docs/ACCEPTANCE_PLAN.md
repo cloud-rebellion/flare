@@ -90,10 +90,17 @@ admission now locks the project, accounts for the exact replacement row, and
 commits the quota check and upsert in one transaction. Focused Unicode,
 concurrent upload, retry-at-cap, byte-delta, and foreign-tenant regressions
 passed against disposable PostgreSQL 16 after migrations through 085. Stage
-still needs a preflight and receipt-aware retention policy that protects the
-live, rollback, and recent-event releases. Flare's own map upload currently
-runs after cutover, so quota exhaustion can leave a live release with a failed
-deployment run. None of this establishes production capture.
+still needs a before-cutover admission gate and receipt-aware retention that
+protects live, rollback, and recent-event releases. A Stage-only quota estimate
+cannot guarantee capacity: manifests omit final stored sizes, the server
+sanitizes map bytes, and concurrent uploads can race a read-only list. Moving
+today's individual uploads before cutover is also unsafe: a later 507 can
+strand a partial release, while artifact-ID deletion can remove a replacement.
+Flare needs an atomic bundle reservation or equivalent conditional lifecycle
+API bound to project, release, and map digests before Stage can gate cutover.
+The current upload runs after cutover, so quota exhaustion can leave a live
+release with a failed deployment run. None of this establishes production
+capture.
 
 The live backup unit was observed failing on the removed `hephaestus-core`
 container. A correctly configured read-only Restic query found zero
