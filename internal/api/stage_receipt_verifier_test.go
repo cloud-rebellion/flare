@@ -69,6 +69,7 @@ func TestStageBindingAndReceiptPromotionTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedAutomationPatchFixture(t, pool, project.OrgID, project.ID, issue.ID, stageTestSHA, "patch-before-stage-ci")
 	if _, err = q.InsertAutomationReceipt(ctx, generated.InsertAutomationReceiptParams{
 		ID: id.New(), OrgID: project.OrgID, ProjectID: project.ID, IssueID: issue.ID,
 		Stage: "review", Status: "approved", IdempotencyKey: "review-stage-test", TargetRevision: stageTestSHA,
