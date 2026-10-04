@@ -24,7 +24,7 @@ func (s *Server) recordFailedMonitorCheckin(ctx context.Context, params generate
 		return err
 	}
 	defer tx.Rollback(ctx)
-	m, err := generated.New(tx).UpsertMonitorCheckin(ctx, params)
+	m, err := s.upsertMonitorCheckinTx(ctx, tx, params)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
@@ -88,52 +90,6 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 
-	// Prior state is used only for the monitor creation cap. The durable
-	// failure-generation claim is made atomically by UpsertMonitorCheckin.
-	priorState := ""
-	if prior, err := s.q.GetMonitorBySlug(r.Context(), generated.GetMonitorBySlugParams{
-		ProjectID: project.ID, OrgID: project.OrgID, Slug: slug,
-	}); err == nil {
-		priorState = prior.State
-	}
-
-	// Bound the monitors one project can accumulate.
-	//
-	// UpsertMonitorCheckin CREATES the monitor on first ping and the slug is
-	// caller-chosen on a DSN-authed endpoint, so the slug regex bounded LENGTH
-	// and nothing bounded CARDINALITY: at 1200 requests/min per key that is 1.7M
-	// monitor rows a day per project. ListDueMonitors then sequentially scans
-	// that table every five minutes forever (EXTRACT(EPOCH ...) per row, so no
-	// index applies) and ListMonitorsByProject returns all of them to the
-	// dashboard.
-	//
-	// The cap only applies to a slug that does not exist yet, so an established
-	// monitor never stops being able to check in. Before refusing, sweep the
-	// unconfigured ones that have gone quiet: an honest project that churned
-	// through job names self-heals instead of wedging.
-	if priorState == "" {
-		n, cerr := s.q.CountMonitorsByProject(r.Context(), generated.CountMonitorsByProjectParams{
-			ProjectID: project.ID, OrgID: project.OrgID,
-		})
-		if cerr == nil && n >= maxMonitorsPerProject {
-			if _, perr := s.q.PruneUnconfiguredMonitors(r.Context(), generated.PruneUnconfiguredMonitorsParams{
-				ProjectID: project.ID, OrgID: project.OrgID,
-				LastPingAt: pgtype.Timestamptz{Time: now.Add(-monitorPruneAfter), Valid: true},
-			}); perr != nil {
-				slog.Warn("prune unconfigured monitors failed", "project_id", project.ID, "error", perr)
-			}
-			n, cerr = s.q.CountMonitorsByProject(r.Context(), generated.CountMonitorsByProjectParams{
-				ProjectID: project.ID, OrgID: project.OrgID,
-			})
-			if cerr == nil && n >= maxMonitorsPerProject {
-				slog.Warn("monitor check-in refused: project is at its monitor cap",
-					"project_id", project.ID, "slug", slug, "cap", maxMonitorsPerProject)
-				writeErr(w, http.StatusTooManyRequests, "this project has reached its monitor limit")
-				return
-			}
-		}
-	}
-
 	params := generated.UpsertMonitorCheckinParams{
 		ID:         id.New(),
 		OrgID:      project.OrgID,
@@ -157,20 +113,30 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(channels) > 0 {
 			if err := s.recordFailedMonitorCheckin(r.Context(), params, channels); err != nil {
-				slog.Error("failed monitor check-in acceptance failed", "project_id", project.ID, "slug", slug)
-				w.Header().Set("Retry-After", "1")
-				writeErr(w, http.StatusServiceUnavailable, "monitor acceptance is temporarily unavailable")
+				writeMonitorCheckinError(w, project.ID, slug, err)
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 			return
 		}
 	}
-	if _, err := s.q.UpsertMonitorCheckin(r.Context(), params); err != nil {
-		slogError(w, "monitor checkin", err)
+	if err := s.recordMonitorCheckin(r.Context(), params); err != nil {
+		writeMonitorCheckinError(w, project.ID, slug, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func writeMonitorCheckinError(w http.ResponseWriter, projectID, slug string, err error) {
+	if errors.Is(err, errMonitorLimit) {
+		slog.Warn("monitor check-in refused: project is at its monitor cap",
+			"project_id", projectID, "slug", slug, "cap", maxMonitorsPerProject)
+		writeErr(w, http.StatusTooManyRequests, "this project has reached its monitor limit")
+		return
+	}
+	slog.Error("monitor check-in acceptance failed", "project_id", projectID, "slug", slug, "error", err)
+	w.Header().Set("Retry-After", "1")
+	writeErr(w, http.StatusServiceUnavailable, "monitor acceptance is temporarily unavailable")
 }
 
 func (s *Server) handleListMonitors(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +191,7 @@ func (s *Server) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project not found")
 		return
 	}
-	m, err := s.q.CreateMonitor(r.Context(), generated.CreateMonitorParams{
+	m, err := s.createMonitorWithQuota(r.Context(), generated.CreateMonitorParams{
 		ID:              id.New(),
 		OrgID:           proj.OrgID,
 		ProjectID:       proj.ID,
@@ -235,7 +201,16 @@ func (s *Server) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		GraceSeconds:    req.GraceSeconds,
 	})
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "could not create monitor (slug may already exist)")
+		if errors.Is(err, errMonitorLimit) {
+			writeErr(w, http.StatusTooManyRequests, "this project has reached its monitor limit")
+			return
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeErr(w, http.StatusBadRequest, "could not create monitor (slug may already exist)")
+			return
+		}
+		slogError(w, "create monitor", err)
 		return
 	}
 	s.audit(r.Context(), "monitor.create", req.Slug)

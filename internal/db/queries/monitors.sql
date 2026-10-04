@@ -12,6 +12,20 @@ SET last_ping_at = EXCLUDED.last_ping_at,
     state = EXCLUDED.state
 RETURNING *;
 
+-- name: UpdateExistingMonitorCheckin :one
+-- A check-in for an established slug stays on the update path. In particular,
+-- it does not need to lock the project row or acquire an FK key-share lock
+-- after locking the monitor row; new-slug admission takes the project lock
+-- before touching monitor rows. This ordering avoids a prune/check-in deadlock.
+UPDATE monitors
+SET last_ping_at = $4,
+    last_status = $5,
+    failed_generation = failed_generation + CASE
+        WHEN $6::text='failed' AND state<>'failed' THEN 1 ELSE 0 END,
+    state = $6
+WHERE project_id = $1 AND org_id = $2 AND slug = $3
+RETURNING *;
+
 -- name: CountMonitorsByProject :one
 SELECT count(*) FROM monitors WHERE project_id = $1 AND org_id = $2;
 
@@ -22,7 +36,7 @@ SELECT count(*) FROM monitors WHERE project_id = $1 AND org_id = $2;
 DELETE FROM monitors
 WHERE project_id = $1 AND org_id = $2
   AND interval_seconds = 0
-  AND (last_ping_at IS NULL OR last_ping_at < $3);
+  AND COALESCE(last_ping_at, created_at) < $3;
 
 -- name: GetMonitorBySlug :one
 SELECT * FROM monitors WHERE project_id = $1 AND org_id = $2 AND slug = $3;

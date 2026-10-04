@@ -244,7 +244,7 @@ const pruneUnconfiguredMonitors = `-- name: PruneUnconfiguredMonitors :execrows
 DELETE FROM monitors
 WHERE project_id = $1 AND org_id = $2
   AND interval_seconds = 0
-  AND (last_ping_at IS NULL OR last_ping_at < $3)
+  AND COALESCE(last_ping_at, created_at) < $3
 `
 
 type PruneUnconfiguredMonitorsParams struct {
@@ -301,6 +301,58 @@ func (q *Queries) TrySetMonitorMissing(ctx context.Context, arg TrySetMonitorMis
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updateExistingMonitorCheckin = `-- name: UpdateExistingMonitorCheckin :one
+UPDATE monitors
+SET last_ping_at = $4,
+    last_status = $5,
+    failed_generation = failed_generation + CASE
+        WHEN $6::text='failed' AND state<>'failed' THEN 1 ELSE 0 END,
+    state = $6
+WHERE project_id = $1 AND org_id = $2 AND slug = $3
+RETURNING id, org_id, project_id, slug, name, interval_seconds, grace_seconds, last_ping_at, last_status, state, last_alert_at, created_at, failed_generation
+`
+
+type UpdateExistingMonitorCheckinParams struct {
+	ProjectID  string             `json:"project_id"`
+	OrgID      string             `json:"org_id"`
+	Slug       string             `json:"slug"`
+	LastPingAt pgtype.Timestamptz `json:"last_ping_at"`
+	LastStatus string             `json:"last_status"`
+	State      string             `json:"state"`
+}
+
+// A check-in for an established slug stays on the update path. In particular,
+// it does not need to lock the project row or acquire an FK key-share lock
+// after locking the monitor row; new-slug admission takes the project lock
+// before touching monitor rows. This ordering avoids a prune/check-in deadlock.
+func (q *Queries) UpdateExistingMonitorCheckin(ctx context.Context, arg UpdateExistingMonitorCheckinParams) (*Monitor, error) {
+	row := q.db.QueryRow(ctx, updateExistingMonitorCheckin,
+		arg.ProjectID,
+		arg.OrgID,
+		arg.Slug,
+		arg.LastPingAt,
+		arg.LastStatus,
+		arg.State,
+	)
+	var i Monitor
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.Slug,
+		&i.Name,
+		&i.IntervalSeconds,
+		&i.GraceSeconds,
+		&i.LastPingAt,
+		&i.LastStatus,
+		&i.State,
+		&i.LastAlertAt,
+		&i.CreatedAt,
+		&i.FailedGeneration,
+	)
+	return &i, err
 }
 
 const updateMonitorConfig = `-- name: UpdateMonitorConfig :one
