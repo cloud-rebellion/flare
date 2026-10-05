@@ -27,7 +27,7 @@ import (
 const (
 	maxSourceMapBundleBody  = 64 << 20
 	maxSourceMapBundleBytes = 64 << 20
-	maxSourceMapBundleItems = 200
+	maxSourceMapBundleItems = 512
 )
 
 var (
@@ -95,7 +95,7 @@ func (s *Server) handleUploadSourceMapBundle(w http.ResponseWriter, r *http.Requ
 	release := strings.TrimSpace(req.Release)
 	if release == "" || release != req.Release || ingest.SanitizeColumn(release) != release ||
 		len(req.Artifacts) == 0 || len(req.Artifacts) > maxSourceMapBundleItems {
-		writeErr(w, http.StatusBadRequest, "release and 1 to 200 artifacts with exact names are required")
+		writeErr(w, http.StatusBadRequest, "release and 1 to 512 artifacts with exact names are required")
 		return
 	}
 	items := make([]sourceMapBundleItem, 0, len(req.Artifacts))

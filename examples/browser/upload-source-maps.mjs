@@ -8,7 +8,7 @@ import { sourceMapNameForURL } from './source-map-name.mjs';
 
 const maxMapBytes = 30 << 20;
 const maxBundleBody = 64 << 20;
-const maxBundleMaps = 200;
+const maxBundleMaps = 512;
 const compareNames = (a, b) => Buffer.compare(Buffer.from(a.name, 'utf8'), Buffer.from(b.name, 'utf8'));
 
 export function sourceMapBundleDigest(release, artifacts) {
@@ -58,7 +58,7 @@ export async function uploadBrowserSourceMaps({ mapsDir, publicBase, flareBase, 
   const root = resolve(mapsDir);
   const files = await mapFiles(root);
   if (files.length === 0) throw new Error('no JavaScript source maps found');
-  if (files.length > maxBundleMaps) throw new Error('source-map bundle exceeds 200 maps');
+  if (files.length > maxBundleMaps) throw new Error('source-map bundle exceeds 512 maps');
   const artifacts = [];
   const seen = new Set();
   for (const file of files) {

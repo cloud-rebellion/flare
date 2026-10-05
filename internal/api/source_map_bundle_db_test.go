@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,6 +189,29 @@ func TestSourceMapBundleTenantAndLegacyWriteBoundaries(t *testing.T) {
 	}
 }
 
+func TestSourceMapBundleAdmitsBrightCRMMapCount(t *testing.T) {
+	pool := newTestDB(t)
+	project := seedProjectForIngest(t, pool)
+	s := serverForDB(pool)
+	// A configured BrightCRM build produced 233 private maps. Admit the full
+	// release in one receipt so Stage never publishes a partially mapped image.
+	named := make(map[string]string, 233)
+	for i := 0; i < 233; i++ {
+		named[fmt.Sprintf("chunk-%03d.js", i)] = sourceMapQuotaFixture
+	}
+	rec := sendSourceMapBundle(s, project.ID, project.OrgID, marshalMapBundle(t, "brightcrm-233", "", named))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("233-map release = %d %s", rec.Code, rec.Body.String())
+	}
+	receipt := decodeMapBundle(t, rec)
+	if receipt.ArtifactCount != 233 || len(receipt.Artifacts) != 233 {
+		t.Fatalf("partial 233-map receipt: count=%d artifacts=%d", receipt.ArtifactCount, len(receipt.Artifacts))
+	}
+	if count, _ := sourceMapUsage(t, pool, project); count != 233 {
+		t.Fatalf("partial 233-map storage: %d", count)
+	}
+}
+
 func TestSourceMapBundleAllowsProjectErasureCascade(t *testing.T) {
 	pool := newTestDB(t)
 	project := seedProjectForIngest(t, pool)
@@ -248,7 +272,7 @@ func TestSourceMapBundleRequestBounds(t *testing.T) {
 		tooMany["map-"+id.New()+".js"] = sourceMapQuotaFixture
 	}
 	if rec := sendSourceMapBundle(s, project.ID, project.OrgID, marshalMapBundle(t, "web-bounds", "", tooMany)); rec.Code != http.StatusBadRequest {
-		t.Fatalf("201 maps = %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("%d maps = %d %s", maxSourceMapBundleItems+1, rec.Code, rec.Body.String())
 	}
 	oversizedBody := []byte(strings.Repeat(" ", maxSourceMapBundleBody+1))
 	if rec := sendSourceMapBundle(s, project.ID, project.OrgID, oversizedBody); rec.Code != http.StatusRequestEntityTooLarge {

@@ -84,34 +84,37 @@ scripts and private-map fallbacks on both reviewed dashboard hosts before any
 upload. It then uploads and reads back both sets of opaque asset names, with
 cleanup before its success receipt. Focused local tests passed. At about 45
 maps per host, a release consumes about 90 of the project's 2,000 artifact
-slots; retention needs review. Flare's artifact upload/list sizes and quota
+slots. The configured BrightCRM pilot has 233 maps and about 5.9 MiB of
+serialized JSON; its ninth distinct full release would exceed the current
+project item quota without safe retirement. Flare's artifact upload/list sizes and quota
 totals count stored UTF-8 bytes rather than Unicode characters. Quota
 admission now locks the project, accounts for the exact replacement row, and
 commits the quota check and upsert in one transaction. Focused Unicode,
 concurrent upload, retry-at-cap, byte-delta, and foreign-tenant regressions
-passed against disposable PostgreSQL 16 after migrations through 085. Stage
-still needs a before-cutover admission gate and receipt-aware retention that
-protects live, rollback, and recent-event releases. A Stage-only quota estimate
-cannot guarantee capacity: manifests omit final stored sizes, the server
-sanitizes map bytes, and concurrent uploads can race a read-only list. Moving
-today's individual uploads before cutover is also unsafe: a later 507 can
-strand a partial release, while artifact-ID deletion can remove a replacement.
-Flare needs an atomic bundle reservation or equivalent conditional lifecycle
-API bound to project, release, and map digests before Stage can gate cutover.
-The current upload runs after cutover, so quota exhaustion can leave a live
-release with a failed deployment run. None of this establishes production
-capture.
+passed against disposable PostgreSQL 16 after migrations through 085. The
+local Flare candidate now adds migration 086 and atomic release-bound bundles:
+one transaction admits the complete set or returns a quota failure without
+partial maps, and a durable digest receipt supports exact replay and readback.
+The cap is 512 maps and 64 MiB per bundle; a PostgreSQL 16 test admitted a
+233-map BrightCRM-sized release and rejected a request over the cap. Stage's
+map gate remains disabled until its uploader uses that contract before cutover
+and the live Flare API, exact image/manifest, and private maps pass its checks.
+Receipt-aware retirement must protect live, rollback, and recent-event releases
+before normal deployment cadence fills the 2,000-item project quota. None of
+this establishes production capture.
 
-The live backup unit was observed failing on the removed `hephaestus-core`
-container. A correctly configured read-only Restic query found zero
-Stage-tagged off-host snapshots. The repaired backup candidate preserves the
-installed TrustIssues WAL-safe snapshot and has a networkless regression
-fixture. The latest local Stage bundle (`20261004-211224.766334068`) passed a
-network-isolated restore, repository fsck, and offline `demo-local` smoke;
-evidence is retained at `/var/tmp/stage-restore-vQO19CpK` on the production
-host. This establishes a local Stage restore only. The backup-script repair,
-fresh off-host Stage and separate-secret snapshots, and an independent Flare
-database/secret restore remain required before cutover.
+Stage merged the backup-script repair at `852958381` after its exact
+`security-gate` check. The production host installed those bytes with the
+original root-only mode and a verified rollback copy. The full backup unit
+finished successfully at 2026-10-04 22:44 UTC. Fresh off-host Restic snapshots
+include a Stage bundle (`8a1d1095`) and a separate secrets snapshot
+(`103f68b0`) containing Stage and Flare configuration. An isolated secrets
+restore matched the live Stage and Flare environment files without disclosing
+their contents. The Stage snapshot restored 9.15 GiB from the off-host repo;
+its latest bundle (`20261004-224007.290354123`) passed a network-disabled
+restore, Git fsck, and offline `demo-local` smoke with the running Stage image.
+Evidence is retained at `/var/tmp/stage-offhost-drill-TbDNeRjv` on the host.
+An independent Flare database restore and live service acceptance remain open.
 
 The ten first-party browser bridges are source-wired, but public bundle
 sampling did not prove an active Flare DSN or event receipt. Most app builds
