@@ -53,10 +53,10 @@ var transactionalAuditActions = map[string]struct {
 // proof, status change and audit row together. Pin both sides of the call so a
 // route cannot borrow an unrelated helper's audit statement.
 var delegatedTransactionalAuditActions = map[string]struct {
-	helper string
-	action string
+	helper, action, scope, actor, target, commit string
 }{
-	"handleVerifyAutomationReceipt": {"promoteStageReceipt", "automation.receipt.verify"},
+	"handleVerifyAutomationReceipt": {"promoteStageReceipt", `"automation.receipt.verify"`, "b.OrgID", "actor,", "fmt.Sprintf", "tx.Commit(ctx)"},
+	"handleRetireSourceMapBundle":   {"retireSourceMapBundle", `'sourcemap.bundle.retire'`, "orgID", "actor", "bundleID", "tx.Commit(ctx)"},
 }
 
 var (
@@ -121,10 +121,11 @@ func TestMutatingRoleGatedRoutesAreAudited(t *testing.T) {
 				continue
 			}
 			for _, required := range []string{
-				"INSERT INTO audit_log", `"` + delegated.action + `"`, "b.OrgID", "tx.Commit(ctx)",
+				"INSERT INTO audit_log", delegated.action, delegated.scope,
+				delegated.actor, delegated.target, delegated.commit,
 			} {
 				if !strings.Contains(helperBody, required) {
-					t.Errorf("%s helper %s must commit scoped %q audit row; missing %q", name, delegated.helper, delegated.action, required)
+					t.Errorf("%s helper %s must commit scoped %s audit row; missing %q", name, delegated.helper, delegated.action, required)
 				}
 			}
 			continue
