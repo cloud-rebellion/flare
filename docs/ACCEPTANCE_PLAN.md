@@ -114,7 +114,11 @@ their contents. The Stage snapshot restored 9.15 GiB from the off-host repo;
 its latest bundle (`20261004-224007.290354123`) passed a network-disabled
 restore, Git fsck, and offline `demo-local` smoke with the running Stage image.
 Evidence is retained at `/var/tmp/stage-offhost-drill-TbDNeRjv` on the host.
-An independent Flare database restore and live service acceptance remain open.
+The fresh Flare database dump (`08cc3424`, 3.482 GiB) also imported without
+error into a disposable, network-disabled PostgreSQL 16 container; its restored
+databases included `flare`. The temporary SQL and database files were removed.
+Booting Flare from that restored database, decrypting a harmless test secret,
+and live service acceptance remain open.
 
 The ten first-party browser bridges are source-wired, but public bundle
 sampling did not prove an active Flare DSN or event receipt. Most app builds
