@@ -61,6 +61,11 @@ type Server struct {
 	secrets            *secretbox.Cipher // encrypts integration secrets at rest
 	stageVerifier      stageReceiptVerifier
 	stageVerifyLimiter *ratelimit.Limiter
+	// A trusted release controller must hold an exclusive deploy/rollback fence
+	// while a bundle is retired. No provider is wired until Stage can attest
+	// exact browser release labels, an old-client lifetime bound, and a fence
+	// across every deployment target.
+	sourceMapRetirementFencer sourceMapRetirementFencer
 	hubspotProbe       connectorProbe
 	hubspotOAuth       hubspot.OAuthClient
 	hubspotTokens      hubspot.TokenStore

@@ -123,6 +123,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/monitors", s.handleListMonitors)
 				r.Get("/projects/{id}/artifacts", s.handleListSourceMaps)
 				r.Get("/projects/{id}/artifact-bundles/{bundleID}", s.handleGetSourceMapBundle)
+				r.Get("/projects/{id}/artifact-bundle-retirements/{retirementID}", s.handleGetSourceMapRetirement)
 				r.Get("/projects/{id}/symbol-artifacts", s.handleListNativeSymbolArtifacts)
 				r.Get("/projects/{id}/native-symbol-health", s.handleListNativeSymbolHealth)
 				r.Get("/projects/{id}/releases", s.handleListReleases)
@@ -200,6 +201,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					r.Use(s.requireRole("admin"))
 
 					r.Delete("/projects/{id}", s.handleDeleteProject)
+					r.Delete("/projects/{id}/artifact-bundles/{bundleID}", s.handleRetireSourceMapBundle)
 					r.Post("/keys", s.handleCreateAPIKey)
 					r.Delete("/keys/{id}", s.handleDeleteAPIKey)
 					r.Get("/projects/{id}/business-keys", s.handleListBusinessCheckKeys)

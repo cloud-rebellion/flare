@@ -513,9 +513,12 @@ exact bytes returns the same IDs and timestamps; another set or changed bytes
 for that release returns `409`. A pre-existing unlisted map for the release
 also returns `409`, so a partial legacy upload cannot be silently declared a
 complete bundle. The member single-map upload and delete routes cannot change
-a release after a bundle is admitted. Bundle retirement needs an explicit
-receipt-aware operation with live-release checks; it is not exposed by the
-single-map delete route.
+a release after a bundle is admitted. The admin bundle-retirement route has
+transactional receipts and live-release guards but remains fail-closed until
+Stage supplies trusted active/rollback release inventory, an exclusive
+deployment fence, and a bounded old-client event lifetime. See
+[Source-map bundle retirement](SOURCE_MAP_RETIREMENT.md).
+It is not exposed by the single-map delete route.
 
 Bundle uploads are limited to 512 maps, a 64 MiB JSON request, 64 MiB total
 stored UTF-8 bytes, and 30 MiB per map. Invalid maps fail the whole request;

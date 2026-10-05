@@ -46,6 +46,7 @@ func TestDestructiveRoutesAreAdminOnly(t *testing.T) {
 
 	for _, route := range []struct{ handler, why string }{
 		{"handleDeleteProject", "erases a project and all of its telemetry in one transaction"},
+		{"handleRetireSourceMapBundle", "erases an immutable source map bundle and needs a human operator"},
 		{"handleCreateAPIKey", "lets a leaked key mint its own successors"},
 		{"handleDeleteAPIKey", "lets a leaked key revoke the keys that would replace it"},
 	} {
@@ -54,5 +55,8 @@ func TestDestructiveRoutesAreAdminOnly(t *testing.T) {
 				"Move it to requireRole(\"admin\"), which apiKeyRole makes unreachable by a key.",
 				route.handler, route.why)
 		}
+	}
+	if !strings.Contains(rest[next[0]:], `r.Delete("/projects/{id}/artifact-bundles/{bundleID}", s.handleRetireSourceMapBundle)`) {
+		t.Fatal("bundle retirement route is missing from the admin-only router block")
 	}
 }
