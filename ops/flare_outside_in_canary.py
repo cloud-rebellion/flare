@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Optional
 from urllib import error, parse, request
 
 
@@ -27,6 +28,7 @@ SMTP_PORT = 587
 REPEAT_ALERT_SECONDS = 6 * 60 * 60
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 4096
+DEADMAN_TIMEOUT_SECONDS = 5
 
 
 class CanaryFailure(Exception):
@@ -44,10 +46,28 @@ class Config:
     resend_api_key: str
     from_email: str
     to_email: str
+    deadman_url: Optional[str] = None
 
 
 def _single_email(value):
     return isinstance(value, str) and len(value) < 255 and "@" in value and not re.search(r"[\s,;<>]", value)
+
+
+def _valid_deadman_url(value):
+    if value is None:
+        return True
+    # URLs often contain a bearer-like secret in the path. Validate without
+    # ever including the value in an exception, log, or alert.
+    if not isinstance(value, str) or not 0 < len(value) <= 2048 or \
+       any(not 0x21 <= ord(char) <= 0x7e or char in "\\#" for char in value):
+        return False
+    try:
+        parts = parse.urlsplit(value)
+        return parts.scheme == "https" and bool(parts.hostname) and \
+            parts.username is None and parts.password is None and \
+            not parts.fragment and parts.port != 0
+    except ValueError:
+        return False
 
 
 def read_config(path):
@@ -64,14 +84,15 @@ def read_config(path):
         config = Config(**data)
     except (ValueError, TypeError) as exc:
         raise CanaryFailure("config_invalid") from exc
-    if any(not isinstance(value, str) for value in vars(config).values()) or \
+    if any(not isinstance(value, str) for key, value in vars(config).items() if key != "deadman_url") or \
        not re.fullmatch(r"[0-9]{1,20}", config.dsn_id) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", config.public_key) or \
        not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", config.project_id) or \
        not re.fullmatch(r"flr_[a-f0-9]{48}", config.viewer_api_key) or \
        not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", config.expected_source_commit) or \
        not (0 < len(config.expected_release) <= 128) or \
        not re.fullmatch(r"re_[A-Za-z0-9_-]{16,256}", config.resend_api_key) or \
-       not _single_email(config.from_email) or not _single_email(config.to_email):
+       not _single_email(config.from_email) or not _single_email(config.to_email) or \
+       not _valid_deadman_url(config.deadman_url):
         raise CanaryFailure("config_invalid")
     return config
 
@@ -220,6 +241,27 @@ def probe_once(config, client, marker=None, sleep=time.sleep):
     _query(client, config, marker, sleep)
 
 
+def ping_deadman(url, opener=None):
+    """Signal success only; keep secret URL out of every failure path."""
+    if opener is None:
+        opener = request.build_opener(request.ProxyHandler({}),
+                                      request.HTTPSHandler(context=ssl.create_default_context()),
+                                      NoRedirect())
+    success = False
+    try:
+        with opener.open(request.Request(url, method="GET"),
+                         timeout=DEADMAN_TIMEOUT_SECONDS) as response:
+            success = type(response.status) is int and 200 <= response.status < 300
+    except error.HTTPError as exc:
+        exc.close()
+    except (error.URLError, TimeoutError, OSError):
+        pass
+    if not success:
+        # Raise outside the handler: even the exception context must not retain
+        # a urllib error containing the secret URL.
+        raise CanaryFailure("deadman_unavailable")
+
+
 def send_mail(config, subject, body):
     message = EmailMessage()
     message["From"] = config.from_email
@@ -261,10 +303,13 @@ def _write_state(path, value):
             os.unlink(temp)
 
 
-def cycle(config, client, state_file, send=send_mail, now=time.time, sleep=time.sleep):
+def cycle(config, client, state_file, send=send_mail, now=time.time, sleep=time.sleep,
+          ping=ping_deadman):
     previous = _read_state(state_file)
     try:
         probe_once(config, client, sleep=sleep)
+        if config.deadman_url is not None:
+            ping(config.deadman_url)
     except CanaryFailure as exc:
         reason = str(exc)
         last = previous.get("last_alert_at", 0)

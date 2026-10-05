@@ -20,6 +20,11 @@ SMTP alert through Resend. Alert state
 is persisted so identical failures are repeated at most every six hours;
 recovery sends a separate message. The script logs only fixed status codes,
 never a key, marker, response body, or URL containing a marker.
+An optional external deadman success URL is called only after the same log is
+accepted, its terminal receipt is read back, and the project query finds it.
+A failed success ping fails the cycle and uses the independent SMTP failure
+alert. No ping is sent on a failed Flare probe. The URL stays in the private
+config and is never printed or included in the alert.
 
 ## Required provisioning before any enablement
 
@@ -60,15 +65,25 @@ Config shape (replace every placeholder on the independent host):
   "expected_release": "FLARE_RELEASE_ID",
   "resend_api_key": "re_CANARY_RESEND_KEY",
   "from_email": "alerts@example.com",
-  "to_email": "operator@example.com"
+  "to_email": "operator@example.com",
+  "deadman_url": null
 }
 ```
 
 The target origin, ingress marker, and SMTP server are fixed in source. The
-script rejects redirects, proxy environment variables, oversized responses,
+script rejects redirects and oversized responses, ignores proxy environment variables,
 non-JSON responses, and a missing expected ingress header. TLS uses the system
 trust store. The file parser rejects group/other-readable config. Logs are
 queried with the read-only key; the public DSN key is used only for ingest.
+To use a separate deadman service, replace `null` with its private HTTPS
+success-ping URL and set the service's expected cadence to the 15-minute timer
+plus enough grace for a delayed or failed run. The script accepts only an HTTPS
+URL without userinfo or a fragment, never follows redirects, ignores proxy
+environment variables, and uses a five-second request timeout. HTTP 2xx is
+required; a network, TLS, redirect, or non-2xx result is `deadman_unavailable`.
+Keep the endpoint outside the Flare/Stage host and failure domain, and verify a
+missed ping reaches the operator independently of the canary's SMTP route.
+Omitting `deadman_url` or setting it to `null` leaves this feature disabled.
 
 ## Live promotion gate
 
@@ -86,7 +101,7 @@ sudo systemctl enable --now flare-outside-in-canary.timer
 The first command sends a real test email: verify arrival in the operator
 mailbox, not only SMTP acceptance. The one-shot run must show `CANARY_OK`, and
 the dedicated project must show the test log. Only then enable the timer.
-Provision a separate deadman or external heartbeat alert on the timer/host so
+Provision and test the separate deadman alert before relying on the timer so
 loss of the canary host or its alert credentials is visible. Review each
 15-minute run and its journald status. To disable, run
 `systemctl disable --now flare-outside-in-canary.timer` on that independent

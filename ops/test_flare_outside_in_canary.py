@@ -5,10 +5,13 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 import unittest
+from dataclasses import replace
 from email.message import Message
 from pathlib import Path
-from urllib import parse
+from unittest.mock import patch
+from urllib import error, parse
 
 sys.path.insert(0, str(Path(__file__).parent))
 import flare_outside_in_canary as canary
@@ -94,6 +97,46 @@ class CanaryTests(unittest.TestCase):
         self.assertEqual(client.calls[3][2]["Authorization"], "Bearer " + CONFIG.viewer_api_key)
         self.assertEqual(json.loads(self.state.read_text())["status"], "ok")
 
+    def test_optional_deadman_pings_only_after_complete_readback(self):
+        canary.cycle(CONFIG, FakeClient(), self.state, send=self.send,
+                     sleep=lambda _: None, ping=lambda _url: self.fail("disabled ping called"))
+        config = replace(CONFIG, deadman_url="https://deadman.example/ping/private-token")
+        client = FakeClient()
+        pings = []
+
+        def ping(url):
+            pings.append(url)
+            self.assertEqual([call[0] for call in client.calls], ["GET", "POST", "GET", "GET"])
+
+        self.assertEqual(canary.cycle(config, client, self.state, send=self.send,
+                                      sleep=lambda _: None, ping=ping), "ok")
+        self.assertEqual(pings, [config.deadman_url])
+        for bad_client in (FakeClient(fail_ready=True), FakeClient(missing_receipt=True),
+                           FakeClient(missing=True)):
+            pings.clear()
+            result = canary.cycle(config, bad_client, self.state, send=self.send,
+                                  sleep=lambda _: None, ping=ping)
+            self.assertNotEqual(result, "ok")
+            self.assertEqual(pings, [])
+
+    def test_failed_deadman_pings_alert_and_fail_cycle(self):
+        secret_url = "https://deadman.example/ping/private-token"
+        config = replace(CONFIG, deadman_url=secret_url)
+
+        def fail_ping(_url):
+            raise canary.CanaryFailure("deadman_unavailable")
+
+        self.assertEqual(canary.cycle(config, FakeClient(), self.state, send=self.send,
+                                      now=lambda: 10, sleep=lambda _: None,
+                                      ping=fail_ping), "deadman_unavailable")
+        self.assertEqual(json.loads(self.state.read_text())["status"], "failed")
+        self.assertIn("deadman_unavailable", self.mail[0][1])
+        self.assertNotIn(secret_url, self.mail[0][1])
+        self.assertEqual(canary.cycle(config, FakeClient(), self.state, send=self.send,
+                                      now=lambda: 20, sleep=lambda _: None,
+                                      ping=lambda _url: None), "ok")
+        self.assertIn("recovered", self.mail[-1][0])
+
     def test_ambiguous_ingest_reuses_exact_bytes_and_key(self):
         client = FakeClient(ambiguous_ingest=True)
         canary.probe_once(CONFIG, client, marker="flare-canary-" + "f" * 32, sleep=lambda _: None)
@@ -155,6 +198,76 @@ class CanaryTests(unittest.TestCase):
         path.write_text(json.dumps(data))
         with self.assertRaisesRegex(canary.CanaryFailure, "config_invalid"):
             canary.read_config(path)
+
+    def test_deadman_config_is_optional_and_https_only(self):
+        path = Path(self.temp.name) / "config.json"
+        os.chmod(self.temp.name, 0o700)
+        data = vars(CONFIG).copy()
+        del data["deadman_url"]
+        path.write_text(json.dumps(data))
+        os.chmod(path, 0o600)
+        self.assertIsNone(canary.read_config(path).deadman_url)
+        for url in (None, "https://deadman.example/ping/private-token?key=abc"):
+            data["deadman_url"] = url
+            path.write_text(json.dumps(data))
+            self.assertEqual(canary.read_config(path).deadman_url, url)
+        for url in ("", "http://deadman.example/ping", "https://",
+                    "https://user:pass@deadman.example/ping", "https://deadman.example/ping#frag",
+                    "https://deadman.example/ping\nsecret", "https://deadman.example\\@evil.example/ping",
+                    "https://deadman.example:invalid/ping", 42):
+            with self.subTest(url=url):
+                data["deadman_url"] = url
+                path.write_text(json.dumps(data))
+                with self.assertRaisesRegex(canary.CanaryFailure, "config_invalid"):
+                    canary.read_config(path)
+
+    def test_deadman_ping_has_bounded_https_request_and_secret_free_errors(self):
+        secret_url = "https://deadman.example/ping/private-token"
+
+        class Response:
+            def __init__(self, status):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+        class Opener:
+            def __init__(self, result):
+                self.result = result
+                self.calls = []
+
+            def open(self, req, timeout):
+                self.calls.append((req.full_url, req.get_method(), timeout))
+                if isinstance(self.result, Exception):
+                    raise self.result
+                return Response(self.result)
+
+        opener = Opener(204)
+        canary.ping_deadman(secret_url, opener=opener)
+        self.assertEqual(opener.calls, [(secret_url, "GET", canary.DEADMAN_TIMEOUT_SECONDS)])
+        handlers = []
+
+        def build_opener(*args):
+            handlers.extend(args)
+            return Opener(204)
+
+        with patch.object(canary.request, "build_opener", side_effect=build_opener):
+            canary.ping_deadman(secret_url)
+        self.assertTrue(any(isinstance(handler, canary.NoRedirect) for handler in handlers))
+        self.assertEqual(next(handler.proxies for handler in handlers
+                              if isinstance(handler, canary.request.ProxyHandler)), {})
+        for failure in (302, 500, error.URLError(secret_url),
+                        error.HTTPError(secret_url, 302, "redirect", {}, None)):
+            with self.subTest(failure=failure):
+                with self.assertRaises(canary.CanaryFailure) as caught:
+                    canary.ping_deadman(secret_url, opener=Opener(failure))
+                self.assertEqual(str(caught.exception), "deadman_unavailable")
+                self.assertIsNone(caught.exception.__context__)
+                formatted = "".join(traceback.format_exception(caught.exception))
+                self.assertNotIn(secret_url, formatted)
 
     def test_mail_starts_tls_before_authentication(self):
         events = []
