@@ -99,9 +99,12 @@ The cap is 512 maps and 64 MiB per bundle; a PostgreSQL 16 test admitted a
 233-map BrightCRM-sized release and rejected a request over the cap. Stage's
 map gate remains disabled until its uploader uses that contract before cutover
 and the live Flare API, exact image/manifest, and private maps pass its checks.
-Receipt-aware retirement must protect live, rollback, and recent-event releases
-before normal deployment cadence fills the 2,000-item project quota. None of
-this establishes production capture.
+Migration 087 adds an admin retirement route with an exact bundle digest,
+transactional deletion, audit, and a durable receipt. It remains fail-closed
+(`503`) until Stage supplies an exclusive deploy/rollback fence, an exact
+active and rollback browser-release inventory, and a bounded old-client event
+policy. The current route cannot yet reclaim the 2,000-item project quota.
+None of this establishes production capture.
 
 Stage merged the backup-script repair at `852958381` after its exact
 `security-gate` check. The production host installed those bytes with the
