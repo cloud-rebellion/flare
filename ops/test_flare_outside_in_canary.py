@@ -259,7 +259,7 @@ class CanaryTests(unittest.TestCase):
         self.assertTrue(any(isinstance(handler, canary.NoRedirect) for handler in handlers))
         self.assertEqual(next(handler.proxies for handler in handlers
                               if isinstance(handler, canary.request.ProxyHandler)), {})
-        for failure in (302, 500, error.URLError(secret_url),
+        for failure in (302, 500, error.URLError(secret_url), ValueError(secret_url),
                         error.HTTPError(secret_url, 302, "redirect", {}, None)):
             with self.subTest(failure=failure):
                 with self.assertRaises(canary.CanaryFailure) as caught:

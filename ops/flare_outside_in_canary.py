@@ -15,6 +15,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from email.message import EmailMessage
+from http.client import HTTPException
 from pathlib import Path
 from typing import Optional
 from urllib import error, parse, request
@@ -254,7 +255,7 @@ def ping_deadman(url, opener=None):
             success = type(response.status) is int and 200 <= response.status < 300
     except error.HTTPError as exc:
         exc.close()
-    except (error.URLError, TimeoutError, OSError):
+    except (error.URLError, TimeoutError, OSError, ValueError, HTTPException):
         pass
     if not success:
         # Raise outside the handler: even the exception context must not retain
