@@ -218,7 +218,9 @@ an operator-pinned release, posts an idempotent native log, reads its retained
 receipt and exact log from a dedicated project, and alerts through an
 independent SMTP route. Its offline tests passed, but it is disabled and has
 not been installed on an independent host or proven to reach an inbox. A
-separate deadman must cover loss of that host or its timer.
+private optional HTTPS success ping can feed a separate deadman service after
+the full ingest-to-query cycle; no host, endpoint, or missed-ping alert has
+been provisioned or tested.
 
 The Reactor candidate accepts a signed, project-bound Flare notice and starts
 a durable run, but it does not yet fetch fresh incident evidence or prepare a
