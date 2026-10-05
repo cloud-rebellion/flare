@@ -3807,7 +3807,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Bounded payload-free AI operation outcomes; fresh calls include an evidence_digest SHA-256 fingerprint, while cached reads leave it empty"
+            "description": "Bounded payload-free AI operation outcomes. Match the id to a fresh triage response's ai_receipt_id and require succeeded status, the same issue, and evidence_digest; cached reads have no evidence_digest"
           }
         }
       }

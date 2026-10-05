@@ -1150,13 +1150,17 @@ provider calls also carry a lowercase SHA-256 `evidence_digest` of the bounded,
 scrubbed incident context placed inside the untrusted-data fence; cached reads
 leave it empty. Prompts, responses, credentials, and upstream error text are
 never stored or returned. The REST triage response and the `triage_issue` MCP
-result include `evidence_digest` for a fresh completed call so a worker can
-submit the exact digest as a passed patch receipt's `evidence_ref`; cached
-results omit it.
+result include `evidence_digest` and `ai_receipt_id` for a fresh completed call.
+The digest identifies the evidence snapshot, while the ID identifies this
+particular run even if another run used the same evidence. A worker must find
+that exact ID in the project AI receipts, verify its issue, digest, and
+`succeeded` status, then submit the digest as a passed patch receipt's
+`evidence_ref`. Cached results omit both fields.
 The receipt start is part of triage acceptance: if Flare cannot write the
 `started` row, triage returns a typed retryable `503` and does not call the
 provider. Completion writes use a short detached deadline and remain
-best-effort after the operation has been accepted.
+best-effort after the operation has been accepted, so a returned ID alone does
+not prove the receipt reached `succeeded`.
 
 ### Error-to-fix workflow for an AI coding agent
 

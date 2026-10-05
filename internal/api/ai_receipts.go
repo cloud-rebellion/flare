@@ -53,7 +53,7 @@ func (s *Server) beginAIActionReceipt(ctx context.Context, org, project, issue, 
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), aiActionReceiptTimeout)
 	defer cancel()
-	_, err := s.q.InsertAIActionReceipt(writeCtx, generated.InsertAIActionReceiptParams{
+	inserted, err := s.q.InsertAIActionReceipt(writeCtx, generated.InsertAIActionReceiptParams{
 		ID:             r.id,
 		OrgID:          r.orgID,
 		ProjectID:      r.projectID,
@@ -69,6 +69,9 @@ func (s *Server) beginAIActionReceipt(ctx context.Context, org, project, issue, 
 		recordAIActionReceiptFailure("insert", r)
 		return nil
 	}
+	// Return the ID confirmed by the durable insert, rather than relying on
+	// the requested ID remaining equal to the stored row's identifier.
+	r.id = inserted.ID
 	recordAIActionReceiptSuccess("insert")
 	return r
 }

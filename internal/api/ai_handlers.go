@@ -167,7 +167,7 @@ func (s *Server) handleTriageIssue(w http.ResponseWriter, r *http.Request) {
 	org := orgIDFrom(ctx)
 	issueID := chi.URLParam(r, "id")
 
-	text, cached, evidenceDigest, err := s.triageIssue(ctx, org, issueID, r.URL.Query().Get("refresh") == "true")
+	text, cached, evidenceDigest, aiReceiptID, err := s.triageIssue(ctx, org, issueID, r.URL.Query().Get("refresh") == "true")
 	if err != nil {
 		var nf telemetry.ErrNotFound
 		switch {
@@ -186,39 +186,49 @@ func (s *Server) handleTriageIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, triageResponse(text, cached, evidenceDigest))
+	writeJSON(w, http.StatusOK, triageResponse(text, cached, evidenceDigest, aiReceiptID))
 }
 
-func triageResponse(text string, cached bool, evidenceDigest string) map[string]any {
+func triageResponse(text string, cached bool, evidenceDigest, aiReceiptID string) map[string]any {
 	response := map[string]any{"triage": text, "cached": cached}
-	if evidenceDigest != "" {
-		// A fresh triage receipt is the provenance handle an external coding
-		// worker needs when it submits the human-gated patch receipt. Cached
-		// triage deliberately has no digest and cannot authorize a patch.
-		response["evidence_digest"] = evidenceDigest
-	}
+	addFreshTriageProvenance(response, cached, evidenceDigest, aiReceiptID)
 	return response
+}
+
+// addFreshTriageProvenance is shared by REST and MCP so a cached result never
+// inherits a previous run's proof, even when its evidence digest is unchanged.
+func addFreshTriageProvenance(response map[string]any, cached bool, evidenceDigest, aiReceiptID string) {
+	if cached || evidenceDigest == "" || aiReceiptID == "" {
+		return
+	}
+	// A fresh triage receipt is the provenance handle an external coding
+	// worker needs when it submits the human-gated patch receipt. Cached
+	// triage deliberately has neither field and cannot authorize a patch.
+	response["evidence_digest"] = evidenceDigest
+	// This is the exact row inserted for this run. Completion is best effort,
+	// so callers must read this row and require succeeded status.
+	response["ai_receipt_id"] = aiReceiptID
 }
 
 // triageIssue runs (or returns cached) AI triage for one issue. Shared by the
 // REST handler and the MCP tool. A fresh run returns the exact evidence digest
-// stored in its durable receipt; cached reads return an empty digest and cannot
-// authorize a patch. The final value is a typed error (errTriageNotConfigured /
+// stored in its durable receipt and its exact inserted row ID. Cached reads
+// return neither and cannot authorize a patch. Receipt completion is best
+// effort, so consumers must verify the returned ID's terminal status. The
+// final value is a typed error (errTriageNotConfigured /
 // errTriageEndpoint / telemetry.ErrNotFound / raw DB error).
-func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh bool) (text string, cached bool, evidenceDigest string, retErr error) {
+func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh bool) (text string, cached bool, evidenceDigest, aiReceiptID string, retErr error) {
 	issue, err := s.store.GetIssue(ctx, issueID, org)
 	if err != nil {
-		return "", false, "", err
+		return "", false, "", "", err
 	}
 	receipt, receiptErr := s.requireAIActionReceipt(ctx, org, issue.ProjectID, issue.ID, "triage", "unknown")
 	if receiptErr != nil {
-		return "", false, "", receiptErr
+		return "", false, "", "", receiptErr
 	}
 	defer func() {
 		s.finishAIActionReceipt(ctx, receipt, cached, retErr)
-		if receipt != nil {
-			evidenceDigest = receipt.evidenceDigest
-		}
+		evidenceDigest, aiReceiptID = freshTriageProvenance(receipt, cached, retErr)
 	}()
 	if issue.AITriage != "" && !refresh {
 		if receipt != nil {
@@ -236,15 +246,15 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 				slog.Warn("ai triage: unable to repair cached output", "issue", issue.ID, "org", org, "error", err)
 			}
 		}
-		return sanitized, true, "", nil
+		return sanitized, true, "", "", nil
 	}
 
 	cfg, err := s.q.GetAIConfig(ctx, org)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !cfg.Enabled) {
-		return "", false, "", errTriageNotConfigured
+		return "", false, "", "", errTriageNotConfigured
 	}
 	if err != nil {
-		return "", false, "", err
+		return "", false, "", "", err
 	}
 	if receipt != nil {
 		receipt.provider = canonicalAIActionProvider(cfg.Format)
@@ -262,7 +272,7 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	// Claimed before the outbound call and only when a call is actually going
 	// to happen: a cached answer costs nothing and must not consume budget.
 	if err := s.claimTriageBudget(ctx, org, cfg.TriageDailyBudget); err != nil {
-		return "", false, "", err
+		return "", false, "", "", err
 	}
 
 	// The report is written by whoever sent the event, not by us: a DSN public
@@ -273,7 +283,7 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	report := s.buildTriageContext(ctx, issue, org)
 	fenced, untrustedRule, err := ai.Fence(report)
 	if err != nil {
-		return "", false, "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
+		return "", false, "", "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
 	}
 	// Keep only a deterministic digest of the bounded, scrubbed evidence in
 	// the receipt. The random fence delimiter is transport framing, so hashing
@@ -295,12 +305,12 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	apiKey, err := s.secrets.Decrypt(cfg.ApiKey)
 	if err != nil {
 		slog.Error("ai triage: stored provider key cannot be decrypted; check FLARE_SECRET_KEY", "org", org, "error", err)
-		return "", false, "", errTriageNotConfigured
+		return "", false, "", "", errTriageNotConfigured
 	}
 	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: org, ProjectID: issue.ProjectID})
 	triage, err := s.ai.Complete(connectorCtx, ai.Config{BaseURL: cfg.BaseUrl, APIKey: apiKey, Model: cfg.Model, Format: cfg.Format}, system, fenced)
 	if err != nil {
-		return "", false, "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
+		return "", false, "", "", fmt.Errorf("%w: %v", errTriageEndpoint, err)
 	}
 	// The reply is untrusted too, and for a second reason on top of the
 	// injected-telemetry one: base_url is org-configurable, so the endpoint
@@ -309,14 +319,24 @@ func (s *Server) triageIssue(ctx context.Context, org, issueID string, refresh b
 	// persisted and re-served through the dashboard and MCP.
 	triage = sanitizeTriageOutput(triage)
 	if err := s.q.SetIssueTriage(ctx, generated.SetIssueTriageParams{ID: issue.ID, OrgID: org, AiTriage: triage}); err != nil {
-		return "", false, "", err
+		return "", false, "", "", err
 	}
 	// Scrubbed and capped. Every other egress site scrubs; this one wrote the
 	// raw, unbounded issue title into audit_log, which handleListAuditLog then
 	// serves to admins, so a leaked secret in an exception title survived in a
 	// second place nobody was scrubbing.
 	s.audit(ctx, "ai.triage", ai.Line(ai.Scrub(issue.Title)))
-	return triage, false, "", nil
+	return triage, false, "", "", nil
+}
+
+// freshTriageProvenance exposes one accepted run only after its provider call
+// and issue update succeeded. The receipt may still be started if its final
+// write failed; consumers must confirm that exact row reached succeeded.
+func freshTriageProvenance(receipt *aiActionReceipt, cached bool, actionErr error) (digest, receiptID string) {
+	if receipt == nil || cached || actionErr != nil || receipt.evidenceDigest == "" || receipt.id == "" {
+		return "", ""
+	}
+	return receipt.evidenceDigest, receipt.id
 }
 
 // sanitizeTriageOutput applies the same egress scrubber used for telemetry
@@ -364,7 +384,7 @@ func (s *Server) maybeAutoTriage(org, issueID string) {
 		}
 		// The claim lives inside triageIssue now, so this path no longer takes
 		// its own. Claiming here as well would spend two units per new issue.
-		if _, _, _, err := s.triageIssue(ctx, org, issueID, false); err != nil {
+		if _, _, _, _, err := s.triageIssue(ctx, org, issueID, false); err != nil {
 			switch {
 			case errors.Is(err, errTriageBudget):
 				slog.Info("auto-triage skipped: daily budget reached", "org", org, "budget", cfg.TriageDailyBudget)

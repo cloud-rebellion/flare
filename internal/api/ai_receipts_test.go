@@ -29,13 +29,67 @@ func TestAIEvidenceDigestIsStableAndPayloadFree(t *testing.T) {
 
 func TestTriageResponseExposesFreshEvidenceOnly(t *testing.T) {
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	fresh := triageResponse("suggested fix", false, digest)
+	fresh := triageResponse("suggested fix", false, digest, "receipt-fresh")
 	if got, ok := fresh["evidence_digest"].(string); !ok || got != digest {
 		t.Fatalf("fresh triage response digest = %#v, want %q", fresh["evidence_digest"], digest)
 	}
-	cached := triageResponse("cached suggestion", true, "")
-	if _, ok := cached["evidence_digest"]; ok {
-		t.Fatalf("cached triage response exposed evidence digest: %#v", cached)
+	if got := fresh["ai_receipt_id"]; got != "receipt-fresh" {
+		t.Fatalf("fresh triage response receipt = %#v, want exact inserted ID", got)
+	}
+	// A defensive cached response must suppress provenance even if a caller
+	// accidentally passes the previous fresh run's values.
+	cached := triageResponse("cached suggestion", true, digest, "receipt-fresh")
+	for _, field := range []string{"evidence_digest", "ai_receipt_id"} {
+		if _, ok := cached[field]; ok {
+			t.Fatalf("cached triage response exposed %s: %#v", field, cached)
+		}
+	}
+	missingID := triageResponse("suggested fix", false, digest, "")
+	for _, field := range []string{"evidence_digest", "ai_receipt_id"} {
+		if _, ok := missingID[field]; ok {
+			t.Fatalf("fresh response without a receipt exposed %s: %#v", field, missingID)
+		}
+	}
+}
+
+func TestFreshTriageProvenanceDistinguishesRunsWithSameDigest(t *testing.T) {
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	firstRun := &aiActionReceipt{id: "receipt-first", evidenceDigest: digest}
+	secondRun := &aiActionReceipt{id: "receipt-second", evidenceDigest: digest}
+	firstDigest, firstID := freshTriageProvenance(firstRun, false, nil)
+	secondDigest, secondID := freshTriageProvenance(secondRun, false, nil)
+	first := triageResponse("first", false, firstDigest, firstID)
+	second := triageResponse("second", false, secondDigest, secondID)
+	if first["evidence_digest"] != second["evidence_digest"] {
+		t.Fatal("unchanged evidence should retain the same digest")
+	}
+	if first["ai_receipt_id"] == second["ai_receipt_id"] ||
+		first["ai_receipt_id"] != "receipt-first" || second["ai_receipt_id"] != "receipt-second" {
+		t.Fatalf("fresh runs conflated: first=%#v second=%#v", first, second)
+	}
+	// MCP uses the same projection helper as REST.
+	mcp := map[string]any{"triage": "second", "cached": false}
+	addFreshTriageProvenance(mcp, false, digest, "receipt-second")
+	if mcp["ai_receipt_id"] != second["ai_receipt_id"] || mcp["evidence_digest"] != digest {
+		t.Fatalf("MCP provenance diverged from REST: %#v", mcp)
+	}
+	for _, tc := range []struct {
+		name    string
+		receipt *aiActionReceipt
+		cached  bool
+		err     error
+	}{
+		{name: "cached", receipt: firstRun, cached: true},
+		{name: "provider failure", receipt: firstRun, err: errTriageEndpoint},
+		{name: "no inserted row"},
+		{name: "missing ID", receipt: &aiActionReceipt{evidenceDigest: digest}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDigest, gotID := freshTriageProvenance(tc.receipt, tc.cached, tc.err)
+			if gotDigest != "" || gotID != "" {
+				t.Fatalf("nonfresh run exposed provenance: %q %q", gotDigest, gotID)
+			}
+		})
 	}
 }
 

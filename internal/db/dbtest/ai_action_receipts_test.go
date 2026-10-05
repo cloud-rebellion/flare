@@ -61,6 +61,19 @@ func TestAIActionReceiptScopeAndLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("complete successful AI action receipt: %v", err)
 	}
+	// A refresh can analyze unchanged evidence again. The digest identifies
+	// the evidence snapshot, while the durable row ID identifies one run.
+	repeated, err := q.InsertAIActionReceipt(ctx, generated.InsertAIActionReceiptParams{
+		ID: id.New(), OrgID: org, ProjectID: project, IssueID: issue,
+		Operation: "triage", Status: "started", Provider: "unknown",
+		StartedAt: now, Retryable: true, EvidenceDigest: evidenceDigest,
+	})
+	if err != nil {
+		t.Fatalf("insert repeated AI action receipt: %v", err)
+	}
+	if repeated.ID == succeeded.ID || repeated.EvidenceDigest != succeeded.EvidenceDigest {
+		t.Fatalf("repeated run lost distinct ID or shared digest: first=%#v repeated=%#v", succeeded, repeated)
+	}
 	evidence, err := q.HasSuccessfulAIActionEvidence(ctx, generated.HasSuccessfulAIActionEvidenceParams{
 		OrgID: org, ProjectID: project, IssueID: issue, EvidenceDigest: evidenceDigest,
 	})
@@ -98,8 +111,16 @@ func TestAIActionReceiptScopeAndLifecycle(t *testing.T) {
 	rows, err := q.ListAIActionReceiptsByProject(ctx, generated.ListAIActionReceiptsByProjectParams{
 		OrgID: org, ProjectID: project, Limit: 10,
 	})
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("scoped list = %v (%d rows), want two receipts", err, len(rows))
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("scoped list = %v (%d rows), want three receipts", err, len(rows))
+	}
+	foundFirst, foundRepeated := false, false
+	for _, row := range rows {
+		foundFirst = foundFirst || row.ID == succeeded.ID
+		foundRepeated = foundRepeated || row.ID == repeated.ID
+	}
+	if !foundFirst || !foundRepeated {
+		t.Fatalf("scoped list lost exact run IDs: first=%v repeated=%v", foundFirst, foundRepeated)
 	}
 	crossTenant, err := q.ListAIActionReceiptsByProject(ctx, generated.ListAIActionReceiptsByProjectParams{
 		OrgID: otherOrg, ProjectID: project, Limit: 10,
