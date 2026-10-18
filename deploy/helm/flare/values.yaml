@@ -2,7 +2,7 @@ image:
   repository: flare
   # Version label. Tags can be moved by a registry; set digest for an exact
   # image and a reliable rollback target. Keep tag aligned with flare/VERSION.
-  tag: v0.5.0
+  tag: v0.6.0
   # Optional digest of the image built from sourceCommit (sha256:<64 hex>).
   # When present the Deployment selects repository@digest instead of the tag.
   digest: ""
@@ -15,6 +15,10 @@ replicaCount: 1
 
 # Public URL Flare is reached at (used in DSNs + email links).
 baseURL: https://flare.example.com
+# Optional additional MCP browser origins. Exact HTTPS origins only, maximum
+# 8 entries and 2048 comma-separated bytes. baseURL is included automatically.
+# This does not enable CORS or grant access; native clients omit Origin.
+mcpAllowedOrigins: []
 
 # Operator-owned Stage proof endpoint; leave empty to keep external execution
 # receipts advisory. peerIP pins one private Stage peer while TLS validates the

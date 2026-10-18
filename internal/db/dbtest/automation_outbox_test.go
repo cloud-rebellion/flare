@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/bright-interaction/flare/internal/automationdelivery"
 	"github.com/bright-interaction/flare/internal/automationoutbox"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
@@ -32,6 +33,15 @@ func outboxNotice(org, project, channel string) automationoutbox.Notice {
 		OrgID: org, ProjectID: project, ChannelID: channel,
 		Event: "new_issue", EventCount: 2, ObservedAt: time.Now().UTC().Truncate(time.Microsecond),
 	}
+}
+
+func httpOutboxAck(t *testing.T, n automationoutbox.Notice) *automationdelivery.Acknowledgement {
+	t.Helper()
+	body, err := automationdelivery.NoticeBody(n.ProjectID, n.IssueID, n.Event, n.EventCount, n.ObservedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &automationdelivery.Acknowledgement{Mode: automationdelivery.HTTP, HTTPStatus: 202, RequestSHA256: automationdelivery.Digest(body)}
 }
 
 func TestAutomationOutboxClaimAndInsertAreAtomicAndTenantScoped(t *testing.T) {
@@ -79,7 +89,9 @@ func TestAutomationOutboxClaimAndInsertAreAtomicAndTenantScoped(t *testing.T) {
 		t.Fatalf("rolled back claim = %v, %v", lastFired, err)
 	}
 	committedID := claimAndEnqueue(true)
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, committedID) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, committedID)
+	})
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM automation_alert_outbox WHERE id=$1 AND org_id=$2 AND project_id=$3`, committedID, org, project).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("committed queue count = %d, %v", count, err)
 	}
@@ -126,7 +138,9 @@ func TestAutomationOutboxLeaseRecoveryAndRouting(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, noticeID) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, noticeID)
+	})
 	var wg sync.WaitGroup
 	results := make(chan []automationoutbox.Notice, 2)
 	for i := 0; i < 2; i++ {
@@ -158,7 +172,7 @@ func TestAutomationOutboxLeaseRecoveryAndRouting(t *testing.T) {
 	}
 	wrong := first
 	wrong.LeaseToken = "wrong-token"
-	if err := store.Finish(ctx, wrong, true, false); !errors.Is(err, automationoutbox.ErrStaleLease) {
+	if err := store.Finish(ctx, wrong, true, false, httpOutboxAck(t, wrong)); !errors.Is(err, automationoutbox.ErrStaleLease) {
 		t.Fatalf("wrong token finished delivery: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE automation_alert_outbox SET leased_until=now()-interval '1 second' WHERE id=$1`, noticeID); err != nil {
@@ -172,10 +186,10 @@ func TestAutomationOutboxLeaseRecoveryAndRouting(t *testing.T) {
 	if second.ID != first.ID || !second.ObservedAt.Equal(first.ObservedAt) || second.Attempts != 2 || second.LeaseToken == first.LeaseToken {
 		t.Fatalf("retry changed stable identity or failed to fence: %#v -> %#v", first, second)
 	}
-	if err := store.Finish(ctx, first, true, false); !errors.Is(err, automationoutbox.ErrStaleLease) {
+	if err := store.Finish(ctx, first, true, false, httpOutboxAck(t, first)); !errors.Is(err, automationoutbox.ErrStaleLease) {
 		t.Fatalf("stale worker finished after restart: %v", err)
 	}
-	if err := store.Finish(ctx, second, false, false); err != nil {
+	if err := store.Finish(ctx, second, false, false, nil); err != nil {
 		t.Fatalf("schedule retry: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE automation_alert_outbox SET next_attempt_at=now()-interval '1 second' WHERE id=$1`, noticeID); err != nil {
@@ -198,7 +212,7 @@ func TestAutomationOutboxLeaseRecoveryAndRouting(t *testing.T) {
 	if _, err := store.CurrentChannel(ctx, thirdBatch[0]); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("rerouted notice left Flare: %v", err)
 	}
-	if err := store.Finish(ctx, thirdBatch[0], false, true); err != nil {
+	if err := store.Finish(ctx, thirdBatch[0], false, true, nil); err != nil {
 		t.Fatalf("cancel rerouted notice: %v", err)
 	}
 	stats, err := store.Snapshot(ctx)
@@ -238,7 +252,9 @@ func TestAutomationOutboxKeepsLedgerWhenChannelIsDeleted(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, noticeID) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM automation_alert_outbox WHERE id=$1`, noticeID)
+	})
 	if _, err := pool.Exec(ctx, `DELETE FROM notification_channels WHERE id=$1 AND org_id=$2`, channel, org); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +269,7 @@ func TestAutomationOutboxKeepsLedgerWhenChannelIsDeleted(t *testing.T) {
 	if _, err := store.CurrentChannel(ctx, rows[0]); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("deleted channel still routable: %v", err)
 	}
-	if err := store.Finish(ctx, rows[0], false, true); err != nil {
+	if err := store.Finish(ctx, rows[0], false, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	var state string

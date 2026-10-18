@@ -22,10 +22,10 @@ docker compose up -d --build
 
 For a traceable release, build from a clean, exact checkout and set
 `FLARE_COMMIT` to its full lowercase Git object ID before running Compose.
-Keep `FLARE_RELEASE` as the version (for example `v0.5.0`), not a second
+Keep `FLARE_RELEASE` as the version (for example `v0.6.0`), not a second
 commit string. Compose passes both values into the browser and server builds
 and checks the running binary against the declared values. `/readyz` then
-reports `release: v0.5.0+g<commit>` and `source_commit: <commit>`. An empty
+reports `release: v0.6.0+g<commit>` and `source_commit: <commit>`. An empty
 `source_commit` means the build was not attributed to a Git revision. Record
 the built image ID or registry digest separately; the process cannot
 independently prove which image digest the container runtime started.
@@ -39,7 +39,7 @@ Put a TLS terminator (Caddy, nginx, Traefik) in front for production and set
 
 ## Kubernetes (Helm)
 
-`flare/VERSION` is `v0.5.0`. Keep the chart's `image.tag` at that version
+`flare/VERSION` is `v0.6.0`. Keep the chart's `image.tag` at that version
 when upgrading. A tag alone can be moved in the registry. For an exact image,
 set `image.digest=sha256:<64 lowercase hex digits>`; the Deployment then
 pulls `repository@digest`. Set `image.sourceCommit` to the full commit
@@ -89,6 +89,7 @@ You can also supply all secrets via a pre-created `Secret` (keys `session-key`,
 | Setting | Compose (`.env`) | Helm (`values.yaml`) | Notes |
 |---|---|---|---|
 | Public URL | `FLARE_BASE_URL` | `baseURL` | Used in DSNs + email links; must match how Flare is reached |
+| MCP browser aliases | `FLARE_MCP_ALLOWED_ORIGINS` | `mcpAllowedOrigins` | Optional exact HTTPS origins in addition to the public URL; max 8 and 2048 comma-separated bytes. No wildcards or paths. This does not enable CORS or grant access; native clients omit Origin |
 | Session secret | `SESSION_KEY` | `secrets.sessionKey` | 32+ bytes, required |
 | CSRF secret | `CSRF_KEY` | `secrets.csrfKey` | exactly 32 bytes, required |
 | At-rest secret | `FLARE_SECRET_KEY` | `secrets.secretKey` | required; encrypts BYOAI keys, OIDC client secrets and channel configs. Production refuses to boot without it, and rotating it makes existing encrypted values unreadable |

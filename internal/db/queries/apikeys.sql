@@ -3,6 +3,15 @@ INSERT INTO api_keys (id, org_id, name, key_hash, key_prefix, expires_at, role, 
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
+-- name: CreateMCPAPIKey :one
+-- Database time binds expiry and creation atomically despite application clock
+-- skew. The existing CreateAPIKey query omits purpose and keeps its API default.
+INSERT INTO api_keys (id,org_id,name,key_hash,key_prefix,expires_at,role,created_by_user_id,purpose)
+VALUES (sqlc.arg(id),sqlc.arg(org_id),sqlc.arg(name),sqlc.arg(key_hash),sqlc.arg(key_prefix),
+        now() + (sqlc.arg(expires_in_days)::integer * interval '1 day'),
+        sqlc.arg(role),sqlc.narg(created_by_user_id),'mcp')
+RETURNING *;
+
 -- ciguard:allow-unscoped auth path keyed by the secret key_hash; org_id is the result, not the filter
 -- name: GetAPIKeyByHash :one
 SELECT * FROM api_keys WHERE key_hash = $1;

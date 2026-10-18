@@ -8,6 +8,7 @@
     { href: '/docs#send', label: 'Send events' },
     { href: '/docs#sourcemaps', label: 'Source maps' },
     { href: '/docs#releases', label: 'Releases' },
+    { href: '/docs#mcp', label: 'AI connection (MCP)' },
     { href: '/docs/api', label: 'API reference' }
   ];
 </script>

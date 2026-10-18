@@ -12,8 +12,8 @@ import (
 // are therefore immune to CSRF by construction.
 //
 // The exemption used to be "an Authorization header is present", full stop, and
-// that is not the same question. requireAuth authenticates from the SESSION
-// first and only falls through to the API key when there is no session, so the
+// that is not the same question. Historically requireAuth read the SESSION
+// first and only fell through to the API key when there was no session, so the
 // exemption decision and the authentication decision were made from two
 // different inputs and never reconciled: `curl -H 'Authorization: Bearer x'`
 // with a valid session cookie was CSRF-exempt AND session-authenticated. Junk
@@ -29,9 +29,10 @@ import (
 // So the test is now "is there an ambient credential on this request", which is
 // the thing CSRF is actually about. A session cookie means enforce, whatever
 // else is present. This runs before requireAuth, so it reads the cookie rather
-// than the resolved session: an API client that also sends a stale cookie gets
-// CSRF enforced, which is over-enforcement against a client that does not
-// exist.
+// than the resolved session. REST keeps this conservative gate because the same
+// wrapper also protects login/logout routes outside requireAuth. The dedicated
+// MCP transport instead uses authoritative bearer authentication before any
+// cookie fallback, allowing an explicit bearer without browser CSRF.
 func conditionalCSRF(csrfMW func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		protected := csrfMW(next)

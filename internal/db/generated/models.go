@@ -93,6 +93,7 @@ type ApiKey struct {
 	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
 	Role            string             `json:"role"`
 	CreatedByUserID pgtype.Text        `json:"created_by_user_id"`
+	Purpose         string             `json:"purpose"`
 }
 
 type AuditLog struct {
@@ -105,23 +106,29 @@ type AuditLog struct {
 }
 
 type AutomationAlertOutbox struct {
-	ID            string             `json:"id"`
-	OrgID         string             `json:"org_id"`
-	ProjectID     string             `json:"project_id"`
-	ChannelID     pgtype.Text        `json:"channel_id"`
-	IssueID       string             `json:"issue_id"`
-	Event         string             `json:"event"`
-	EventCount    int64              `json:"event_count"`
-	ObservedAt    pgtype.Timestamptz `json:"observed_at"`
-	State         string             `json:"state"`
-	Attempts      int32              `json:"attempts"`
-	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
-	LeaseToken    string             `json:"lease_token"`
-	LeasedUntil   pgtype.Timestamptz `json:"leased_until"`
-	LastErrorCode string             `json:"last_error_code"`
-	DeliveredAt   pgtype.Timestamptz `json:"delivered_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                     string             `json:"id"`
+	OrgID                  string             `json:"org_id"`
+	ProjectID              string             `json:"project_id"`
+	ChannelID              pgtype.Text        `json:"channel_id"`
+	IssueID                string             `json:"issue_id"`
+	Event                  string             `json:"event"`
+	EventCount             int64              `json:"event_count"`
+	ObservedAt             pgtype.Timestamptz `json:"observed_at"`
+	State                  string             `json:"state"`
+	Attempts               int32              `json:"attempts"`
+	NextAttemptAt          pgtype.Timestamptz `json:"next_attempt_at"`
+	LeaseToken             string             `json:"lease_token"`
+	LeasedUntil            pgtype.Timestamptz `json:"leased_until"`
+	LastErrorCode          string             `json:"last_error_code"`
+	DeliveredAt            pgtype.Timestamptz `json:"delivered_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	ReceiverMode           string             `json:"receiver_mode"`
+	ReceiverHttpStatus     pgtype.Int4        `json:"receiver_http_status"`
+	ReceiverRequestSha256  string             `json:"receiver_request_sha256"`
+	ReceiverRunID          string             `json:"receiver_run_id"`
+	ReceiverDeduped        pgtype.Bool        `json:"receiver_deduped"`
+	ReceiverAcknowledgedAt pgtype.Timestamptz `json:"receiver_acknowledged_at"`
 }
 
 type AutomationClaim struct {

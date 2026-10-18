@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/alerts"
+	"github.com/bright-interaction/flare/internal/automationdelivery"
 	"github.com/bright-interaction/flare/internal/automationoutbox"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/metrics"
@@ -147,9 +148,10 @@ func (s *Server) deliverAutomationNotice(parent context.Context, n automationout
 	config, err := s.automationOutbox.CurrentChannel(ctx, n)
 	cancelled := errors.Is(err, pgx.ErrNoRows)
 	delivered := false
+	var ack *automationdelivery.Acknowledgement
 	if err == nil {
 		ch := alerts.Channel{ID: n.ChannelID, OrgID: n.OrgID, Type: "automation_webhook", Config: s.decryptChannelConfig("automation_webhook", json.RawMessage(config))}
-		err = s.dispatcher.DispatchOne(ctx, ch, alerts.Notification{
+		ack, err = s.dispatcher.DispatchAutomationNotice(ctx, ch, alerts.Notification{
 			ProjectID: n.ProjectID, IssueID: n.IssueID, EventCount: n.EventCount,
 			AutomationEvent: n.Event, ObservedAt: n.ObservedAt,
 		})
@@ -157,7 +159,7 @@ func (s *Server) deliverAutomationNotice(parent context.Context, n automationout
 	}
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer finishCancel()
-	if finishErr := s.automationOutbox.Finish(finishCtx, n, delivered, cancelled); finishErr != nil {
+	if finishErr := s.automationOutbox.Finish(finishCtx, n, delivered, cancelled, ack); finishErr != nil {
 		// Expired leases are retried; never mark a stale attempt as accepted.
 		slog.Warn("finish automation notice", "notice_id", n.ID, "error", finishErr)
 		metrics.Inc("flare_automation_outbox_finishes", map[string]string{"outcome": "failed"})

@@ -4,6 +4,7 @@
   import { api, ApiError } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { relativeTime } from '$lib/format';
+  import MCPConnection from '$lib/components/MCPConnection.svelte';
   import type {
     AiConfig,
     ApiKey,
@@ -27,6 +28,7 @@
   let type = $state('log');
   let url = $state('');
   let automationSigningSecret = $state('');
+  let automationReceiptMode = $state<'http' | 'reactor-v1'>('http');
   let emailTo = $state('');
   let slackUrl = $state('');
   let busy = $state(false);
@@ -146,23 +148,6 @@
   let ssoBusy = $state(false);
   let copiedRedirect = $state(false);
 
-  // AI operator (MCP): everything a tenant needs to connect an MCP client. The
-  // endpoint is this deployment's own origin; the key is the one just created
-  // (shown once) or a placeholder until the tenant makes one above.
-  let mcpUrl = $state('');
-  let copiedMcp = $state<string | null>(null);
-  const mcpKey = $derived(newKey ?? '<YOUR_API_KEY>');
-  const mcpCommand = $derived(
-    `claude mcp add --transport http flare ${mcpUrl} --header "Authorization: Bearer ${mcpKey}"`
-  );
-  const mcpJsonConfig = $derived(
-    JSON.stringify(
-      { mcpServers: { flare: { type: 'http', url: mcpUrl, headers: { Authorization: `Bearer ${mcpKey}` } } } },
-      null,
-      2
-    )
-  );
-
   $effect(() => {
     if (session.loaded && !session.user) goto('/login', { replaceState: true });
   });
@@ -170,7 +155,6 @@
   onMount(load);
 
   async function load() {
-    mcpUrl = `${location.origin}/api/mcp`;
     const oauthResult = new URLSearchParams(location.search).get('hubspot');
     hubspotOAuthResult = oauthResult === 'connected' ? 'HubSpot account connected.' : oauthResult === 'moved' ? 'HubSpot account connected to the selected project.' : oauthResult ? 'HubSpot connection could not be completed. Please try again or ask an administrator to review the configuration.' : null;
     try {
@@ -287,14 +271,6 @@
     await navigator.clipboard.writeText(oidc.redirect_uri);
     copiedRedirect = true;
     setTimeout(() => (copiedRedirect = false), 1500);
-  }
-
-  async function copyMcp(text: string, id: string) {
-    await navigator.clipboard.writeText(text);
-    copiedMcp = id;
-    setTimeout(() => {
-      if (copiedMcp === id) copiedMcp = null;
-    }, 1500);
   }
 
   async function saveAi(e: SubmitEvent) {
@@ -472,6 +448,8 @@
           name: k.name,
           prefix: k.prefix,
           role: k.role,
+          purpose: k.purpose,
+          expires_at: k.expires_at,
           created_by: session.user?.email ?? '',
           created_at: new Date().toISOString(),
           last_used_at: null
@@ -494,7 +472,7 @@
     try {
       const config =
         type === 'automation_webhook'
-          ? { url, signing_secret: automationSigningSecret }
+          ? { url, signing_secret: automationSigningSecret, receipt_mode: automationReceiptMode }
           : type === 'webhook'
           ? { url }
           : type === 'email'
@@ -506,6 +484,7 @@
       channels = [ch, ...(channels ?? [])];
       url = '';
       automationSigningSecret = '';
+      automationReceiptMode = 'http';
       emailTo = '';
       slackUrl = '';
     } catch (err) {
@@ -617,6 +596,23 @@
         placeholder="16–256 printable characters"
         class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
       />
+      <label for="automationreceiptmode" class="mt-1 text-xs font-medium text-zinc-400">Delivery acknowledgement</label>
+      <select
+        id="automationreceiptmode"
+        bind:value={automationReceiptMode}
+        aria-describedby="automationreceipthelp"
+        class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60"
+      >
+        <option value="http">Generic HTTP delivery (default)</option>
+        <option value="reactor-v1">Reactor enqueue acknowledgement</option>
+      </select>
+      <span id="automationreceipthelp" class="text-xs text-zinc-500">
+        {#if automationReceiptMode === 'reactor-v1'}
+          Confirms that Reactor enqueued a run, not that AI or a fix succeeded. Signed tests check the connection without dispatching a run.
+        {:else}
+          A successful HTTP response confirms delivery only. Choose Reactor for a validated run acknowledgement.
+        {/if}
+      </span>
       <span class="text-xs text-zinc-600">Receives signed, payload-free notices. The worker fetches evidence and keeps approval and execution in its own guarded workflow.</span>
     </div>
   {:else if type === 'webhook'}
@@ -827,9 +823,9 @@
   </div>
 {/if}
 
-{#if apiKeys && apiKeys.length}
+{#if apiKeys && apiKeys.some((key) => key.purpose !== 'mcp')}
   <ul class="divide-y divide-zinc-800/60">
-    {#each apiKeys as k (k.id)}
+    {#each apiKeys.filter((key) => key.purpose !== 'mcp') as k (k.id)}
       <li class="flex items-center gap-3 py-3">
         <span class="text-sm font-medium text-zinc-200">{k.name}</span>
         <span class="font-mono text-xs text-zinc-500">{k.prefix}...</span>
@@ -866,51 +862,7 @@
   <p class="text-sm text-zinc-500">No keys yet.</p>
 {/if}
 
-<h2 class="mt-14 text-xl font-semibold tracking-tight">AI operator (MCP)</h2>
-<p class="mt-1 mb-6 max-w-2xl text-sm text-zinc-500">
-  Flare speaks the
-  <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" class="text-amber-400 transition-colors hover:text-amber-300">Model Context Protocol</a>,
-  so an AI client (Claude Code, Cursor, and others) can investigate and act on your errors directly:
-  pull an overview, read a stack trace, search logs, run AI triage, and resolve issues. Reads work for any
-  member; the two write tools (resolve and triage) need a member key. It authenticates with an org API key,
-  created above, and stays scoped to this workspace.
-</p>
-
-<div class="mb-4">
-  <div class="mb-1.5 text-xs font-medium text-zinc-400">Endpoint</div>
-  <div class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-    <code class="flex-1 truncate font-mono text-[12px] text-zinc-300">{mcpUrl}</code>
-    <button
-      onclick={() => copyMcp(mcpUrl, 'url')}
-      class="shrink-0 rounded-md border border-zinc-800 px-2 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
-    >
-      {copiedMcp === 'url' ? 'Copied' : 'Copy'}
-    </button>
-  </div>
-</div>
-
-<div class="mb-4">
-  <div class="mb-1.5 flex items-center gap-2">
-    <span class="text-xs font-medium text-zinc-400">Connect Claude Code</span>
-    <button
-      onclick={() => copyMcp(mcpCommand, 'cmd')}
-      class="rounded-md border border-zinc-800 px-2 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200"
-    >
-      {copiedMcp === 'cmd' ? 'Copied' : 'Copy'}
-    </button>
-  </div>
-  <pre class="overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-zinc-300">{mcpCommand}</pre>
-  {#if newKey}
-    <p class="mt-1.5 text-sm text-amber-200/80">Your new key is filled in above. Run this in your terminal, then restart the client. The key is shown only once.</p>
-  {:else}
-    <p class="mt-1.5 text-xs text-zinc-600">Create a key above and it drops into this command automatically. Run it in your terminal, then restart the client.</p>
-  {/if}
-</div>
-
-<details class="mb-2">
-  <summary class="cursor-pointer text-xs text-zinc-500 transition-colors hover:text-zinc-300">Other MCP clients (raw config)</summary>
-  <pre class="mt-2 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2.5 font-mono text-[12px] leading-relaxed text-zinc-400">{mcpJsonConfig}</pre>
-</details>
+<MCPConnection bind:keys={apiKeys} />
 
 {#if isAdmin}
   <h2 class="mt-14 text-xl font-semibold tracking-tight">GitHub</h2>

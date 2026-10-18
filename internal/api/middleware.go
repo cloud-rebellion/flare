@@ -172,58 +172,73 @@ func (s *Server) establishSession(ctx context.Context, userID, orgID string) {
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-
-		// Session: re-read the user row so a removed user is rejected and a
-		// role change takes effect on the next request (no stale session role).
+		// An explicitly supplied credential is authoritative. A valid ambient
+		// session must never replace an invalid, narrower or foreign bearer.
+		if headers := r.Header.Values("Authorization"); len(headers) > 0 {
+			key := bearerToken(r)
+			if len(headers) != 1 || key == "" || len(key) > 256 {
+				s.authenticationRequired(w)
+				return
+			}
+			ak, err := s.q.GetAPIKeyByHash(ctx, auth.HashAPIKey(key))
+			if err != nil || (ak.ExpiresAt.Valid && !ak.ExpiresAt.Time.After(time.Now())) {
+				s.authenticationRequired(w)
+				return
+			}
+			if ak.Purpose != "api" && !(ak.Purpose == "mcp" && r.URL.Path == mcpEndpoint) {
+				writeErr(w, http.StatusForbidden, "credential is not valid for this API surface")
+				return
+			}
+			// Fail closed even if a malformed stored MCP row bypassed the
+			// database expiry constraint. Legacy API keys may remain unlimited.
+			if ak.Purpose == "mcp" && !ak.ExpiresAt.Valid {
+				s.authenticationRequired(w)
+				return
+			}
+			_ = s.q.TouchAPIKey(ctx, ak.ID)
+			ctx = context.WithValue(ctx, ctxUserID, "")
+			ctx = context.WithValue(ctx, ctxOrgID, ak.OrgID)
+			ctx = context.WithValue(ctx, ctxRole, apiKeyRole(ak.Role))
+			ctx = context.WithValue(ctx, ctxAuthSource, "api_key")
+			ctx = context.WithValue(ctx, ctxCredentialID, ak.ID)
+			ctx = context.WithValue(ctx, ctxCredentialPurpose, ak.Purpose)
+			if ak.ExpiresAt.Valid {
+				ctx = context.WithValue(ctx, ctxCredentialExpiry, ak.ExpiresAt.Time)
+			}
+			s.recordUsage(ctx, usageDelta{
+				OrgID: ak.OrgID, CredentialID: ak.ID,
+				Surface: "api_key", Operation: apiKeyUsageOperation(r), Requests: 1,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		// Cookie-only browser sessions retain their independent CSRF gate.
+		// Re-read the user so removal, role and password-reset changes apply.
 		if uid := s.sessions.GetString(ctx, "user_id"); uid != "" {
 			if user, err := s.q.GetUserByID(ctx, uid); err == nil {
-				// Revoke sessions established before the user's
-				// sessions_valid_from (bumped on password reset). Sessions with
-				// no epoch (created before this feature) are left alone.
 				epoch := s.sessions.GetInt64(ctx, "auth_epoch")
 				if epoch > 0 && user.SessionsValidFrom.Valid && user.SessionsValidFrom.Time.Unix() > epoch {
 					_ = s.sessions.Destroy(ctx)
-					writeErr(w, http.StatusUnauthorized, "session expired, please sign in again")
+					s.authenticationRequired(w)
 					return
 				}
 				ctx = context.WithValue(ctx, ctxUserID, user.ID)
 				ctx = context.WithValue(ctx, ctxOrgID, user.OrgID)
 				ctx = context.WithValue(ctx, ctxRole, user.Role)
 				ctx = context.WithValue(ctx, ctxAuthSource, "session")
+				ctx = context.WithValue(ctx, ctxCredentialPurpose, "session")
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 		}
-
-		// API key: org-scoped programmatic access (provisioning, source-map
-		// upload, ingest). Carries the role stored ON THE KEY, never team
-		// management.
-		//
-		// This used to stamp "member" for every key, so a token minted for a
-		// read-only integration could DELETE a project and all its telemetry.
-		// The role now comes from the key itself, and anything that is not an
-		// explicitly mintable key role is clamped to read-only: a key must
-		// never be able to escalate past member even if the column is somehow
-		// written with "owner" or "admin".
-		if key := bearerToken(r); key != "" {
-			ak, err := s.q.GetAPIKeyByHash(ctx, auth.HashAPIKey(key))
-			if err == nil && (!ak.ExpiresAt.Valid || ak.ExpiresAt.Time.After(time.Now())) {
-				_ = s.q.TouchAPIKey(ctx, ak.ID)
-				ctx = context.WithValue(ctx, ctxOrgID, ak.OrgID)
-				ctx = context.WithValue(ctx, ctxRole, apiKeyRole(ak.Role))
-				ctx = context.WithValue(ctx, ctxAuthSource, "api_key")
-				ctx = context.WithValue(ctx, ctxCredentialID, ak.ID)
-				s.recordUsage(ctx, usageDelta{
-					OrgID: ak.OrgID, CredentialID: ak.ID,
-					Surface: "api_key", Operation: apiKeyUsageOperation(r), Requests: 1,
-				})
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-		}
-
-		writeErr(w, http.StatusUnauthorized, "authentication required")
+		s.authenticationRequired(w)
 	})
+}
+
+func (s *Server) authenticationRequired(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("WWW-Authenticate", `Bearer realm="flare"`)
+	writeErr(w, http.StatusUnauthorized, "authentication required")
 }
 
 // requireRole returns middleware that rejects callers below min in the role

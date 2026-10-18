@@ -7,6 +7,7 @@
     { key: 'metrics', path: '/metrics', label: 'Metrics' },
     { key: 'business', path: '/business-health', label: 'Business' },
     { key: 'sdk-loss', path: '/sdk-loss', label: 'SDK loss' },
+    { key: 'automation', path: '/automation', label: 'Automation' },
     { key: 'releases', path: '/releases', label: 'Releases' }
   ];
 </script>

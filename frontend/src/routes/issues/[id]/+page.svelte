@@ -127,6 +127,7 @@
       {/if}
     </div>
     <div class="flex flex-wrap gap-2">
+      <a href={`/projects/${encodeURIComponent(issue.project_id)}/automation?issue_id=${encodeURIComponent(issue.id)}`} class="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800">Automation history</a>
       {#if issue.github_url}
         <a href={issue.github_url} target="_blank" rel="noopener" class="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 active:translate-y-px">GitHub issue &#8599;</a>
       {:else if canWrite}

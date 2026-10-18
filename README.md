@@ -20,7 +20,7 @@ pluggable `Store` interface.
 - **Analytics**: DuckDB rollups over the telemetry tables.
 - **Multi-project**: orgs, projects, per-project DSNs and API keys, tenant-scoped
   throughout and enforced by a source-parsing CI guard.
-- **MCP**: an agent API so an assistant can read and triage issues.
+- **MCP**: a remote HTTP agent API so an assistant can read and triage issues. [Connect securely](docs/MCP_CONNECTION.md) with a dedicated workspace token.
 
 For endpoint setup, health semantics, provider-specific signals, and known
 monitoring limits, see [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).

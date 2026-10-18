@@ -292,12 +292,15 @@ export interface TraceSummary {
 }
 
 export type ApiKeyRole = 'viewer' | 'member';
+export type ApiKeyPurpose = 'api' | 'mcp';
 
 export interface ApiKey {
   id: string;
   name: string;
   prefix: string;
   role: ApiKeyRole;
+  purpose: ApiKeyPurpose;
+  expires_at: string | null;
   /** Email of the user who minted it. Empty for keys created before the
    *  creator column existed, which a password reset will NOT revoke. */
   created_by: string;
@@ -310,6 +313,8 @@ export interface ApiKeyCreated {
   name: string;
   prefix: string;
   role: ApiKeyRole;
+  purpose: ApiKeyPurpose;
+  expires_at: string | null;
   key: string;
 }
 
@@ -356,6 +361,28 @@ export interface Channel {
   /** Projects this channel is routed to. EMPTY MEANS ALL PROJECTS, which is
    *  both the default and the behaviour before routing existed. */
   project_ids: string[];
+}
+
+export interface AutomationDeliveryReceipt {
+  notice_id: string;
+  channel_id?: string;
+  issue_id: string;
+  event: string;
+  event_count: number;
+  observed_at: string;
+  state: 'pending' | 'leased' | 'delivered' | 'dead' | 'cancelled';
+  attempts: number;
+  acknowledgement: 'unrecorded' | 'http_delivery' | 'receiver_enqueued' | 'test_noop';
+  http_status?: number;
+  request_sha256?: string;
+  receiver_run_id?: string;
+  receiver_deduped?: boolean;
+  acknowledged_at?: string;
+}
+
+export interface AutomationDeliveryPage {
+  items: AutomationDeliveryReceipt[];
+  next_cursor?: string;
 }
 
 export interface Monitor {

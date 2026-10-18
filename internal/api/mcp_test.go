@@ -93,16 +93,27 @@ func TestMCPToolsList(t *testing.T) {
 	for _, tl := range got.Tools {
 		names[tl.Name] = true
 	}
-	for _, want := range []string{"overview", "list_projects", "list_issues", "get_issue", "search_logs", "update_issue_status", "triage_issue"} {
+	for _, want := range []string{"get_capabilities", "overview", "list_projects", "list_issues", "get_issue", "search_logs"} {
 		if !names[want] {
 			t.Errorf("tools/list missing %q (got %v)", want, names)
 		}
+	}
+	if names["update_issue_status"] || names["triage_issue"] {
+		t.Fatal("viewer catalog advertised write tools")
 	}
 }
 
 // A viewer credential must be refused a write tool before dispatch, mirroring
 // the REST member+ gate. This runs the gate without a DB because the denial
 // short-circuits before the handler.
+func TestMCPMemberCatalogIncludesWriteTools(t *testing.T) {
+	resp := callMCP(t, "org1", "member", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	raw, _ := json.Marshal(resp.Result)
+	if !strings.Contains(string(raw), `"update_issue_status"`) || !strings.Contains(string(raw), `"triage_issue"`) {
+		t.Fatal("explicit member authority lost its write catalog")
+	}
+}
+
 func TestMCPWriteGateDeniesViewer(t *testing.T) {
 	resp := callMCP(t, "org1", "viewer", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"update_issue_status","arguments":{"issue_id":"x","status":"resolved"}}}`)
 	if resp.Error != nil {
@@ -144,8 +155,8 @@ func TestMCPUnknownTool(t *testing.T) {
 func TestMCPNotificationNoContent(t *testing.T) {
 	w := httptest.NewRecorder()
 	(&Server{}).mcpHandler().ServeHTTP(w, authedReq(t, "org1", "member", `{"jsonrpc":"2.0","method":"initialized"}`))
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("notification should be 204, got %d", w.Code)
+	if w.Code != http.StatusAccepted || w.Body.Len() != 0 {
+		t.Fatalf("notification should be empty202, got %d", w.Code)
 	}
 }
 

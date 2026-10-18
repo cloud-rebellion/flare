@@ -63,6 +63,12 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
   -H "Authorization: Bearer $FLARE_API_KEY" \\
   -H 'Content-Type: application/json' \\
   -d '{"version": "1.4.2"}'`;
+
+  const mcpSnippet = `[mcp_servers.flare]
+url = "https://your-flare-host/api/mcp"
+bearer_token_env_var = "FLARE_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 60`;
 </script>
 
 <article class="prose-flare max-w-none">
@@ -142,6 +148,26 @@ curl -X POST "https://your-flare-host/api/<project-id>/releases" \\
     <code class="font-mono text-zinc-400">release_freshness</code> alert to page when that heartbeat is overdue.
     For releases with multiple workers, use <code class="font-mono text-zinc-400">service_freshness</code> with the
     exact service name and release so one healthy worker cannot hide another stopped worker.
+  </p>
+
+  <h2 id="mcp" class="mt-10 scroll-mt-20 text-lg font-semibold tracking-tight">Connect an AI over HTTP MCP</h2>
+  <p class="mt-1 text-sm leading-relaxed text-zinc-400">
+    Open <a href="/settings#mcp" class="text-amber-400 hover:text-amber-300">Settings → Connect your AI to Flare</a>.
+    A workspace administrator can create a dedicated MCP token, choose read-only or read and triage access,
+    set its expiry, and test it. Tokens cover the workspace's projects and expire within 90 days.
+    They cannot authenticate to the management REST API.
+  </p>
+  <p class="mt-3 text-sm leading-relaxed text-zinc-500">
+    For Codex, keep the token in the environment that launches the client and reference its variable name below.
+    Other clients can use the same HTTPS endpoint with Streamable HTTP and a Bearer credential in their secret storage.
+    Keep token values out of configuration examples, repositories, browser bundles, and chat.
+  </p>
+  <pre class="mt-3 overflow-x-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] leading-relaxed text-zinc-300">{mcpSnippet}</pre>
+  <p class="mt-2 text-xs leading-relaxed text-zinc-500">
+    After connecting, call <code class="font-mono text-zinc-400">get_capabilities</code> to check the resolved workspace,
+    role, and allowed tools. Start investigating with <code class="font-mono text-zinc-400">overview</code>.
+    An existing client process may need to reconnect from the correct environment. This flow uses workspace tokens;
+    browser OAuth authorization is not available here.
   </p>
 
   <h2 class="mt-10 text-lg font-semibold tracking-tight">Everything else</h2>

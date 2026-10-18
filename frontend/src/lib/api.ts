@@ -4,11 +4,13 @@ import type {
   ApiKey,
   ApiKeyCreated,
   ApiKeyRole,
+  ApiKeyPurpose,
   PartialErasure,
   Artifact,
   AiConfig,
   AuditEntry,
   Channel,
+  AutomationDeliveryPage,
   GithubConfig,
   Invite,
   Member,
@@ -177,6 +179,12 @@ export const api = {
   project: (id: string) => req<Project>('GET', `/projects/${id}`),
   sdkDiscards: (id: string, hours = 24) =>
     req<SdkDiscards>('GET', `/projects/${id}/sdk-discards?hours=${hours}`),
+  automationDeliveries: (id: string, opts?: { issueId?: string; cursor?: string }) => {
+    const params = new URLSearchParams({ limit: '25' });
+    if (opts?.issueId) params.set('issue_id', opts.issueId);
+    if (opts?.cursor) params.set('cursor', opts.cursor);
+    return req<AutomationDeliveryPage>('GET', `/projects/${encodeURIComponent(id)}/automation-deliveries?${params}`);
+  },
   // Resolves a provisioner deep-link's numeric DSN id behind the session, so
   // /go/<dsnID> is no longer an unauthenticated existence oracle.
   projectByDsnID: (dsnID: string) => req<Project>('GET', `/projects/by-dsn/${dsnID}`),
@@ -279,8 +287,8 @@ export const api = {
   trace: (pid: string, traceID: string) => req<Span[]>('GET', `/projects/${pid}/traces/${traceID}`),
 
   apiKeys: () => req<ApiKey[]>('GET', '/keys'),
-  createApiKey: (name: string, role: ApiKeyRole = 'viewer') =>
-    req<ApiKeyCreated>('POST', '/keys', { name, role }),
+  createApiKey: (name: string, role: ApiKeyRole = 'viewer', options: { purpose?: ApiKeyPurpose; expires_in_days?: number } = {}) =>
+    req<ApiKeyCreated>('POST', '/keys', { name, role, ...options }),
   deleteApiKey: (id: string) => req<void>('DELETE', `/keys/${id}`),
 
   channels: () => req<Channel[]>('GET', '/channels'),

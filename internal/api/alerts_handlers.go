@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/alerts"
+	"github.com/bright-interaction/flare/internal/automationdelivery"
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
 	"github.com/bright-interaction/flare/internal/netguard"
@@ -212,6 +213,10 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		}
 		if json.Unmarshal(req.Config, &cfg) != nil || strings.TrimSpace(cfg.URL) == "" || strings.TrimSpace(cfg.SigningSecret) == "" {
 			writeErr(w, http.StatusBadRequest, "automation_webhook requires config.url and config.signing_secret")
+			return
+		}
+		if _, err := automationdelivery.ConfiguredMode(req.Config); err != nil {
+			writeErr(w, http.StatusBadRequest, "automation_webhook receipt_mode must be http or reactor-v1")
 			return
 		}
 		if err := netguard.ValidatePublicURL(strings.TrimSpace(cfg.URL)); err != nil {

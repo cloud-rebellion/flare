@@ -63,6 +63,8 @@ spec:
               value: "8080"
             - name: BASE_URL
               value: {{ .Values.baseURL | quote }}
+            - name: FLARE_MCP_ALLOWED_ORIGINS
+              value: {{ join "," .Values.mcpAllowedOrigins | quote }}
             {{- if .Values.hubspotOAuth.clientID }}
             - name: FLARE_HUBSPOT_OAUTH_CLIENT_ID
               value: {{ .Values.hubspotOAuth.clientID | quote }}

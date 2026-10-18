@@ -15,7 +15,8 @@ Settings page):
   "type": "automation_webhook",
   "config": {
     "url": "https://worker.example.com/flare",
-    "signing_secret": "a-random-secret-at-least-16-bytes"
+    "signing_secret": "a-random-secret-at-least-16-bytes",
+    "receipt_mode": "http"
   }
 }
 ```
@@ -25,6 +26,66 @@ metadata, and other blocked destinations are rejected at creation and the
 delivery client checks the resolved address again. The signing secret must be
 16–256 printable bytes. Both values are encrypted at rest and redacted from
 channel responses and delivery errors.
+
+For a reviewed Reactor `flare-v1` trigger, use its provider-bound public HTTPS
+`/webhook/flare/{token}` URL and explicitly choose `"receipt_mode":"reactor-v1"`.
+The omitted/default `http` mode preserves generic automation receiver
+compatibility: any HTTP 2xx is delivery only and asserts no receiver run. An
+unknown or null mode is rejected before sending. No existing channel is
+automatically upgraded to Reactor receipt mode.
+
+## Durable receiver acknowledgement
+
+Reactor mode requires one `application/json` response of at most 2,048 bytes.
+A real notice must return exactly
+`{"accepted":true,"deduped":false,"run_id":"run_0123456789abcdef"}`;
+`deduped:true` acknowledges the same previously accepted notice. The run ID
+must be a nonempty bounded identifier, never a URL. A signed `test` instead
+requires exactly `{"accepted":true,"test":true,"dispatched":false}` and must
+not assert a run. Unknown/duplicate/null fields, missing run IDs, telemetry,
+oversized responses, HTML success pages, redirects and malformed JSON fail the
+delivery attempt and follow the existing bounded retry policy. Response bodies,
+headers, URLs, credentials and provider/issue text are never stored.
+
+The outbox worker commits only a small acknowledgement together with the
+delivered state under the same current, unexpired lease. It binds the receipt
+to the original notice's scope, fields and exact signed-body SHA-256. A stale
+worker cannot publish or overwrite it. If Flare loses its database connection
+after Reactor enqueued a run, the same stable body is retried; Reactor dedupes
+it and Flare can commit that run acknowledgement on the new lease.
+
+Authenticated viewers can read an exact original notice at
+`GET /api/projects/{id}/automation-deliveries/{noticeID}`. Its
+`acknowledgement` is one of:
+
+- `unrecorded`: no receiver proof, including historical deliveries.
+- `http_delivery`: HTTP 2xx only; no run or execution assertion.
+- `receiver_enqueued`: the configured Reactor receiver acknowledged a run ID.
+- `test_noop`: the receiver acknowledged a signed test without dispatch.
+
+Discover notice IDs through
+`GET /api/projects/{id}/automation-deliveries?limit=25&issue_id=<optional-id>`.
+The response is `{"items":[...],"next_cursor":"..."}` with the same bounded
+projection. Pages use newest-first `created_at`/ID ordering; pass the opaque
+`next_cursor` back as `cursor` to load older notices. The cursor is bound to
+the organization, project and exact issue filter. Changing that scope requires
+starting a fresh page. `limit` defaults to 25 and must be 1–100; invalid limits,
+oversized filters and malformed/foreign cursors return 400. An empty page has
+`"items":[]`; the cursor is omitted when there are no older results.
+
+The response contains bounded notice metadata, HTTP status, request digest,
+database acknowledgement time and optional receiver run ID/deduplication flag.
+It remains readable after channel deletion and is scoped by organization and
+project. Receiver enqueue acknowledgement is separate from fresh AI evidence,
+successful workflow execution, human approval, a completed fix, exact CI,
+deployment and synthetic verification. Those later receipts are still required.
+
+The v0.6.0 candidate adds this projection in migration
+`089_automation_delivery_acknowledgements.sql`, a separate release after
+v0.5.0/schema 088. Historical delivery rows are not backfilled with inferred
+receiver proof. The candidate still needs exact CI and managed release gates.
+The current Stage deployment recipe pins v0.5.0 and requires an explicitly
+reviewed version-resolution update before a v0.6.0 rollout.
 
 ## Delivery contract
 

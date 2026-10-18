@@ -72,6 +72,10 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 		// Business assertions can drive operator alerts. Their confidential
 		// project key and limiter are separate from the public browser DSN.
 		r.With(s.rateLimitBusinessCheck).Post("/{projectID}/business-checks", s.handleBusinessCheck)
+		// Native MCP clients use explicit bearer identity; browser-only calls
+		// retain CSRF. Keep authentication discovery outside the blanket CSRF
+		// group so an anonymous client receives its actual 401 challenge.
+		r.With(s.mcpTransport(csrfMW), s.requireAuth, s.rateLimitMCP).Handle("/mcp", s.mcpHandler())
 
 		r.Group(func(r chi.Router) {
 			r.Use(ccsrf)
@@ -90,12 +94,6 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireAuth)
 
-				// MCP: one JSON-RPC endpoint for an AI operator (Claude). Same
-				// auth as the REST API (session or org API key); write tools
-				// self-gate to member+ inside the handler; per-org rate limited.
-				// POST-only.
-				r.With(s.rateLimitMCP).Handle("/mcp", s.mcpHandler())
-
 				// Changing your own password is available to EVERY authenticated
 				// role, including viewer. It is an account action, not a
 				// workspace one, and gating it behind a role would leave the
@@ -105,6 +103,7 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Post("/auth/password", s.handleChangePassword)
 
 				// Reads: any authenticated role (viewer+).
+				r.Get("/mcp/status", s.handleMCPStatus)
 				r.Get("/overview", s.handleOverview)
 				r.Get("/projects", s.handleListProjects)
 				r.Get("/connectors/hubspot/availability", s.handleHubSpotOAuthAvailability)
@@ -139,6 +138,8 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 				r.Get("/projects/{id}/sdk-discards", s.handleListSDKDiscards)
 				r.Get("/projects/{id}/ai-receipts", s.handleListAIActionReceipts)
 				r.Get("/projects/{id}/ai-receipts/{receiptID}", s.handleGetAIActionReceipt)
+				r.Get("/projects/{id}/automation-deliveries", s.handleListAutomationDeliveryReceipts)
+				r.Get("/projects/{id}/automation-deliveries/{noticeID}", s.handleGetAutomationDeliveryReceipt)
 				r.Get("/projects/{id}/automation-receipts", s.handleListAutomationReceipts)
 				r.Get("/projects/{id}/automation-verification", s.handleGetAutomationVerification)
 				r.Get("/projects/{id}/automation-next", s.handleGetAutomationNext)

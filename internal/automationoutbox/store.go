@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bright-interaction/flare/internal/automationdelivery"
 	"github.com/bright-interaction/flare/internal/id"
 )
 
@@ -177,7 +178,19 @@ WHERE c.id=$3 AND c.org_id=$1 AND c.type='automation_webhook' AND c.enabled
 
 // Finish succeeds only for the current, unexpired lease. An old worker can
 // have sent a duplicate after expiry, but cannot overwrite a newer outcome.
-func (s *Store) Finish(ctx context.Context, n Notice, delivered bool, cancelled bool) error {
+func (s *Store) Finish(ctx context.Context, n Notice, delivered bool, cancelled bool, ack *automationdelivery.Acknowledgement) error {
+	mode, runID, digest := "", "", ""
+	var httpStatus any
+	var deduped *bool
+	if delivered {
+		body, err := automationdelivery.NoticeBody(n.ProjectID, n.IssueID, n.Event, n.EventCount, n.ObservedAt)
+		if cancelled || err != nil || ack == nil || !ack.Valid(n.Event, automationdelivery.Digest(body)) {
+			return automationdelivery.ErrReceipt
+		}
+		mode, runID, digest, httpStatus, deduped = ack.Mode, ack.RunID, ack.RequestSHA256, ack.HTTPStatus, ack.Deduped
+	} else if ack != nil {
+		return automationdelivery.ErrReceipt
+	}
 	state := "pending"
 	code := "delivery_failed"
 	if delivered {
@@ -193,10 +206,15 @@ UPDATE automation_alert_outbox
 SET state=$5, last_error_code=$6, lease_token='', leased_until=NULL,
     delivered_at=CASE WHEN $7::boolean THEN now() ELSE delivered_at END,
     next_attempt_at=CASE WHEN $5='pending' THEN now()+($8::bigint * interval '1 microsecond') ELSE next_attempt_at END,
+    receiver_mode=$9, receiver_http_status=$10, receiver_run_id=$11,
+    receiver_request_sha256=$12, receiver_deduped=$13,
+    receiver_acknowledged_at=CASE WHEN $7::boolean THEN now() ELSE NULL END,
     updated_at=now()
 WHERE id=$1 AND org_id=$2 AND project_id=$3 AND lease_token=$4
-  AND state='leased' AND leased_until > now()`,
-		n.ID, n.OrgID, n.ProjectID, n.LeaseToken, state, code, delivered, backoff.Microseconds())
+  AND state='leased' AND leased_until > now()
+  AND issue_id=$14 AND event=$15 AND event_count=$16 AND observed_at=$17`,
+		n.ID, n.OrgID, n.ProjectID, n.LeaseToken, state, code, delivered, backoff.Microseconds(),
+		mode, httpStatus, runID, digest, deduped, n.IssueID, n.Event, n.EventCount, n.ObservedAt)
 	if err != nil {
 		return fmt.Errorf("finish automation notice: %w", err)
 	}
@@ -204,6 +222,53 @@ WHERE id=$1 AND org_id=$2 AND project_id=$3 AND lease_token=$4
 		return ErrStaleLease
 	}
 	return nil
+}
+
+// DeliveryReceipt is a bounded read of original notice identity and delivery
+// acknowledgement. No lease, destination, credential or receiver text is read.
+type DeliveryReceipt struct {
+	NoticeID        string     `json:"notice_id"`
+	ChannelID       *string    `json:"channel_id,omitempty"`
+	IssueID         string     `json:"issue_id"`
+	Event           string     `json:"event"`
+	EventCount      int64      `json:"event_count"`
+	ObservedAt      time.Time  `json:"observed_at"`
+	State           string     `json:"state"`
+	Attempts        int        `json:"attempts"`
+	Acknowledgement string     `json:"acknowledgement"`
+	HTTPStatus      *int       `json:"http_status,omitempty"`
+	RequestSHA256   string     `json:"request_sha256,omitempty"`
+	ReceiverRunID   string     `json:"receiver_run_id,omitempty"`
+	ReceiverDeduped *bool      `json:"receiver_deduped,omitempty"`
+	AcknowledgedAt  *time.Time `json:"acknowledged_at,omitempty"`
+}
+
+func (s *Store) GetDeliveryReceipt(ctx context.Context, orgID, projectID, noticeID string) (DeliveryReceipt, error) {
+	return scanDeliveryReceipt(s.pool.QueryRow(ctx, `SELECT id,channel_id,issue_id,event,event_count,observed_at,state,attempts,
+        receiver_mode,receiver_http_status,receiver_request_sha256,receiver_run_id,receiver_deduped,receiver_acknowledged_at
+        FROM automation_alert_outbox WHERE org_id=$1 AND project_id=$2 AND id=$3`, orgID, projectID, noticeID))
+}
+
+func scanDeliveryReceipt(row interface{ Scan(...any) error }, extra ...any) (DeliveryReceipt, error) {
+	var r DeliveryReceipt
+	var mode string
+	fields := []any{
+		&r.NoticeID, &r.ChannelID, &r.IssueID, &r.Event, &r.EventCount, &r.ObservedAt, &r.State, &r.Attempts,
+		&mode, &r.HTTPStatus, &r.RequestSHA256, &r.ReceiverRunID, &r.ReceiverDeduped, &r.AcknowledgedAt}
+	if err := row.Scan(append(fields, extra...)...); err != nil {
+		return r, err
+	}
+	r.Acknowledgement = "unrecorded"
+	if mode == automationdelivery.HTTP {
+		r.Acknowledgement = "http_delivery"
+	} else if mode == automationdelivery.ReactorV1 {
+		if r.Event == "test" {
+			r.Acknowledgement = "test_noop"
+		} else {
+			r.Acknowledgement = "receiver_enqueued"
+		}
+	}
+	return r, nil
 }
 
 func retryDelay(attempts int) time.Duration {

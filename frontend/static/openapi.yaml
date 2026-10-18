@@ -68,6 +68,77 @@ components:
       type: object
       properties:
         error: { type: string }
+    MCPStatus:
+      type: object
+      additionalProperties: false
+      required: [server_name, release, endpoint, protocol_version, auth_methods, oauth_supported, mcp_token, identity, scope, allowed_tools]
+      properties:
+        server_name: { type: string, const: flare }
+        release: { type: string }
+        endpoint: { type: string, description: Operator-configured canonical MCP endpoint }
+        protocol_version: { type: string }
+        auth_methods: { type: array, items: { type: string, enum: [bearer, session] } }
+        oauth_supported: { type: boolean, const: false }
+        mcp_token:
+          type: object
+          additionalProperties: false
+          properties:
+            purpose: { type: string, const: mcp }
+            default_role: { type: string, const: viewer }
+            default_expires_in_days: { type: integer, const: 30 }
+            max_expires_in_days: { type: integer, const: 90 }
+        identity:
+          type: object
+          additionalProperties: false
+          properties:
+            org_id: { type: string }
+            role: { type: string, enum: [viewer, member, admin, owner] }
+            auth_source: { type: string, enum: [api_key, session] }
+            credential_purpose: { type: string, enum: [api, mcp, session] }
+            expires_at: { type: [string, "null"], format: date-time }
+        scope: { type: string, const: all_projects_in_workspace }
+        allowed_tools: { type: array, maxItems: 32, items: { type: string } }
+    APIKeyMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, name, prefix, role, purpose, expires_at, created_by, created_at, last_used_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        prefix: { type: string }
+        role: { type: string, enum: [viewer, member] }
+        purpose: { type: string, enum: [api, mcp] }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+    AutomationDeliveryReceipt:
+      type: object
+      additionalProperties: false
+      description: Bounded original outbox notice and receiver acknowledgement. receiver_enqueued means the configured Reactor endpoint acknowledged a durable run, not successful AI, workflow completion, human approval, a fix, deployment, or synthetic verification. HTTP-only and historical deliveries assert no receiver run.
+      required: [notice_id, issue_id, event, event_count, observed_at, state, attempts, acknowledgement]
+      properties:
+        notice_id: { type: string, maxLength: 128 }
+        channel_id: { type: string, maxLength: 128, description: Omitted when the original channel was deleted }
+        issue_id: { type: string, maxLength: 128 }
+        event: { type: string, enum: [new_issue, regression, spike, anomaly, silence, monitor_missing, deploy_failure, deploy_acceptance, rollback, connector, release, service, log, usage, ai, alert, test] }
+        event_count: { type: integer, format: int64, minimum: 0, maximum: 1000000000 }
+        observed_at: { type: string, format: date-time }
+        state: { type: string, enum: [pending, leased, delivered, dead, cancelled] }
+        attempts: { type: integer, minimum: 0, maximum: 12 }
+        acknowledgement: { type: string, enum: [unrecorded, http_delivery, receiver_enqueued, test_noop] }
+        http_status: { type: integer, minimum: 200, maximum: 299 }
+        request_sha256: { type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the exact signed notice body, unchanged across retries }
+        receiver_run_id: { type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_.:-]+$', not: { enum: ['.', '..'] }, description: Only present for a validated real Reactor acknowledgement }
+        receiver_deduped: { type: boolean, description: Only present with a real Reactor run acknowledgement }
+        acknowledged_at: { type: string, format: date-time, description: Flare database time when acknowledgement and delivery committed under the same valid lease }
+    AutomationDeliveryReceiptPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/AutomationDeliveryReceipt" } }
+        next_cursor: { type: string, maxLength: 512, description: Opaque newest-first keyset bookmark, bound to the organization, project and issue filter; omitted when exhausted }
     AIActionReceipt:
       type: object
       description: Payload-free metadata for one AI operation; no prompts, completions, credentials, or provider error text.
@@ -1495,6 +1566,43 @@ paths:
               schema: { $ref: "#/components/schemas/AIActionReceipt" }
         "401": { description: Authentication required, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "404": { description: Project or receipt absent or inaccessible, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/projects/{id}/automation-deliveries:
+    get:
+      tags: [Projects]
+      summary: List bounded automation delivery acknowledgements
+      description: Authenticated viewer read scoped to organization and project. Stable newest-first created_at/id keyset pages discover original notice IDs without adding fields to the signed notification. Receiver enqueue acknowledgement asserts no AI, workflow, approval, fix or deployment success. Cursors cannot be reused with another scope or issue filter.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: issue_id, in: query, schema: { type: string, maxLength: 128 }, description: Optional exact issue ID; omit for all project notices }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 512 }, description: Opaque next_cursor from the same organization/project/filter }
+      responses:
+        "200":
+          description: At most limit payload-free delivery projections and optional continuation bookmark
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationDeliveryReceiptPage" }
+        "400": { description: Invalid limit, issue filter, malformed cursor or cursor from another scope, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: Authentication required, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { description: Project absent or inaccessible, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/projects/{id}/automation-deliveries/{noticeID}:
+    get:
+      tags: [Projects]
+      summary: Read one exact automation delivery acknowledgement
+      description: Authenticated viewer read, scoped to both organization and project. The notice remains queryable after its channel is removed. A receiver run acknowledgement proves enqueue only; this endpoint does not query or assert AI execution, a successful workflow, approval, a fix or deployment.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: noticeID, in: path, required: true, schema: { type: string, maxLength: 128 } }
+      responses:
+        "200":
+          description: Exact payload-free delivery outcome and optional bounded receiver acknowledgement
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationDeliveryReceipt" }
+        "401": { description: Authentication required, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { description: Project or notice absent or inaccessible, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/projects/{id}/automation-next:
     get:
       tags: [Projects]
@@ -1846,6 +1954,7 @@ paths:
                   properties:
                     url: { type: string, format: uri, description: "public HTTPS destination; loopback/private/link-local targets are rejected" }
                     signing_secret: { type: string, minLength: 16, maxLength: 256, writeOnly: true, description: "printable HMAC secret for automation_webhook; encrypted at rest" }
+                    receipt_mode: { type: string, enum: [http, reactor-v1], default: http, description: "Omitted/http accepts HTTP 2xx as delivery only. reactor-v1 requires a bounded exact Reactor enqueue or no-op test acknowledgement." }
             examples:
               slack: { value: { type: slack, config: { webhook_url: "https://hooks.slack.com/services/..." } } }
               email: { value: { type: email, config: { to: "alerts@team.com" } } }
@@ -1894,24 +2003,73 @@ paths:
       summary: Export the workspace's structured data (admin)
       security: [{ session: [] }]
       responses: { "200": { description: JSON bundle } }
+  /api/mcp:
+    post:
+      tags: [Projects]
+      summary: Invoke the authenticated workspace MCP endpoint
+      description: >-
+        Stateless Streamable HTTP JSON-RPC endpoint. Dedicated purpose=mcp tokens
+        work here only; legacy purpose=api keys retain compatibility. Explicit
+        Authorization is authoritative, including when cookies are present;
+        invalid credentials never fall back to a session. Cookie-only requests
+        require CSRF. Supplied Origin must match operator-configured origins;
+        native clients may omit it. Viewer catalogs hide write tools and dispatch
+        independently enforces member permission. get_capabilities returns the
+        caller identity/purpose/expiry and allowed tools without secrets. No OAuth
+        authorization server is advertised. GET and DELETE return 405.
+        list_projects has a database/output limit of 500 safe project rows.
+        overview keeps tenant-wide totals/top 8 issues with at most 500 project
+        rows and explicit projects_truncated/project_limit metadata.
+      security: [{ apiKey: [] }, { session: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, description: JSON-RPC 2.0 initialize, ping, tools/list, tools/call or notification; maximum 1 MiB } } }
+      responses:
+        "200": { description: JSON-RPC response with bounded scrubbed result or error }
+        "202": { description: Accepted notification with empty body }
+        "401": { description: Missing, malformed, expired or revoked explicit credential; Bearer challenge }
+        "403": { description: Foreign Origin, invalid credential surface or browser CSRF refusal }
+        "429": { description: Workspace MCP rate limit exceeded }
+  /api/mcp/status:
+    get:
+      tags: [Projects]
+      summary: Read safe MCP setup metadata for the current authenticated identity
+      description: Viewer-safe REST setup read; no token values. A browser-session check does not prove that a newly configured external MCP client connected. Dedicated MCP-only tokens use the get_capabilities tool instead of this REST endpoint.
+      security: [{ apiKey: [] }, { session: [] }]
+      responses:
+        "200": { description: Setup and identity metadata, content: { application/json: { schema: { $ref: "#/components/schemas/MCPStatus" } } } }
+        "401": { description: Authentication required }
+        "403": { description: Dedicated MCP token cannot access REST }
   /api/keys:
     get:
       tags: [Team]
       summary: List API keys
       security: [{ session: [] }]
-      responses: { "200": { description: OK } }
+      responses: { "200": { description: Payload-free key metadata with purpose and expiry; no-store, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/APIKeyMetadata" } } } } } }
     post:
       tags: [Team]
       summary: Create an API key (plaintext shown once)
       description: >-
         role selects what the key may do and defaults to viewer (read-only).
-        member adds writes, including DELETE /api/projects/{id}, which erases a
-        project and all of its telemetry. owner and admin are not mintable as
-        keys: team management and SSO configuration stay interactive.
+        purpose defaults to api for compatibility. api/member adds ordinary REST
+        project writes. Dedicated mcp credentials can access only /api/mcp; their
+        member role permits status updates and AI triage. MCP expiry defaults to
+        30 days and must be 1..90 days (zero also selects the default). API credentials
+        retain their optional expiry. A human administrator session and CSRF are
+        required to mint or revoke credentials; owner/admin cannot be key roles.
+        Response is no-store and the plaintext key is returned once only.
       security: [{ session: [] }]
       requestBody:
-        content: { application/json: { schema: { type: object, properties: { name: { type: string }, role: { type: string, enum: [viewer, member], default: viewer } } } } }
+        content: { application/json: { schema: { type: object, properties: { name: { type: string, maxLength: 128 }, role: { type: string, enum: [viewer, member], default: viewer }, purpose: { type: string, enum: [api, mcp], default: api }, expires_in_days: { type: integer, description: "MCP: omitted/zero defaults to 30, otherwise 1..90. API: omitted/zero has no expiry." } } } } }
       responses: { "201": { description: Created } }
+  /api/keys/{id}:
+    delete:
+      tags: [Team]
+      summary: Revoke an API or dedicated MCP key
+      description: Human administrator session plus CSRF. Organization-scoped deletion revokes subsequent requests without exposing the token.
+      security: [{ session: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { "204": { description: Revoked }, "401": { description: Authentication required }, "403": { description: Human administrator session required }, "404": { description: Key absent or inaccessible } }
   /api/auth/register:
     post:
       tags: [Auth]

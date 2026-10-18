@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bright-interaction/flare/internal/automationdelivery"
 	"github.com/bright-interaction/flare/internal/email"
 	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
@@ -142,6 +145,17 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, ch Channel, n Notification
 	return err
 }
 
+// DispatchAutomationNotice returns the bounded receiver acknowledgement to the
+// durable outbox worker. It never returns raw response bytes or destination data.
+func (d *Dispatcher) DispatchAutomationNotice(ctx context.Context, ch Channel, n Notification) (*automationdelivery.Acknowledgement, error) {
+	if ch.Type != "automation_webhook" {
+		return nil, errors.New("automation delivery requires an automation channel")
+	}
+	ack, err := d.sendWithAcknowledgement(ctx, ch, n)
+	d.record(ctx, ch, err)
+	return ack, err
+}
+
 // send delivers to one channel and returns the delivery error (nil on success),
 // with the destination URL reduced to scheme+host first.
 //
@@ -163,9 +177,21 @@ func (d *Dispatcher) DispatchOne(ctx context.Context, ch Channel, n Notification
 // segment with no key to match on. Dropping everything after the host is what
 // makes this safe.
 func (d *Dispatcher) send(ctx context.Context, ch Channel, n Notification) error {
+	_, err := d.sendWithAcknowledgement(ctx, ch, n)
+	return err
+}
+
+func (d *Dispatcher) sendWithAcknowledgement(ctx context.Context, ch Channel, n Notification) (*automationdelivery.Acknowledgement, error) {
 	startedAt := time.Now().UTC()
 	started := startedAt
-	err := redactDeliveryError(d.deliver(ctx, ch, n))
+	var ack *automationdelivery.Acknowledgement
+	var err error
+	if ch.Type == "automation_webhook" {
+		ack, err = d.automationWebhookWithAcknowledgement(ctx, ch.Config, n)
+	} else {
+		err = d.deliver(ctx, ch, n)
+	}
+	err = redactDeliveryError(err)
 	elapsed := time.Since(started)
 	recordDeliveryMetric(ch, err, elapsed)
 	outcome, statusClass, errorCode := integration.ClassifyError(err)
@@ -178,7 +204,7 @@ func (d *Dispatcher) send(ctx context.Context, ch Channel, n Notification) error
 	if receiptErr != nil {
 		slog.Warn("connector receipt not accepted", "provider", "alerts", "operation", "dispatch", "receipt_status", integration.ReceiptStatus(receiptErr))
 	}
-	return err
+	return ack, err
 }
 
 // recordDeliveryMetric is deliberately process-wide and low-cardinality. The
@@ -240,17 +266,7 @@ func (d *Dispatcher) deliver(ctx context.Context, ch Channel, n Notification) er
 // never issue text, stack traces, telemetry attributes, credentials, or model
 // output. The receiver can use event to decide whether to fetch fresh Flare
 // evidence before taking its own human-gated action.
-type automationWebhookPayload struct {
-	Schema    string `json:"schema"`
-	Event     string `json:"event"`
-	ProjectID string `json:"project_id"`
-	// IssueID is empty for project/service watchdog notifications that are not
-	// associated with a grouped issue. Keeping the field in the fixed schema
-	// lets receivers use one decoder for issue and non-issue alerts.
-	IssueID    string `json:"issue_id"`
-	EventCount int64  `json:"event_count"`
-	ObservedAt string `json:"observed_at"`
-}
+type automationWebhookPayload = automationdelivery.NoticePayload
 
 const (
 	automationWebhookSchema        = "flare.automation.v1"
@@ -306,11 +322,7 @@ func automationWebhookBody(n Notification, observedAt time.Time) ([]byte, error)
 	if event == "" {
 		event = automationWebhookEvent(n.Reason)
 	}
-	return json.Marshal(automationWebhookPayload{
-		Schema: automationWebhookSchema, Event: event,
-		ProjectID: n.ProjectID, IssueID: n.IssueID, EventCount: n.EventCount,
-		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
-	})
+	return automationdelivery.NoticeBody(n.ProjectID, n.IssueID, event, n.EventCount, observedAt)
 }
 
 func automationWebhookSignature(secret, timestamp string, body []byte) string {
@@ -322,12 +334,21 @@ func automationWebhookSignature(secret, timestamp string, body []byte) string {
 }
 
 func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessage, n Notification) error {
+	_, err := d.automationWebhookWithAcknowledgement(ctx, cfgRaw, n)
+	return err
+}
+
+func (d *Dispatcher) automationWebhookWithAcknowledgement(ctx context.Context, cfgRaw json.RawMessage, n Notification) (*automationdelivery.Acknowledgement, error) {
 	var cfg struct {
 		URL           string `json:"url"`
 		SigningSecret string `json:"signing_secret"`
 	}
 	if err := json.Unmarshal(cfgRaw, &cfg); err != nil || cfg.URL == "" || cfg.SigningSecret == "" {
-		return errors.New("automation webhook misconfigured (url and signing_secret are required)")
+		return nil, errors.New("automation webhook misconfigured (url and signing_secret are required)")
+	}
+	mode, err := automationdelivery.ConfiguredMode(cfgRaw)
+	if err != nil {
+		return nil, errors.New("automation webhook receipt_mode must be http or reactor-v1")
 	}
 	now := time.Now().UTC()
 	observedAt := n.ObservedAt
@@ -336,12 +357,12 @@ func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessa
 	}
 	body, err := automationWebhookBody(n, observedAt)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	timestamp := strconv.FormatInt(now.Unix(), 10)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Flare-Automation-Timestamp", timestamp)
@@ -353,13 +374,32 @@ func (d *Dispatcher) automationWebhook(ctx context.Context, cfgRaw json.RawMessa
 	req.Header.Set("X-Flare-Automation-Event", event)
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("automation webhook returned status %d", resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("automation webhook returned status %d", resp.StatusCode)
 	}
-	return nil
+	digest := automationdelivery.Digest(body)
+	if mode == automationdelivery.HTTP {
+		return &automationdelivery.Acknowledgement{Mode: mode, HTTPStatus: resp.StatusCode, RequestSHA256: digest}, nil
+	}
+	contentTypes := resp.Header.Values("Content-Type")
+	if len(contentTypes) != 1 {
+		return nil, automationdelivery.ErrReceipt
+	}
+	mediaType, params, err := mime.ParseMediaType(contentTypes[0])
+	if err != nil || mediaType != "application/json" || len(params) > 1 {
+		return nil, automationdelivery.ErrReceipt
+	}
+	if len(params) == 1 && !strings.EqualFold(params["charset"], "utf-8") {
+		return nil, automationdelivery.ErrReceipt
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, automationdelivery.MaxReceiptBytes+1))
+	if err != nil {
+		return nil, automationdelivery.ErrReceipt
+	}
+	return automationdelivery.ParseReactor(raw, event, resp.StatusCode, digest)
 }
 
 // record persists a delivery outcome when a recorder is wired and the channel

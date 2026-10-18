@@ -2,8 +2,8 @@ apiVersion: v2
 name: flare
 description: Flare - sovereign, self-hostable observability (errors, logs, traces)
 type: application
-version: 0.4.0
-appVersion: "v0.5.0"
+version: 0.6.0
+appVersion: "v0.6.0"
 home: https://github.com/bright-interaction/flare
 sources:
   - https://github.com/bright-interaction/flare

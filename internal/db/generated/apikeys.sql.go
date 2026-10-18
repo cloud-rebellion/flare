@@ -14,7 +14,7 @@ import (
 const createAPIKey = `-- name: CreateAPIKey :one
 INSERT INTO api_keys (id, org_id, name, key_hash, key_prefix, expires_at, role, created_by_user_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, org_id, name, key_hash, key_prefix, created_at, expires_at, last_used_at, role, created_by_user_id
+RETURNING id, org_id, name, key_hash, key_prefix, created_at, expires_at, last_used_at, role, created_by_user_id, purpose
 `
 
 type CreateAPIKeyParams struct {
@@ -51,6 +51,56 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (*Ap
 		&i.LastUsedAt,
 		&i.Role,
 		&i.CreatedByUserID,
+		&i.Purpose,
+	)
+	return &i, err
+}
+
+const createMCPAPIKey = `-- name: CreateMCPAPIKey :one
+INSERT INTO api_keys (id,org_id,name,key_hash,key_prefix,expires_at,role,created_by_user_id,purpose)
+VALUES ($1,$2,$3,$4,$5,
+        now() + ($6::integer * interval '1 day'),
+        $7,$8,'mcp')
+RETURNING id, org_id, name, key_hash, key_prefix, created_at, expires_at, last_used_at, role, created_by_user_id, purpose
+`
+
+type CreateMCPAPIKeyParams struct {
+	ID              string      `json:"id"`
+	OrgID           string      `json:"org_id"`
+	Name            string      `json:"name"`
+	KeyHash         string      `json:"key_hash"`
+	KeyPrefix       string      `json:"key_prefix"`
+	ExpiresInDays   int32       `json:"expires_in_days"`
+	Role            string      `json:"role"`
+	CreatedByUserID pgtype.Text `json:"created_by_user_id"`
+}
+
+// Database time binds expiry and creation atomically despite application clock
+// skew. The existing CreateAPIKey query omits purpose and keeps its API default.
+func (q *Queries) CreateMCPAPIKey(ctx context.Context, arg CreateMCPAPIKeyParams) (*ApiKey, error) {
+	row := q.db.QueryRow(ctx, createMCPAPIKey,
+		arg.ID,
+		arg.OrgID,
+		arg.Name,
+		arg.KeyHash,
+		arg.KeyPrefix,
+		arg.ExpiresInDays,
+		arg.Role,
+		arg.CreatedByUserID,
+	)
+	var i ApiKey
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.KeyHash,
+		&i.KeyPrefix,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.Role,
+		&i.CreatedByUserID,
+		&i.Purpose,
 	)
 	return &i, err
 }
@@ -95,7 +145,7 @@ func (q *Queries) DeleteAPIKeysCreatedBy(ctx context.Context, createdByUserID pg
 }
 
 const getAPIKeyByHash = `-- name: GetAPIKeyByHash :one
-SELECT id, org_id, name, key_hash, key_prefix, created_at, expires_at, last_used_at, role, created_by_user_id FROM api_keys WHERE key_hash = $1
+SELECT id, org_id, name, key_hash, key_prefix, created_at, expires_at, last_used_at, role, created_by_user_id, purpose FROM api_keys WHERE key_hash = $1
 `
 
 // ciguard:allow-unscoped auth path keyed by the secret key_hash; org_id is the result, not the filter
@@ -113,12 +163,13 @@ func (q *Queries) GetAPIKeyByHash(ctx context.Context, keyHash string) (*ApiKey,
 		&i.LastUsedAt,
 		&i.Role,
 		&i.CreatedByUserID,
+		&i.Purpose,
 	)
 	return &i, err
 }
 
 const listAPIKeysByOrg = `-- name: ListAPIKeysByOrg :many
-SELECT k.id, k.org_id, k.name, k.key_hash, k.key_prefix, k.created_at, k.expires_at, k.last_used_at, k.role, k.created_by_user_id, u.email AS created_by_email
+SELECT k.id, k.org_id, k.name, k.key_hash, k.key_prefix, k.created_at, k.expires_at, k.last_used_at, k.role, k.created_by_user_id, k.purpose, u.email AS created_by_email
 FROM api_keys k
 LEFT JOIN users u ON u.id = k.created_by_user_id
 WHERE k.org_id = $1
@@ -136,6 +187,7 @@ type ListAPIKeysByOrgRow struct {
 	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
 	Role            string             `json:"role"`
 	CreatedByUserID pgtype.Text        `json:"created_by_user_id"`
+	Purpose         string             `json:"purpose"`
 	CreatedByEmail  pgtype.Text        `json:"created_by_email"`
 }
 
@@ -163,6 +215,7 @@ func (q *Queries) ListAPIKeysByOrg(ctx context.Context, orgID string) ([]*ListAP
 			&i.LastUsedAt,
 			&i.Role,
 			&i.CreatedByUserID,
+			&i.Purpose,
 			&i.CreatedByEmail,
 		); err != nil {
 			return nil, err

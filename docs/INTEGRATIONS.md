@@ -1390,8 +1390,8 @@ object tier records a pending erasure for operator completion.
 
 `POST /api/mcp` accepts a session or workspace API key and exposes bounded tools
 for overview, projects, issues, logs, metric queries, traces, status changes,
-and triage. It enforces a 120 request/minute and 120 work/minute workspace cap,
-body, batch, and deadline limits, plus role checks for writes. MCP responses
+and triage. It enforces a 120 request/minute workspace cap, a 1 MiB request-body
+limit, bounded per-tool result counts and role checks for writes. MCP responses
 scrub untrusted labels and provider data. The generic `/metrics` endpoint
 includes MCP request status and latency by route. Authenticated viewers can
 query `GET /api/usage?hours=24&limit=100` for durable, tenant-scoped MCP
@@ -1400,6 +1400,47 @@ tool name. The response contains no JSON-RPC body, arguments, session ID, user
 identifier, or model/provider data. Notifications and malformed requests that
 never reach dispatch are not counted as tool calls; use the private route
 metrics and security issue stream for those transport failures.
+
+`list_projects` reads at most 500 safe project rows from the database and
+returns the existing array, ordered newest-created first then ID. It is not a
+complete project count. `overview` keeps tenant-wide totals and top 8 issues,
+but returns at most 500 actionable project rows ordered by unresolved count
+descending then project ID ascending. `projects_truncated` states whether
+there were additional project rows, and `project_limit` is 500. Its joined
+project/count query reads at most 501 rows; REST dashboard queries retain
+their existing complete aggregate behavior. Other MCP result caps are
+200 issues, 20 issue events, 500 logs, 2,000 trace spans and 5,000 metric names.
+Named metric queries summarize at most 5,000 samples.
+
+For native clients, mint a dedicated `purpose:"mcp"` credential through
+`POST /api/keys` using an administrator browser session. Read-only `viewer`
+is the default; `member` explicitly adds issue status changes and AI triage.
+The credential covers all projects in its workspace, not a selected project.
+MCP credentials expire after 30 days by default; `expires_in_days` accepts 1–90
+(omitted or zero selects 30). Only the hash is retained, issuance is `no-store`,
+and the plaintext appears once. Key metadata includes purpose and expiry;
+revocation uses the existing organization-scoped `DELETE /api/keys/{id}`.
+These are workspace service credentials: the creator is attribution, not a
+delegated user binding. Rotate/revoke them deliberately when access changes.
+
+Dedicated MCP credentials are refused on REST, including setup/status reads.
+Legacy `purpose:"api"` keys retain their REST and MCP authority. An explicit
+Authorization header always determines identity; invalid/expired/revoked tokens
+never fall back to an ambient browser session. Cookie-only MCP calls retain
+CSRF. Supplied Origin must match `BASE_URL` or an explicitly configured
+`FLARE_MCP_ALLOWED_ORIGINS` alias; native clients may omit Origin. Requests use
+the exact `/api/mcp` endpoint. Accepted notifications return empty 202; optional
+SSE GET and session DELETE return 405.
+
+`GET /api/mcp/status` is a viewer-safe REST setup read. MCP's
+`get_capabilities` tool returns the same safe server name, deployment release,
+workspace identity, role, credential purpose/expiry and permitted tool names.
+Viewer catalogs hide write tools, with dispatch enforcing the role separately.
+Neither response returns tokens, key hashes, provider data or telemetry.
+A successful browser-session status check proves that browser session only;
+verify `get_capabilities` in the actual external client before calling its
+connection accepted. This release does not implement OAuth authorization or
+the shared browser-consent flow; static bearer support is client-specific.
 
 ### API keys and DSNs
 

@@ -23,6 +23,9 @@ type Config struct {
 	SourceCommit string
 	Port         string
 	BaseURL      string
+	// MCPAllowedOrigins adds explicit browser origins for alternate Flare hosts.
+	// BASE_URL is always the primary MCP origin; this does not enable CORS.
+	MCPAllowedOrigins []string
 
 	DatabaseURL   string
 	DBMaxConns    int32
@@ -169,6 +172,11 @@ func Load() (Config, error) {
 		AllowDropWithoutExport: isTrue(env("FLARE_ALLOW_DROP_WITHOUT_EXPORT", "")),
 	}
 
+	var err error
+	c.MCPAllowedOrigins, err = parseMCPAllowedOrigins(os.Getenv("FLARE_MCP_ALLOWED_ORIGINS"), c.IsProduction())
+	if err != nil {
+		return c, fmt.Errorf("FLARE_MCP_ALLOWED_ORIGINS: %w", err)
+	}
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("DATABASE_URL is required")
 	}

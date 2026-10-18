@@ -1,6 +1,9 @@
 package api
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type ctxKey int
 
@@ -10,6 +13,8 @@ const (
 	ctxRole
 	ctxAuthSource
 	ctxCredentialID
+	ctxCredentialPurpose
+	ctxCredentialExpiry
 )
 
 func userIDFrom(ctx context.Context) string {
@@ -40,6 +45,19 @@ func authSourceFrom(ctx context.Context) string {
 func credentialIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(ctxCredentialID).(string)
 	return v
+}
+
+func credentialPurposeFrom(ctx context.Context) string {
+	v, _ := ctx.Value(ctxCredentialPurpose).(string)
+	return v
+}
+
+func credentialExpiryFrom(ctx context.Context) *time.Time {
+	v, _ := ctx.Value(ctxCredentialExpiry).(time.Time)
+	if v.IsZero() {
+		return nil
+	}
+	return &v
 }
 
 // Role hierarchy. viewer = read-only; member = full project/telemetry writes;
