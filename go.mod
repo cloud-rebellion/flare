@@ -4,11 +4,9 @@ go 1.26.0
 
 // Pinned to the toolchain the container image already builds with. Without this,
 // go.mod permits an older Go and govulncheck reports the standard-library
-// vulnerabilities fixed in 1.26.6 (net/http ReadHeaderTimeout on the unencrypted
-// HTTP/2 check, encoding/xml and encoding/asn1 decode recursion, x/net/idna
-// Punycode label rejection) as reachable. The pin makes the
+// vulnerabilities fixed through 1.26.9 as reachable. The pin makes the
 // version that keeps this safe a guarantee rather than a property of the base image.
-toolchain go1.26.6
+toolchain go1.26.9
 
 require (
 	github.com/alexedwards/scs/pgxstore v0.0.0-20251002162104-209de6e426de
@@ -22,7 +20,7 @@ require (
 	github.com/nrednav/cuid2 v1.1.0
 	github.com/pressly/goose/v3 v3.24.1
 	go.opentelemetry.io/proto/otlp v1.10.0
-	golang.org/x/crypto v0.53.0
+	golang.org/x/crypto v0.57.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -53,13 +51,13 @@ require (
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
-	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260811182544-a038080d80e5 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
