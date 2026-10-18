@@ -2112,7 +2112,7 @@
           "Alerts"
         ],
         "summary": "Create a notification channel",
-        "description": "type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys.",
+        "description": "Creates the channel and its validated project routing atomically. type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys. At most 25 channels, including paused channels, may be stored per workspace.",
         "security": [
           {
             "apiKey": [
@@ -2135,6 +2135,21 @@
                       "webhook",
                       "automation_webhook"
                     ]
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Set false to create paused. Omission preserves the legacy enabled default; null is invalid."
+                  },
+                  "project_ids": {
+                    "type": "array",
+                    "description": "Routing is committed with the channel. All identifiers must belong to this workspace; at most 256 distinct identifiers after deduplication. Omitted or empty means all workspace projects, including future projects; null is invalid.",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_-]+$"
+                    }
                   },
                   "config": {
                     "type": "object",
@@ -2184,6 +2199,10 @@
                 "automation_webhook": {
                   "value": {
                     "type": "automation_webhook",
+                    "enabled": false,
+                    "project_ids": [
+                      "project-id"
+                    ],
                     "config": {
                       "url": "https://worker.example.com/flare",
                       "signing_secret": "16-or-more-printable-bytes"
@@ -2196,7 +2215,13 @@
         },
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Created atomically. Response enabled and project_ids reflect the committed state; project_ids is an array, with empty meaning all workspace projects."
+          },
+          "400": {
+            "description": "Invalid configuration, enabled/project_ids options, or unknown/foreign routing project; no channel is created."
+          },
+          "409": {
+            "description": "Workspace already stores 25 channels, including paused channels."
           }
         }
       }
@@ -3808,10 +3833,14 @@
         "description": "Bounded Sentry client_report counters, grouped by reason and category using receiver time. Sampling and filtering can be intentional. Category units differ and must not be summed into one lost-event total. Exact report bytes are replay-deduplicated per project; identical independent reports can collide. A foreign project returns 404.\n",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -5017,7 +5046,9 @@
         "summary": "Show whether administrator-led HubSpot OAuth is configured",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -5061,7 +5092,9 @@
         "description": "A one-time state and Lax browser cookie bind a ten-minute transaction to the administrator, workspace and selected project. Requires server-side HubSpot app credentials and FLARE_SECRET_KEY.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -6083,10 +6116,14 @@
         "description": "Authenticated viewer read scoped to organization and project. Stable newest-first created_at/id keyset pages discover original notice IDs without adding fields to the signed notification. Receiver enqueue acknowledgement asserts no AI, workflow, approval, fix or deployment success. Cursors cannot be reused with another scope or issue filter.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -6182,10 +6219,14 @@
         "description": "Stateless Streamable HTTP JSON-RPC endpoint. Dedicated purpose=mcp tokens work here only; legacy purpose=api keys retain compatibility. Explicit Authorization is authoritative, including when cookies are present; invalid credentials never fall back to a session. Cookie-only requests require CSRF. Supplied Origin must match operator-configured origins; native clients may omit it. Viewer catalogs hide write tools and dispatch independently enforces member permission. get_capabilities returns the caller identity/purpose/expiry and allowed tools without secrets. No OAuth authorization server is advertised. GET and DELETE return 405. list_projects has a database/output limit of 500 safe project rows. overview keeps tenant-wide totals/top 8 issues with at most 500 project rows and explicit projects_truncated/project_limit metadata.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "requestBody": {
@@ -6233,10 +6274,14 @@
         "description": "Viewer-safe REST setup read; no token values. A browser-session check does not prove that a newly configured external MCP client connected. Dedicated MCP-only tokens use the get_capabilities tool instead of this REST endpoint.",
         "security": [
           {
-            "apiKey": []
+            "apiKey": [
+
+            ]
           },
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "responses": {
@@ -6268,7 +6313,9 @@
         "description": "Human administrator session plus CSRF. Organization-scoped deletion revokes subsequent requests without exposing the token.",
         "security": [
           {
-            "session": []
+            "session": [
+
+            ]
           }
         ],
         "parameters": [
@@ -6293,6 +6340,70 @@
           },
           "404": {
             "description": "Key absent or inaccessible"
+          }
+        }
+      }
+    },
+    "/api/channels/{id}": {
+      "patch": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "Pause or enable a channel and update its project routing",
+        "description": "Updates enabled and routing atomically. Existing paused channels cannot be enabled when 25 channels are already enabled; idempotent enables, pausing, and routing updates remain available. Does not change channel type, destination, secret, or receipt mode.",
+        "security": [
+          {
+            "apiKey": [
+
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "project_ids": {
+                    "type": "array",
+                    "description": "At most 256 distinct workspace project identifiers after deduplication; empty means all workspace projects. Omission leaves routing unchanged.",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_-]+$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated atomically"
+          },
+          "400": {
+            "description": "Invalid or unknown routing project; the original enabled state and routing remain unchanged."
+          },
+          "404": {
+            "description": "Channel not found in this workspace"
+          },
+          "409": {
+            "description": "Enabling a paused channel would exceed 25 enabled channels."
           }
         }
       }

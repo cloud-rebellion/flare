@@ -49,6 +49,17 @@ func (q *Queries) CountEnabledNotificationChannelsByOrg(ctx context.Context, org
 	return count, err
 }
 
+const countNotificationChannelsByOrg = `-- name: CountNotificationChannelsByOrg :one
+SELECT count(*) FROM notification_channels WHERE org_id = $1
+`
+
+func (q *Queries) CountNotificationChannelsByOrg(ctx context.Context, orgID string) (int64, error) {
+	row := q.db.QueryRow(ctx, countNotificationChannelsByOrg, orgID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAlertRule = `-- name: CreateAlertRule :one
 INSERT INTO alert_rules (
     id, project_id, org_id, name, type, threshold, window_minutes, enabled,
@@ -252,6 +263,32 @@ type GetNotificationChannelParams struct {
 
 func (q *Queries) GetNotificationChannel(ctx context.Context, arg GetNotificationChannelParams) (*NotificationChannel, error) {
 	row := q.db.QueryRow(ctx, getNotificationChannel, arg.ID, arg.OrgID)
+	var i NotificationChannel
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Type,
+		&i.Config,
+		&i.Enabled,
+		&i.CreatedAt,
+		&i.LastAttemptAt,
+		&i.LastOkAt,
+		&i.LastError,
+	)
+	return &i, err
+}
+
+const getNotificationChannelForUpdate = `-- name: GetNotificationChannelForUpdate :one
+SELECT id, org_id, type, config, enabled, created_at, last_attempt_at, last_ok_at, last_error FROM notification_channels WHERE id = $1 AND org_id = $2 FOR NO KEY UPDATE
+`
+
+type GetNotificationChannelForUpdateParams struct {
+	ID    string `json:"id"`
+	OrgID string `json:"org_id"`
+}
+
+func (q *Queries) GetNotificationChannelForUpdate(ctx context.Context, arg GetNotificationChannelForUpdateParams) (*NotificationChannel, error) {
+	row := q.db.QueryRow(ctx, getNotificationChannelForUpdate, arg.ID, arg.OrgID)
 	var i NotificationChannel
 	err := row.Scan(
 		&i.ID,
@@ -539,6 +576,16 @@ func (q *Queries) ListNotificationChannelsByOrg(ctx context.Context, orgID strin
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOrgForChannelAdmission = `-- name: LockOrgForChannelAdmission :one
+SELECT id FROM orgs WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockOrgForChannelAdmission(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRow(ctx, lockOrgForChannelAdmission, id)
+	err := row.Scan(&id)
+	return id, err
 }
 
 const recordChannelDelivery = `-- name: RecordChannelDelivery :exec

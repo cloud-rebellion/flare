@@ -34,6 +34,15 @@ DELETE FROM notification_channels WHERE id = $1 AND org_id = $2;
 -- name: GetNotificationChannel :one
 SELECT * FROM notification_channels WHERE id = $1 AND org_id = $2;
 
+-- name: GetNotificationChannelForUpdate :one
+SELECT * FROM notification_channels WHERE id = $1 AND org_id = $2 FOR NO KEY UPDATE;
+
+-- name: LockOrgForChannelAdmission :one
+SELECT id FROM orgs WHERE id = $1 FOR UPDATE;
+
+-- name: CountNotificationChannelsByOrg :one
+SELECT count(*) FROM notification_channels WHERE org_id = $1;
+
 -- name: CountEnabledNotificationChannelsByOrg :one
 SELECT count(*) FROM notification_channels WHERE org_id = $1 AND enabled = true;
 

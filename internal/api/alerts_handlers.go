@@ -166,11 +166,18 @@ func maskURL(raw string) string {
 
 func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Type   string          `json:"type"`
-		Config json.RawMessage `json:"config"`
+		Type       string          `json:"type"`
+		Config     json.RawMessage `json:"config"`
+		Enabled    json.RawMessage `json:"enabled"`
+		ProjectIDs json.RawMessage `json:"project_ids"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	enabled, projectIDs, err := channelCreationOptions(req.Enabled, req.ProjectIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	switch req.Type {
@@ -244,26 +251,54 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cap the channels an org may hold. Every enabled channel is one more
-	// outbound delivery per alert, each holding a background slot for up to its
-	// own timeout, so "how many channels can one tenant create" was directly
-	// "how much of the shared alert pool can one tenant occupy". Nothing capped
-	// it: CountEnabledNotificationChannelsByOrg existed and only the dashboard
-	// read it.
-	org := orgIDFrom(r.Context())
-	if n, cerr := s.q.CountEnabledNotificationChannelsByOrg(r.Context(), org); cerr == nil && n >= maxChannelsPerOrg {
-		writeErr(w, http.StatusConflict, "this workspace already has the maximum number of notification channels")
-		return
-	} else if cerr != nil {
-		slogError(w, "count channels", cerr)
+	// Paused channels consume storage too. Serialize admission per workspace
+	// so concurrent creates cannot exceed the total cap, and publish the channel
+	// only together with its complete validated routing.
+	ctx := r.Context()
+	org := orgIDFrom(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		slogError(w, "create channel: begin tx", err)
 		return
 	}
-
-	ch, err := s.q.CreateNotificationChannel(r.Context(), generated.CreateNotificationChannelParams{
-		ID: id.New(), OrgID: org, Type: req.Type, Config: s.encryptChannelConfig(req.Type, req.Config), Enabled: true,
+	defer tx.Rollback(ctx)
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.LockOrgForChannelAdmission(ctx, org); err != nil {
+		slogError(w, "create channel: lock workspace", err)
+		return
+	}
+	if n, err := qtx.CountNotificationChannelsByOrg(ctx, org); err != nil {
+		slogError(w, "count channels", err)
+		return
+	} else if n >= maxChannelsPerOrg {
+		writeErr(w, http.StatusConflict, "this workspace already has the maximum number of notification channels")
+		return
+	}
+	for _, projectID := range projectIDs {
+		if _, err := qtx.GetProjectByID(ctx, generated.GetProjectByIDParams{ID: projectID, OrgScope: org}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeErr(w, http.StatusBadRequest, "unknown project in project_ids")
+			} else {
+				slogError(w, "validate channel project", err)
+			}
+			return
+		}
+	}
+	ch, err := qtx.CreateNotificationChannel(ctx, generated.CreateNotificationChannelParams{
+		ID: id.New(), OrgID: org, Type: req.Type, Config: s.encryptChannelConfig(req.Type, req.Config), Enabled: enabled,
 	})
 	if err != nil {
 		slogError(w, "create channel", err)
+		return
+	}
+	for _, projectID := range projectIDs {
+		if err := qtx.AddChannelProject(ctx, generated.AddChannelProjectParams{ChannelID: ch.ID, ProjectID: projectID}); err != nil {
+			slogError(w, "create channel routing", err)
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slogError(w, "create channel: commit", err)
 		return
 	}
 	// Audited, because creating a channel is how an alert stream is redirected.
@@ -274,11 +309,13 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	// sensitive-data-in-payload security events), and the audit log an admin
 	// reads showed nothing. Deleting it afterwards was equally invisible.
 	s.audit(r.Context(), "channel.create", ch.ID+" ("+ch.Type+")")
-	writeJSON(w, http.StatusCreated, s.toChannelResponse(ch))
+	response := s.toChannelResponse(ch)
+	response.ProjectIDs = projectIDs
+	writeJSON(w, http.StatusCreated, response)
 }
 
-// maxChannelsPerOrg bounds the fan-out of one alert. Well above any real
-// workspace (a handful of Slack channels, a webhook, a couple of mailboxes).
+// Bound stored channels, including paused configurations, and enabled fan-out
+// for legacy workspaces that already exceed the total storage cap.
 const maxChannelsPerOrg = 25
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
@@ -1448,25 +1485,18 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
 	// testable result.
 	var projectIDs []string
 	if req.ProjectIDs != nil {
-		seen := make(map[string]struct{}, len(*req.ProjectIDs))
-		projectIDs = make([]string, 0, len(*req.ProjectIDs))
-		for _, pid := range *req.ProjectIDs {
-			if _, dup := seen[pid]; dup {
-				continue
-			}
-			seen[pid] = struct{}{}
-			projectIDs = append(projectIDs, pid)
-		}
-		if len(projectIDs) > maxChannelProjects {
-			writeErr(w, http.StatusBadRequest, "too many project_ids (max 256)")
+		var err error
+		projectIDs, err = normalizeChannelProjectIDs(*req.ProjectIDs)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
 
 	// Everything runs in ONE transaction: the ownership checks, the enabled
 	// write, the per-project org validation, and the routing replace+insert.
-	// All validation happens before the first mutation, so nothing is written
-	// unless everything is valid. MVCC hides the DELETE-then-INSERT window from
+	// Nothing is committed unless everything is valid. MVCC hides the
+	// DELETE-then-INSERT window from
 	// every other reader (so a concurrent dispatch never sees the empty
 	// channel_projects state, which reads as "all projects"), and any error
 	// rolls the whole PATCH back: a failed update leaves both the original
@@ -1478,6 +1508,38 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.q.WithTx(tx)
+
+	// Match create's org-before-channel lock order when admitting an enable.
+	if req.Enabled != nil && *req.Enabled {
+		if _, err := qtx.LockOrgForChannelAdmission(ctx, org); err != nil {
+			slogError(w, "enable channel: lock workspace", err)
+			return
+		}
+	}
+	// Serialize every PATCH, including routing-only updates, before replacing
+	// routes. Otherwise concurrent DELETE snapshots can leave a union of routes.
+	// NO KEY UPDATE permits the routing insert's FK KEY SHARE lock; this handler
+	// changes only enabled and routing, never the channel's key.
+	channel, err := qtx.GetNotificationChannelForUpdate(ctx, generated.GetNotificationChannelForUpdateParams{ID: chID, OrgID: org})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "channel not found")
+		return
+	}
+	if err != nil {
+		slogError(w, "update channel: lock channel", err)
+		return
+	}
+	// Only an actual paused-to-enabled transition consumes capacity;
+	// idempotent enables still work for legacy workspaces above the cap.
+	if req.Enabled != nil && *req.Enabled && !channel.Enabled {
+		if n, err := qtx.CountEnabledNotificationChannelsByOrg(ctx, org); err != nil {
+			slogError(w, "count enabled channels", err)
+			return
+		} else if n >= maxChannelsPerOrg {
+			writeErr(w, http.StatusConflict, "this workspace already has the maximum number of enabled notification channels")
+			return
+		}
+	}
 
 	if req.Enabled != nil {
 		rows, err := qtx.SetChannelEnabled(ctx, generated.SetChannelEnabledParams{
@@ -1503,12 +1565,7 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Confirm the channel is this org's before touching its routing: without
-		// this, an id from another tenant would have its routing rewritten.
-		if _, err := qtx.GetNotificationChannel(ctx, generated.GetNotificationChannelParams{ID: chID, OrgID: org}); err != nil {
-			writeErr(w, http.StatusNotFound, "channel not found")
-			return
-		}
+		// The scoped channel lock above already confirmed channel ownership.
 		if err := qtx.ReplaceChannelProjects(ctx, chID); err != nil {
 			slogError(w, "clear channel routing", err)
 			return

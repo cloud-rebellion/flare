@@ -32,6 +32,10 @@
   let emailTo = $state('');
   let slackUrl = $state('');
   let busy = $state(false);
+  let newChannelAllProjects = $state(false);
+  let newChannelProjectIds = $state<string[]>([]);
+  let newChannelEnabled = $state(false);
+  let channelCreated = $state<string | null>(null);
 
   let apiKeys = $state<ApiKey[] | null>(null);
   let keyName = $state('');
@@ -85,6 +89,7 @@
   // started paging at 3am meant deleting it and re-entering a config the API
   // redacts and will not read back.
   async function toggleChannel(ch: Channel) {
+    channelCreated = null;
     const next = !ch.enabled;
     try {
       await api.updateChannel(ch.id, { enabled: next });
@@ -97,6 +102,7 @@
   // Routing. An empty selection means every project, which is the default and
   // matches how channels behaved before routing existed.
   async function setChannelProjects(ch: Channel, ids: string[]) {
+    channelCreated = null;
     try {
       await api.updateChannel(ch.id, { project_ids: ids });
       channels = (channels ?? []).map((c) => (c.id === ch.id ? { ...c, project_ids: ids } : c));
@@ -467,6 +473,19 @@
 
   async function add(e: SubmitEvent) {
     e.preventDefault();
+    channelCreated = null;
+    if (projects === null) {
+      error = 'Projects must load before a channel can be created.';
+      return;
+    }
+    if (!newChannelAllProjects && newChannelProjectIds.length === 0) {
+      error = 'Select at least one project or choose all projects.';
+      return;
+    }
+    if (!newChannelAllProjects && newChannelProjectIds.length > 256) {
+      error = 'A channel can select up to 256 projects.';
+      return;
+    }
     busy = true;
     error = null;
     try {
@@ -480,8 +499,17 @@
             : type === 'slack'
               ? { webhook_url: slackUrl }
               : {};
-      const ch = await api.createChannel(type, config);
+      const ch = await api.createChannel(type, config, {
+        enabled: newChannelEnabled,
+        project_ids: newChannelAllProjects ? [] : newChannelProjectIds
+      });
       channels = [ch, ...(channels ?? [])];
+      channelCreated = ch.enabled
+        ? 'Channel created with delivery enabled for its selected routing.'
+        : 'Channel created paused. Review its routing and send a test, then enable delivery.';
+      newChannelAllProjects = false;
+      newChannelProjectIds = [];
+      newChannelEnabled = false;
       url = '';
       automationSigningSecret = '';
       automationReceiptMode = 'http';
@@ -639,14 +667,64 @@
       <span class="text-xs text-zinc-600">New-issue alerts are emailed here.</span>
     </div>
   {/if}
+  <fieldset class="w-full min-w-0 rounded-lg border border-zinc-800/80 p-4">
+    <legend class="px-1 text-xs font-medium text-zinc-300">Projects for this channel</legend>
+    <label class="flex items-start gap-2 text-sm text-zinc-300">
+      <input
+        type="checkbox"
+        bind:checked={newChannelAllProjects}
+        disabled={busy}
+        class="mt-1 accent-amber-400"
+      />
+      <span>All projects in this workspace <span class="block text-xs text-zinc-500">Includes projects added later.</span></span>
+    </label>
+    {#if !newChannelAllProjects}
+      {#if projects === null}
+        <p class="mt-3 text-xs text-zinc-500">Loading projects…</p>
+      {:else if projects.length === 0}
+        <p class="mt-3 text-xs text-zinc-500">Create a project first, or explicitly choose all projects.</p>
+      {:else}
+        <div class="mt-3 grid max-h-44 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+          {#each projects as project (project.id)}
+            <label class="flex min-w-0 items-start gap-2 text-sm text-zinc-300">
+              <input
+                type="checkbox"
+                checked={newChannelProjectIds.includes(project.id)}
+                disabled={busy || (newChannelProjectIds.length >= 256 && !newChannelProjectIds.includes(project.id))}
+                onchange={(event) => {
+                  newChannelProjectIds = event.currentTarget.checked
+                    ? [...newChannelProjectIds, project.id]
+                    : newChannelProjectIds.filter((id) => id !== project.id);
+                }}
+                class="mt-1 shrink-0 accent-amber-400"
+              />
+              <span class="break-words">{project.name}</span>
+            </label>
+          {/each}
+        </div>
+      {/if}
+      <p class="mt-3 text-xs text-zinc-500">Select the projects whose alerts this destination should receive. {newChannelProjectIds.length} selected; maximum 256.</p>
+    {/if}
+  </fieldset>
+  <div class="w-full">
+    <label class="flex items-center gap-2 text-sm text-zinc-300">
+      <input type="checkbox" bind:checked={newChannelEnabled} disabled={busy} class="accent-amber-400" />
+      Enable delivery immediately
+    </label>
+    <p class="mt-1 text-xs text-zinc-500">Leave delivery paused to review routing and send a test before alerts start.</p>
+  </div>
   <button
     type="submit"
-    disabled={busy}
+    disabled={busy || projects === null || (!newChannelAllProjects && newChannelProjectIds.length === 0)}
     class="rounded-md bg-amber-400 px-3.5 py-2 text-sm font-medium text-zinc-950 transition-colors hover:bg-amber-300 active:translate-y-px disabled:opacity-60"
   >
     {busy ? 'Adding...' : 'Add channel'}
   </button>
 </form>
+
+{#if channelCreated}
+  <p role="status" class="mb-6 rounded-md border border-emerald-900/60 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-300">{channelCreated}</p>
+{/if}
 
 {#if error}
   <p class="mb-6 rounded-md border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{error}</p>
@@ -712,7 +790,7 @@
               ? 'Stop sending to this channel without deleting it'
               : 'Resume sending to this channel'}
           >
-            {ch.enabled ? 'Mute' : 'Unmute'}
+            {ch.enabled ? 'Pause delivery' : 'Enable delivery'}
           </button>
           <button
             onclick={() => removeChannel(ch.id)}
@@ -723,7 +801,7 @@
         </div>
         {#if !ch.enabled}
           <p class="w-full pl-5 text-xs text-amber-300/80">
-            Muted. Alerts are not delivered to this channel.
+            Paused. Alerts are not delivered. You can send a test before enabling delivery.
           </p>
         {/if}
         <!-- Routing. No selection = every project, which is the default and what
@@ -732,6 +810,7 @@
           <span class="text-[11px] text-zinc-600">Sends for:</span>
           <button
             onclick={() => setChannelProjects(ch, [])}
+            aria-pressed={!ch.project_ids?.length}
             class="rounded border px-1.5 py-0.5 text-[11px] transition-colors {ch.project_ids
               ?.length
               ? 'border-zinc-800 text-zinc-500 hover:border-zinc-700'
@@ -742,6 +821,7 @@
           {#each projects ?? [] as p (p.id)}
             {@const on = (ch.project_ids ?? []).includes(p.id)}
             <button
+              aria-pressed={on}
               onclick={() => {
                 const next = on
                   ? (ch.project_ids ?? []).filter((x) => x !== p.id)
@@ -930,9 +1010,9 @@
   </div>
 
   <form onsubmit={connectConnector} class="mb-6 flex flex-wrap items-end gap-3 border-b border-zinc-800/80 pb-8">
-    <div class="flex flex-col gap-1.5">
+    <div class="flex min-w-0 max-w-full flex-col gap-1.5">
       <label for="connector-project" class="text-xs font-medium text-zinc-400">Project for health</label>
-      <select id="connector-project" bind:value={connectorProjectId} class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60">
+      <select id="connector-project" bind:value={connectorProjectId} class="w-full min-w-0 max-w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-amber-400/60">
         <option value="">Choose project</option>
         {#each projects ?? [] as project (project.id)}
           <option value={project.id}>{project.name}</option>
@@ -1126,8 +1206,8 @@
   <h2 class="mt-14 text-xl font-semibold tracking-tight">AI triage</h2>
   <p class="mt-1 mb-4 text-sm text-zinc-500">
     Point Flare at your own model endpoint (OpenAI-compatible or Anthropic Messages - OpenAI, a self-hosted
-    vLLM/Ollama, an EU provider). Triage runs on <strong>your</strong> endpoint and PII is scrubbed from the issue
-    before it is sent - so personal data never leaves your boundary.
+    vLLM/Ollama, an EU provider). Flare scrubs known personal-data patterns before sending issue evidence
+    to the endpoint you configure. Review your telemetry and provider settings before enabling triage.
   </p>
 
   {#if ai?.enabled}

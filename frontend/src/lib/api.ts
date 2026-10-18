@@ -292,8 +292,8 @@ export const api = {
   deleteApiKey: (id: string) => req<void>('DELETE', `/keys/${id}`),
 
   channels: () => req<Channel[]>('GET', '/channels'),
-  createChannel: (type: string, config: Record<string, unknown>) =>
-    req<Channel>('POST', '/channels', { type, config }),
+  createChannel: (type: string, config: Record<string, unknown>, options: { enabled?: boolean; project_ids?: string[] } = {}) =>
+    req<Channel>('POST', '/channels', { type, config, ...options }),
   testChannel: (id: string, projectId?: string) => req<{ ok: boolean; error?: string }>(
     'POST', `/channels/${id}/test`, projectId ? { project_id: projectId } : undefined
   ),

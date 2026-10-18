@@ -1940,7 +1940,7 @@ paths:
     post:
       tags: [Alerts]
       summary: Create a notification channel
-      description: "type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys."
+      description: "Creates the channel and its validated project routing atomically. type: log | email | slack | webhook | automation_webhook, with the matching config. automation_webhook sends a signed, payload-free flare.automation.v1 notice; it does not execute fixes or deploys. At most 25 channels, including paused channels, may be stored per workspace."
       security: [{ apiKey: [] }]
       requestBody:
         content:
@@ -1949,6 +1949,11 @@ paths:
               type: object
               properties:
                 type: { type: string, enum: [log, email, slack, webhook, automation_webhook] }
+                enabled: { type: boolean, default: true, description: "Set false to create paused. Omission preserves the legacy enabled default; null is invalid." }
+                project_ids:
+                  type: array
+                  description: "Routing is committed with the channel. All identifiers must belong to this workspace; at most 256 distinct identifiers after deduplication. Omitted or empty means all workspace projects, including future projects; null is invalid."
+                  items: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }
                 config:
                   type: object
                   properties:
@@ -1961,10 +1966,39 @@ paths:
               automation_webhook:
                 value:
                   type: automation_webhook
+                  enabled: false
+                  project_ids: [project-id]
                   config:
                     url: "https://worker.example.com/flare"
                     signing_secret: "16-or-more-printable-bytes"
-      responses: { "201": { description: Created } }
+      responses:
+        "201": { description: "Created atomically. Response enabled and project_ids reflect the committed state; project_ids is an array, with empty meaning all workspace projects." }
+        "400": { description: "Invalid configuration, enabled/project_ids options, or unknown/foreign routing project; no channel is created." }
+        "409": { description: "Workspace already stores 25 channels, including paused channels." }
+  /api/channels/{id}:
+    patch:
+      tags: [Alerts]
+      summary: Pause or enable a channel and update its project routing
+      description: "Updates enabled and routing atomically. Existing paused channels cannot be enabled when 25 channels are already enabled; idempotent enables, pausing, and routing updates remain available. Does not change channel type, destination, secret, or receipt mode."
+      security: [{ apiKey: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                project_ids:
+                  type: array
+                  description: "At most 256 distinct workspace project identifiers after deduplication; empty means all workspace projects. Omission leaves routing unchanged."
+                  items: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }
+      responses:
+        "200": { description: "Updated atomically" }
+        "400": { description: "Invalid or unknown routing project; the original enabled state and routing remain unchanged." }
+        "404": { description: "Channel not found in this workspace" }
+        "409": { description: "Enabling a paused channel would exceed 25 enabled channels." }
   /api/channels/{id}/test:
     post:
       tags: [Alerts]

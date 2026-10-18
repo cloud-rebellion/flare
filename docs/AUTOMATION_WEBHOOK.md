@@ -13,6 +13,8 @@ Settings page):
 ```json
 {
   "type": "automation_webhook",
+  "enabled": false,
+  "project_ids": ["project-id"],
   "config": {
     "url": "https://worker.example.com/flare",
     "signing_secret": "a-random-secret-at-least-16-bytes",
@@ -20,6 +22,25 @@ Settings page):
   }
 }
 ```
+
+Create the channel paused and supply its project routing in this same request.
+Flare validates every project against the workspace and commits the channel and
+all routes together, so a failed route leaves no channel and a concurrent alert
+cannot see a temporary all-project channel. Duplicate project IDs are collapsed;
+at most 256 distinct IDs of 1–128 ASCII letters, digits, `_` or `-` are accepted.
+The returned `enabled` and `project_ids` describe the committed creation state.
+For compatibility, omitting `enabled` means `true`, and omitting `project_ids`
+or sending an empty array means every workspace project, including future ones.
+Explicit `null` is invalid for either creation option. New Settings connections
+start paused and require an explicit project selection or all-project choice.
+
+Use `PATCH /api/channels/{id}` with `{"enabled":true}` after testing and
+reviewing the receiver and alert rule. That route can also atomically replace
+`project_ids`; it does not edit the destination, signing secret or receipt mode.
+A workspace can store 25 channels including paused channels. Delete an unused
+channel to make room at that cap. A legacy workspace already above the cap can
+still pause, route, delete or idempotently enable existing channels, but cannot
+create another channel or enable a paused one while 25 are already enabled.
 
 The URL must be a public HTTPS endpoint. Loopback, private, link-local,
 metadata, and other blocked destinations are rejected at creation and the
@@ -128,6 +149,10 @@ grouped issue keeps `issue_id` as an empty string and remains routable by
 The channel test API requires an explicit project in the channel's routing
 scope. It sends the same signed envelope with `event: "test"`, so operators can
 verify delivery without creating an incident workflow.
+Testing a paused channel is allowed. Check the response body's `ok` value;
+HTTP 200 can also carry `ok:false`. This direct test does not create a durable
+outbox delivery receipt. One real alert and its exact persisted
+`receiver_enqueued` acknowledgement are required to prove that later boundary.
 
 ## Worker follow-up
 
