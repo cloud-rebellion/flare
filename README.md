@@ -50,6 +50,25 @@ commercial overlay and is not in this repo. See [LICENSING.md](LICENSING.md).
   `-- ciguard:allow-unscoped` marker).
 - `frontend` - SvelteKit (Svelte 5 + Tailwind 4), built with Bun.
 
+## Telemetry intake diagnostics
+
+Each project's **Intake** page shows its latest 100 durable request receipts:
+accepted, rejected and dropped counts, HTTP result, retryability and fixed
+rejection reasons. The authenticated `GET /api/projects/{id}/ingest-receipts`
+endpoint returns the same tenant-scoped, payload-free metadata.
+
+New Sentry receipts distinguish malformed events, transactions and SDK loss
+reports from unsupported sessions, attachments, profiles and other item formats.
+Reason keys are receiver-owned, with bounded integer counts; arbitrary SDK types,
+parser messages and payloads are never stored in the breakdown. Malformed-envelope
+counts refer to requests; other reason counts refer to items. Older receipts and
+other formats have an empty breakdown, which does not establish zero losses.
+Authentication and body-framing failures before a receipt starts are outside this
+view. Accepted intake is delivery evidence, not proof of complete app monitoring.
+
+Native debug-symbol upload counters use the separate `symbol` signal; they do
+not contribute to the `other` bucket used for unsupported envelope items.
+
 ## Local development
 
 ```bash

@@ -27,13 +27,14 @@ const (
 )
 
 type ingestReceipt struct {
-	id        string
-	orgID     string
-	projectID string
-	requestID pgtype.Text
-	pillar    string
-	protocol  string
-	received  int64
+	id         string
+	orgID      string
+	projectID  string
+	requestID  pgtype.Text
+	pillar     string
+	protocol   string
+	received   int64
+	rejections map[string]int64
 }
 
 // beginIngestReceipt creates a payload-free, tenant-scoped receipt after DSN
@@ -131,18 +132,19 @@ func completeIngestReceipt(ctx context.Context, q *generated.Queries, receipt *i
 	result = canonicalReceiptOutcome(result)
 	retryable := result == "failed"
 	_, err := q.CompleteIngestReceipt(ctx, generated.CompleteIngestReceiptParams{
-		ID:             receipt.id,
-		OrgID:          receipt.orgID,
-		ProjectID:      receipt.projectID,
-		ReceivedCount:  receipt.received,
-		AcceptedCount:  int64(outcome.accepted + outcome.deduplicated),
-		RejectedCount:  int64(outcome.invalid + outcome.failed),
-		DroppedCount:   int64(outcome.dropped),
-		PersistedCount: int64(outcome.accepted),
-		Outcome:        result,
-		HttpStatus:     int16(status),
-		Retryable:      retryable,
-		CompletedAt:    pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		ID:              receipt.id,
+		OrgID:           receipt.orgID,
+		ProjectID:       receipt.projectID,
+		ReceivedCount:   receipt.received,
+		AcceptedCount:   int64(outcome.accepted + outcome.deduplicated),
+		RejectedCount:   int64(outcome.invalid + outcome.failed),
+		DroppedCount:    int64(outcome.dropped),
+		PersistedCount:  int64(outcome.accepted),
+		Outcome:         result,
+		HttpStatus:      int16(status),
+		Retryable:       retryable,
+		CompletedAt:     pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		RejectionCounts: receipt.rejectionJSON(),
 	})
 	if err != nil {
 		recordIngestReceiptFailure("complete", receipt)

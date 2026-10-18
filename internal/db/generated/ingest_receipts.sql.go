@@ -21,24 +21,26 @@ SET received_count = $4,
     outcome = $9,
     http_status = $10,
     retryable = $11,
-    completed_at = $12
+    completed_at = $12,
+    rejection_counts = COALESCE($13::JSONB, '{}'::JSONB)
 WHERE id = $1 AND org_id = $2 AND project_id = $3
-RETURNING id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at
+RETURNING id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at, rejection_counts
 `
 
 type CompleteIngestReceiptParams struct {
-	ID             string             `json:"id"`
-	OrgID          string             `json:"org_id"`
-	ProjectID      string             `json:"project_id"`
-	ReceivedCount  int64              `json:"received_count"`
-	AcceptedCount  int64              `json:"accepted_count"`
-	RejectedCount  int64              `json:"rejected_count"`
-	DroppedCount   int64              `json:"dropped_count"`
-	PersistedCount int64              `json:"persisted_count"`
-	Outcome        string             `json:"outcome"`
-	HttpStatus     int16              `json:"http_status"`
-	Retryable      bool               `json:"retryable"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
+	ID              string             `json:"id"`
+	OrgID           string             `json:"org_id"`
+	ProjectID       string             `json:"project_id"`
+	ReceivedCount   int64              `json:"received_count"`
+	AcceptedCount   int64              `json:"accepted_count"`
+	RejectedCount   int64              `json:"rejected_count"`
+	DroppedCount    int64              `json:"dropped_count"`
+	PersistedCount  int64              `json:"persisted_count"`
+	Outcome         string             `json:"outcome"`
+	HttpStatus      int16              `json:"http_status"`
+	Retryable       bool               `json:"retryable"`
+	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	RejectionCounts []byte             `json:"rejection_counts"`
 }
 
 func (q *Queries) CompleteIngestReceipt(ctx context.Context, arg CompleteIngestReceiptParams) (*IngestReceipt, error) {
@@ -55,6 +57,7 @@ func (q *Queries) CompleteIngestReceipt(ctx context.Context, arg CompleteIngestR
 		arg.HttpStatus,
 		arg.Retryable,
 		arg.CompletedAt,
+		arg.RejectionCounts,
 	)
 	var i IngestReceipt
 	err := row.Scan(
@@ -75,12 +78,13 @@ func (q *Queries) CompleteIngestReceipt(ctx context.Context, arg CompleteIngestR
 		&i.ReceivedAt,
 		&i.CompletedAt,
 		&i.CreatedAt,
+		&i.RejectionCounts,
 	)
 	return &i, err
 }
 
 const getIngestReceipt = `-- name: GetIngestReceipt :one
-SELECT id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at
+SELECT id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at, rejection_counts
 FROM ingest_receipts
 WHERE id = $1 AND org_id = $2 AND project_id = $3
 `
@@ -112,6 +116,7 @@ func (q *Queries) GetIngestReceipt(ctx context.Context, arg GetIngestReceiptPara
 		&i.ReceivedAt,
 		&i.CompletedAt,
 		&i.CreatedAt,
+		&i.RejectionCounts,
 	)
 	return &i, err
 }
@@ -130,7 +135,7 @@ VALUES (
     $11, $12, $13, $14, $15,
     $16
 )
-RETURNING id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at
+RETURNING id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at, rejection_counts
 `
 
 type InsertIngestReceiptParams struct {
@@ -192,12 +197,13 @@ func (q *Queries) InsertIngestReceipt(ctx context.Context, arg InsertIngestRecei
 		&i.ReceivedAt,
 		&i.CompletedAt,
 		&i.CreatedAt,
+		&i.RejectionCounts,
 	)
 	return &i, err
 }
 
 const listIngestReceiptsByProject = `-- name: ListIngestReceiptsByProject :many
-SELECT id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at
+SELECT id, request_id, org_id, project_id, pillar, protocol, received_count, accepted_count, rejected_count, dropped_count, persisted_count, outcome, http_status, retryable, received_at, completed_at, created_at, rejection_counts
 FROM ingest_receipts
 WHERE org_id = $1 AND project_id = $2
 ORDER BY received_at DESC, id DESC
@@ -237,6 +243,7 @@ func (q *Queries) ListIngestReceiptsByProject(ctx context.Context, arg ListInges
 			&i.ReceivedAt,
 			&i.CompletedAt,
 			&i.CreatedAt,
+			&i.RejectionCounts,
 		); err != nil {
 			return nil, err
 		}

@@ -6,13 +6,14 @@
     { key: 'traces', path: '/traces', label: 'Traces' },
     { key: 'metrics', path: '/metrics', label: 'Metrics' },
     { key: 'business', path: '/business-health', label: 'Business' },
+    { key: 'intake', path: '/intake', label: 'Intake' },
     { key: 'sdk-loss', path: '/sdk-loss', label: 'SDK loss' },
     { key: 'automation', path: '/automation', label: 'Automation' },
     { key: 'releases', path: '/releases', label: 'Releases' }
   ];
 </script>
 
-<nav aria-label="Project sections" class="mb-5 flex items-center gap-1 overflow-x-auto border-b border-zinc-800/80">
+<nav aria-label="Project sections" class="mb-5 flex items-center gap-1 overflow-x-auto overflow-y-hidden border-b border-zinc-800/80">
   {#each sections as section (section.key)}
     <a
       href={`/projects/${encodeURIComponent(projectId)}${section.path}`}

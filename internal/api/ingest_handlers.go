@@ -103,6 +103,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	items, err := ingest.ParseEnvelope(body)
 	if err != nil {
 		receiptStatus = http.StatusBadRequest
+		receipt.reject("invalid_envelope", 1)
 		writeErr(w, http.StatusBadRequest, "invalid envelope")
 		return
 	}
@@ -153,8 +154,14 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 		switch item.Type {
 		case "event":
 			ev, err := ingest.ParseEvent(item.Payload)
-			if err != nil || !validSentryItemID(ev.EventID) {
+			if err != nil {
 				eventOutcome.invalid++
+				receipt.reject("invalid_event", 1)
+				continue
+			}
+			if !validSentryItemID(ev.EventID) {
+				eventOutcome.invalid++
+				receipt.reject("invalid_event_id", 1)
 				continue
 			}
 			validEvents++
@@ -163,6 +170,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			spans, err := ingest.ParseSentryTransaction(item.Payload)
 			if err != nil {
 				transactionOutcome.invalid++
+				receipt.reject("invalid_transaction", 1)
 				continue
 			}
 			var identity struct {
@@ -170,6 +178,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := json.Unmarshal(item.Payload, &identity); err != nil || !validSentryItemID(identity.EventID) {
 				transactionOutcome.invalid++
+				receipt.reject("invalid_transaction_id", 1)
 				continue
 			}
 			validTransactions++
@@ -178,6 +187,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			report, err := ingest.ParseSentryClientReport(item.Payload)
 			if err != nil {
 				clientReportOutcome.invalid++
+				receipt.reject("invalid_client_report", 1)
 				continue
 			}
 			validClientReports++
@@ -185,6 +195,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Sessions, attachments and other item types are not supported.
 			otherOutcome.invalid++
+			receipt.reject(unsupportedSentryReason(item.Type), 1)
 		}
 	}
 	if len(prepared) == 0 {
@@ -332,6 +343,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	return
 
 identityConflict:
+	receipt.reject("identity_conflict", validEvents+validTransactions+validClientReports)
 	// The same project and Sentry item ID cannot be rebound to different data.
 	// Roll back the entire request, including earlier item reservations/writes.
 	eventOutcome.accepted = 0
@@ -352,6 +364,7 @@ identityConflict:
 	return
 
 storeFailed:
+	receipt.reject("storage_failed", validEvents+validTransactions+validClientReports)
 	// No supported item committed. Count all valid items as retryable failures,
 	// including earlier writes rolled back and later items not attempted.
 	slog.Warn("envelope transaction failed", "project_id", project.ID, "error", err)
@@ -431,17 +444,20 @@ func (s *Server) handleStore(w http.ResponseWriter, r *http.Request) {
 		var perr *ingestParseError
 		if errors.As(err, &perr) {
 			outcome.invalid = 1
+			receipt.reject("invalid_event", 1)
 			receiptStatus = http.StatusBadRequest
 			writeErr(w, http.StatusBadRequest, "invalid event")
 			return
 		}
 		if errors.Is(err, errSentryItemIDConflict) {
 			outcome.invalid = 1
+			receipt.reject("identity_conflict", 1)
 			receiptStatus = http.StatusConflict
 			writeErr(w, http.StatusConflict, "sentry item identity reused with different payload")
 			return
 		}
 		outcome.failed = 1
+		receipt.reject("storage_failed", 1)
 		requestOutcome = "failed"
 		receiptStatus = http.StatusServiceUnavailable
 		slog.Warn("store event failed", "project_id", project.ID, "error", err)

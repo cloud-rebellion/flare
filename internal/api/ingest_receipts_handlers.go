@@ -23,21 +23,22 @@ const (
 // and are omitted so this response cannot become a cross-tenant identifier
 // oracle if it is copied into another system.
 type ingestReceiptResponse struct {
-	ID             string     `json:"id"`
-	RequestID      string     `json:"request_id,omitempty"`
-	Pillar         string     `json:"pillar"`
-	Protocol       string     `json:"protocol"`
-	ReceivedCount  int64      `json:"received_count"`
-	AcceptedCount  int64      `json:"accepted_count"`
-	RejectedCount  int64      `json:"rejected_count"`
-	DroppedCount   int64      `json:"dropped_count"`
-	PersistedCount int64      `json:"persisted_count"`
-	Outcome        string     `json:"outcome"`
-	HTTPStatus     int16      `json:"http_status"`
-	Retryable      bool       `json:"retryable"`
-	ReceivedAt     *time.Time `json:"received_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
-	CreatedAt      *time.Time `json:"created_at,omitempty"`
+	ID              string           `json:"id"`
+	RequestID       string           `json:"request_id,omitempty"`
+	Pillar          string           `json:"pillar"`
+	Protocol        string           `json:"protocol"`
+	ReceivedCount   int64            `json:"received_count"`
+	AcceptedCount   int64            `json:"accepted_count"`
+	RejectedCount   int64            `json:"rejected_count"`
+	DroppedCount    int64            `json:"dropped_count"`
+	PersistedCount  int64            `json:"persisted_count"`
+	Outcome         string           `json:"outcome"`
+	HTTPStatus      int16            `json:"http_status"`
+	Retryable       bool             `json:"retryable"`
+	ReceivedAt      *time.Time       `json:"received_at,omitempty"`
+	CompletedAt     *time.Time       `json:"completed_at,omitempty"`
+	CreatedAt       *time.Time       `json:"created_at,omitempty"`
+	RejectionCounts map[string]int64 `json:"rejection_counts"`
 }
 
 // handleListIngestReceipts returns bounded, newest-first request receipts for
@@ -76,20 +77,21 @@ func ingestReceiptLimit(r *http.Request) int32 {
 
 func toIngestReceiptResponse(row *generated.IngestReceipt) ingestReceiptResponse {
 	out := ingestReceiptResponse{
-		ID:             row.ID,
-		Pillar:         row.Pillar,
-		Protocol:       row.Protocol,
-		ReceivedCount:  row.ReceivedCount,
-		AcceptedCount:  row.AcceptedCount,
-		RejectedCount:  row.RejectedCount,
-		DroppedCount:   row.DroppedCount,
-		PersistedCount: row.PersistedCount,
-		Outcome:        row.Outcome,
-		HTTPStatus:     row.HttpStatus,
-		Retryable:      row.Retryable,
-		ReceivedAt:     receiptTimestamp(row.ReceivedAt),
-		CompletedAt:    receiptTimestamp(row.CompletedAt),
-		CreatedAt:      receiptTimestamp(row.CreatedAt),
+		ID:              row.ID,
+		Pillar:          row.Pillar,
+		Protocol:        row.Protocol,
+		ReceivedCount:   row.ReceivedCount,
+		AcceptedCount:   row.AcceptedCount,
+		RejectedCount:   row.RejectedCount,
+		DroppedCount:    row.DroppedCount,
+		PersistedCount:  row.PersistedCount,
+		Outcome:         row.Outcome,
+		HTTPStatus:      row.HttpStatus,
+		Retryable:       row.Retryable,
+		ReceivedAt:      receiptTimestamp(row.ReceivedAt),
+		CompletedAt:     receiptTimestamp(row.CompletedAt),
+		CreatedAt:       receiptTimestamp(row.CreatedAt),
+		RejectionCounts: safeIngestRejections(row.RejectionCounts),
 	}
 	if row.RequestID.Valid {
 		out.RequestID = row.RequestID.String

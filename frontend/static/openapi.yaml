@@ -9,7 +9,7 @@ info:
   license:
     name: Flare Sustainable Use License
 servers:
-  - url: https://flare.example.com
+  - url: https://flare.cloudrebellion.tech
     description: Hosted
   - url: http://localhost:8080
     description: Self-host (default)
@@ -1485,7 +1485,87 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
       responses:
-        "200": { description: Bounded payload-free request accounting }
+        "200": {
+          "description": "Bounded payload-free request accounting. Fixed rejection reason codes are available for new Sentry requests; empty breakdowns mean unavailable detail, not zero losses. Malformed-envelope counts describe requests; other reasons describe items. Authentication and body-framing failures before receipt creation are not included.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "pillar",
+                    "protocol",
+                    "outcome",
+                    "http_status",
+                    "rejection_counts"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "pillar": {
+                      "type": "string"
+                    },
+                    "protocol": {
+                      "type": "string"
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "in_progress",
+                        "accepted",
+                        "partial",
+                        "rejected",
+                        "failed",
+                        "empty"
+                      ]
+                    },
+                    "http_status": {
+                      "type": "integer",
+                      "minimum": 100,
+                      "maximum": 599
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    },
+                    "rejection_counts": {
+                      "type": "object",
+                      "maxProperties": 16,
+                      "propertyNames": {
+                        "enum": [
+                          "invalid_envelope",
+                          "invalid_event",
+                          "invalid_event_id",
+                          "invalid_transaction",
+                          "invalid_transaction_id",
+                          "invalid_client_report",
+                          "unsupported_session",
+                          "unsupported_attachment",
+                          "unsupported_profile",
+                          "unsupported_check_in",
+                          "unsupported_log",
+                          "unsupported_span",
+                          "unsupported_metric",
+                          "unsupported_other",
+                          "identity_conflict",
+                          "storage_failed"
+                        ]
+                      },
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
   /api/projects/{id}/sdk-discards:
     get:
       tags: [Projects]

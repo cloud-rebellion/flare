@@ -26,7 +26,8 @@ SET received_count = $4,
     outcome = $9,
     http_status = $10,
     retryable = $11,
-    completed_at = $12
+    completed_at = $12,
+    rejection_counts = COALESCE(sqlc.narg(rejection_counts)::JSONB, '{}'::JSONB)
 WHERE id = $1 AND org_id = $2 AND project_id = $3
 RETURNING *;
 

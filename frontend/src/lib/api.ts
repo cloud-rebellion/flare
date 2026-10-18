@@ -31,6 +31,7 @@ import type {
   ConnectorSyncHealth,
   Issue,
   IssueEvent,
+  IngestReceipt,
   LogRow,
   LogPage,
   LogVolumeBucket,
@@ -179,6 +180,8 @@ export const api = {
   project: (id: string) => req<Project>('GET', `/projects/${id}`),
   sdkDiscards: (id: string, hours = 24) =>
     req<SdkDiscards>('GET', `/projects/${id}/sdk-discards?hours=${hours}`),
+  ingestReceipts: (id: string) =>
+    req<IngestReceipt[]>('GET', `/projects/${encodeURIComponent(id)}/ingest-receipts?limit=100`),
   automationDeliveries: (id: string, opts?: { issueId?: string; cursor?: string }) => {
     const params = new URLSearchParams({ limit: '25' });
     if (opts?.issueId) params.set('issue_id', opts.issueId);

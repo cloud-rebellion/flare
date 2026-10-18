@@ -14,6 +14,23 @@ export interface Project {
   otlp_endpoint: string;
 }
 
+export interface IngestReceipt {
+  id: string;
+  pillar: string;
+  protocol: string;
+  received_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  dropped_count: number;
+  persisted_count: number;
+  outcome: string;
+  http_status: number;
+  retryable: boolean;
+  received_at?: string;
+  completed_at?: string;
+  rejection_counts: Record<string, number>;
+}
+
 export interface Issue {
   id: string;
   project_id: string;

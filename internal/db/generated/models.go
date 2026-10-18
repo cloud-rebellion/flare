@@ -371,23 +371,24 @@ type HubspotOauthTransaction struct {
 }
 
 type IngestReceipt struct {
-	ID             string             `json:"id"`
-	RequestID      pgtype.Text        `json:"request_id"`
-	OrgID          string             `json:"org_id"`
-	ProjectID      string             `json:"project_id"`
-	Pillar         string             `json:"pillar"`
-	Protocol       string             `json:"protocol"`
-	ReceivedCount  int64              `json:"received_count"`
-	AcceptedCount  int64              `json:"accepted_count"`
-	RejectedCount  int64              `json:"rejected_count"`
-	DroppedCount   int64              `json:"dropped_count"`
-	PersistedCount int64              `json:"persisted_count"`
-	Outcome        string             `json:"outcome"`
-	HttpStatus     int16              `json:"http_status"`
-	Retryable      bool               `json:"retryable"`
-	ReceivedAt     pgtype.Timestamptz `json:"received_at"`
-	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ID              string             `json:"id"`
+	RequestID       pgtype.Text        `json:"request_id"`
+	OrgID           string             `json:"org_id"`
+	ProjectID       string             `json:"project_id"`
+	Pillar          string             `json:"pillar"`
+	Protocol        string             `json:"protocol"`
+	ReceivedCount   int64              `json:"received_count"`
+	AcceptedCount   int64              `json:"accepted_count"`
+	RejectedCount   int64              `json:"rejected_count"`
+	DroppedCount    int64              `json:"dropped_count"`
+	PersistedCount  int64              `json:"persisted_count"`
+	Outcome         string             `json:"outcome"`
+	HttpStatus      int16              `json:"http_status"`
+	Retryable       bool               `json:"retryable"`
+	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
+	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RejectionCounts json.RawMessage    `json:"rejection_counts"`
 }
 
 type Invitation struct {
