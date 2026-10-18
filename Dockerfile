@@ -20,7 +20,7 @@ COPY frontend/ .
 # as build arguments because Vite/SvelteKit embeds them in the browser bundle.
 ARG FLARE_DSN=""
 ARG FLARE_ENVIRONMENT=production
-ARG FLARE_RELEASE=v0.6.1
+ARG FLARE_RELEASE=v0.6.2
 ARG FLARE_COMMIT=""
 ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
     PUBLIC_FLARE_ENVIRONMENT=${FLARE_ENVIRONMENT} \
@@ -39,7 +39,7 @@ RUN if [ -n "${FLARE_COMMIT}" ]; then \
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
 FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS backend
 WORKDIR /app
-ARG FLARE_RELEASE=v0.6.1
+ARG FLARE_RELEASE=v0.6.2
 ARG FLARE_COMMIT=""
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential gcc g++ \
@@ -56,7 +56,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Stage 3: runtime (debian-slim for glibc + libstdc++, which the duckdb static
 # lib needs at runtime).
 FROM debian:bookworm-slim
-ARG FLARE_RELEASE=v0.6.1
+ARG FLARE_RELEASE=v0.6.2
 ARG FLARE_COMMIT=""
 LABEL org.opencontainers.image.version="${FLARE_RELEASE}" \
       org.opencontainers.image.revision="${FLARE_COMMIT}"

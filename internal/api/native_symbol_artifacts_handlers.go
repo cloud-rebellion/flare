@@ -87,7 +87,7 @@ func (s *Server) handleUploadNativeSymbolArtifact(w http.ResponseWriter, r *http
 	var outcome ingestOutcome
 	requestOutcome := "rejected"
 	defer func() {
-		outcome.record("symbols")
+		outcome.record("symbol")
 		recordIngestRequest("native", outcome, requestOutcome)
 	}()
 
