@@ -45,7 +45,36 @@ green tests are necessary evidence, but they are not live acceptance.
 | Flare control plane | An independent monitor sees public readiness and a canary's ingest-to-query journey, while a private scrape checks receipt failures and queue backlogs. A test alert reaches its actual email/webhook destination. A restored snapshot boots Flare and decrypts a harmless test secret. |
 | AI and release | A fresh triage receipt produces a bounded evidence digest. A human session approves the proposed source revision. Stage-owned proof verifies CI for source `P`, merge from `P` to `M`, deployment of `M`, and a distinct post-cutover public synthetic observation of `M`; unverified claims do not advance. |
 
-## Current proof boundary (2026-10-04)
+## Release checkpoint (2026-10-18)
+
+Read-only host and public-route checks at 15:35 UTC verified that production
+still runs Flare `v0.4.0+gc163e4d048165fc07b2e831bbd11f4af6b224516`, image
+`sha256:12b3cd9214a79d0a3bde40d4149e0803939bcf4b4652504be91f726d0f50704a`.
+Its container is running and healthy. Both reviewed public hosts return
+`application/json` readiness with that identity and Prometheus text at
+`/metrics`; the historical SPA observation below no longer describes those
+routes. Migration 087 is applied. These checks do not prove an authenticated
+dashboard journey: the available browser sessions have expired.
+
+The new coverage overview and SDK-loss view passed authenticated local browser
+checks with CSRF enabled, synthetic report ingestion, received-time windows,
+desktop/mobile layouts, project navigation, and stale-refresh recovery. Local
+parser and PostgreSQL tests cover report/event atomicity, receipt rollback,
+replay, row budgets, tenant boundaries, and skewed client clocks. These are
+local candidate results, not production acceptance. Sentry `client_report`
+counters describe SDK telemetry discards, not client assurance reports.
+
+The changes are on managed branch
+`agent/flare-coverage-sdk-loss-20261018`. The Stage scanner correction at
+`8aa4c12169274ebc8d8482e2a51a1535f0561026` still requires terminal Go CI and
+release before the new Flare candidate's exact checks. Flare's product policy
+requires `ci-bun`, `ci-go`, `migration-rehearsal`, `security-gate`, and
+`security-trivy`. Merge, migration rehearsal, deployment, authenticated live
+acceptance, actual alert delivery, and the broader per-application journeys
+remain distinct gates. A separate Reactor receiver port is in progress; no
+complete incident-to-approved-fix-to-deploy chain has been accepted.
+
+## Historical proof boundary (2026-10-04)
 
 The Flare, Stage, backup, Reactor, and first-party app changes described in this
 plan are local release candidates. The Flare API code through migration 085
@@ -194,11 +223,13 @@ servers and a BrightCRM process restart before delivery still need separate
 failure handling. Native symbol upload acceptance does not itself prove frame
 resolution.
 
-The public Flare `/metrics` probe and `/readyz` currently return the SPA shell
-at the live hostname, so a successful HTTP status is not a scrape or readiness
-proof. The preserved Flare `BASE_URL` is `https://flare.example.com`;
-both that hostname and `https://flare.cloudrebellion.tech` currently serve an
-HTML shell at `/readyz`. The new Stage map gate accepts only these reviewed
+On 2026-10-04, the public Flare `/metrics` probe and `/readyz` returned the SPA
+shell at the live hostname, so a successful HTTP status did not prove a scrape
+or readiness response. The preserved Flare `BASE_URL` was
+`https://flare.example.com`; both that hostname and
+`https://flare.cloudrebellion.tech` served an HTML shell at `/readyz` at that
+checkpoint. The 2026-10-18 checks above supersede this route observation.
+The Stage map gate accepts only these reviewed
 browser destinations and requires exact release JSON before upload. Stage's
 public synthetic verifies the shell, immutable assets, readiness, and release
 identity. Its new opt-in Chromium mode also exercises the anonymous login
