@@ -486,6 +486,18 @@ export interface OverviewIssue {
 
 export type ProjectHealth = 'healthy' | 'alert' | 'spike' | 'silent';
 
+export interface OverviewIntake {
+  accepted_24h: number;
+  rejected_24h: number;
+  dropped_24h: number;
+  last_accepted_unix: number;
+  sentry: boolean;
+  traces: boolean;
+  logs: boolean;
+  metrics: boolean;
+  business: boolean;
+}
+
 export interface OverviewProject {
   id: string;
   name: string;
@@ -496,6 +508,7 @@ export interface OverviewProject {
   /** Newest signal of any level (heartbeats included), unix seconds. 0 = no pulse in 7d. */
   last_seen_unix: number;
   volume: number[];
+  intake: OverviewIntake;
 }
 
 export interface Overview {
@@ -505,6 +518,9 @@ export interface Overview {
   volume: OverviewHourBucket[];
   top_issues: OverviewIssue[];
   projects: OverviewProject[];
+  reporting_projects_24h: number;
+  rejected_24h: number;
+  dropped_24h: number;
   alerting_blind: boolean;
 }
 

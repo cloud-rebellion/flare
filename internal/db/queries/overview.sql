@@ -76,3 +76,16 @@ SELECT project_id, max(received_at)::timestamptz AS last_seen
 FROM events
 WHERE org_id = $1 AND received_at >= now() - interval '7 days'
 GROUP BY project_id;
+
+-- ciguard:allow-no-project org-wide dashboard aggregate (scoped by org_id)
+-- name: OverviewIngestCoverage24h :many
+-- Completed receipts are the acceptance evidence. Pending requests are not.
+SELECT project_id, pillar,
+       sum(accepted_count)::bigint AS accepted_count,
+       sum(rejected_count)::bigint AS rejected_count,
+       sum(dropped_count)::bigint AS dropped_count,
+       max(received_at) FILTER (WHERE accepted_count > 0)::timestamptz AS last_accepted_at
+FROM ingest_receipts
+WHERE org_id = $1 AND received_at >= now() - interval '24 hours'
+  AND completed_at IS NOT NULL
+GROUP BY project_id, pillar;

@@ -23,23 +23,41 @@ type overviewIssue struct {
 }
 
 type overviewProject struct {
-	ID           string  `json:"id"`
-	Name         string  `json:"name"`
-	Slug         string  `json:"slug"`
-	Events24h    int64   `json:"events_24h"`
-	Unresolved   int64   `json:"unresolved"`
-	Status       string  `json:"status"`         // healthy | alert | spike | silent
-	LastSeenUnix int64   `json:"last_seen_unix"` // newest signal of any level; 0 = no pulse in 7d
-	Volume       []int64 `json:"volume"`         // overviewBuckets hourly error counts
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Slug         string         `json:"slug"`
+	Events24h    int64          `json:"events_24h"`
+	Unresolved   int64          `json:"unresolved"`
+	Status       string         `json:"status"`         // healthy | alert | spike | silent
+	LastSeenUnix int64          `json:"last_seen_unix"` // newest signal of any level; 0 = no pulse in 7d
+	Volume       []int64        `json:"volume"`         // overviewBuckets hourly error counts
+	Intake       overviewIntake `json:"intake"`
+}
+
+// Intake proves completed receipt acceptance, not instrumentation completeness
+// or application health. Sentry envelopes can contain errors or transactions.
+type overviewIntake struct {
+	Accepted24h      int64 `json:"accepted_24h"`
+	Rejected24h      int64 `json:"rejected_24h"`
+	Dropped24h       int64 `json:"dropped_24h"`
+	LastAcceptedUnix int64 `json:"last_accepted_unix"`
+	Sentry           bool  `json:"sentry"`
+	Traces           bool  `json:"traces"`
+	Logs             bool  `json:"logs"`
+	Metrics          bool  `json:"metrics"`
+	Business         bool  `json:"business"`
 }
 
 type overviewResponse struct {
-	Events24h  int64                `json:"events_24h"`
-	Unresolved int64                `json:"unresolved"`
-	NewToday   int64                `json:"new_today"`
-	Volume     []overviewHourBucket `json:"volume"`
-	TopIssues  []overviewIssue      `json:"top_issues"`
-	Projects   []overviewProject    `json:"projects"`
+	Events24h            int64                `json:"events_24h"`
+	Unresolved           int64                `json:"unresolved"`
+	NewToday             int64                `json:"new_today"`
+	Volume               []overviewHourBucket `json:"volume"`
+	TopIssues            []overviewIssue      `json:"top_issues"`
+	Projects             []overviewProject    `json:"projects"`
+	ReportingProjects24h int64                `json:"reporting_projects_24h"`
+	Rejected24h          int64                `json:"rejected_24h"`
+	Dropped24h           int64                `json:"dropped_24h"`
 	// AlertingBlind is true when the org has enabled alert rules but NO enabled
 	// notification channel: alerts would fire into the void and reach no human.
 	// This is the guardrail against the estate's "nothing could page a human"
@@ -159,13 +177,60 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	intakeByProject := map[string]overviewIntake{}
+	intakeRows, err := s.q.OverviewIngestCoverage24h(ctx, org)
+	if err != nil {
+		slogError(w, "overview ingest coverage", err)
+		return
+	}
+	for _, row := range intakeRows {
+		v := intakeByProject[row.ProjectID]
+		v.Rejected24h += row.RejectedCount
+		v.Dropped24h += row.DroppedCount
+		// Symbol uploads and connector setup are useful receipts, but they do
+		// not prove that an application is reporting runtime telemetry.
+		runtime := false
+		switch row.Pillar {
+		case "event", "envelope", "spans", "logs", "metrics", "business":
+			runtime = true
+		}
+		if runtime {
+			v.Accepted24h += row.AcceptedCount
+		}
+		if runtime && row.AcceptedCount > 0 {
+			if row.LastAcceptedAt.Valid && row.LastAcceptedAt.Time.Unix() > v.LastAcceptedUnix {
+				v.LastAcceptedUnix = row.LastAcceptedAt.Time.Unix()
+			}
+			switch row.Pillar {
+			case "event", "envelope":
+				v.Sentry = true
+			case "spans":
+				v.Traces = true
+			case "logs":
+				v.Logs = true
+			case "metrics":
+				v.Metrics = true
+			case "business":
+				v.Business = true
+			}
+		}
+		intakeByProject[row.ProjectID] = v
+	}
+
 	projects, err := s.q.ListProjectsByOrg(ctx, org)
 	if err != nil {
 		slogError(w, "overview projects", err)
 		return
 	}
 	cards := make([]overviewProject, 0, len(projects))
+	var reportingProjects, rejected24h, dropped24h int64
 	for _, p := range projects {
+		intake := intakeByProject[p.ID]
+		if intake.Accepted24h > 0 {
+			reportingProjects++
+		}
+		rejected24h += intake.Rejected24h
+		dropped24h += intake.Dropped24h
 		vol := projVol[p.ID]
 		if vol == nil {
 			vol = make([]int64, overviewBuckets)
@@ -184,6 +249,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			Status:       projectHealth(alive, vol, total),
 			LastSeenUnix: lastSeenUnix,
 			Volume:       vol,
+			Intake:       intake,
 		})
 	}
 	// Order by health (attention first, silent last), then busiest, then name.
@@ -213,6 +279,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, overviewResponse{
 		Events24h: events24h, Unresolved: unresolved, NewToday: newToday,
 		Volume: volume, TopIssues: top, Projects: cards,
+		ReportingProjects24h: reportingProjects,
+		Rejected24h:          rejected24h, Dropped24h: dropped24h,
 		AlertingBlind: enabledRules > 0 && enabledChannels == 0,
 	})
 }

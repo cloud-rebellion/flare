@@ -10,16 +10,23 @@
 
   let data = $state<Overview | null>(null);
   let error = $state<string | null>(null);
+  let lastRefreshed = $state<number>(0);
 
   $effect(() => {
     if (session.loaded && !session.user) goto('/login', { replaceState: true });
   });
 
-  onMount(load);
+  onMount(() => {
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
+  });
 
   async function load() {
     try {
       data = await api.overview();
+      error = null;
+      lastRefreshed = Math.floor(Date.now() / 1000);
     } catch (err) {
       error = err instanceof ApiError ? err.message : 'Failed to load the overview';
     }
@@ -46,6 +53,17 @@
     return { attention, healthy, silent };
   });
 
+  // Rejected intake comes first, followed by projects with no accepted
+  // telemetry. This is an investigation queue, not an application health score.
+  const coverageRows = $derived(
+    [...(data?.projects ?? [])].sort((a, b) =>
+      Number(b.intake.rejected_24h > 0) - Number(a.intake.rejected_24h > 0) ||
+      Number(a.intake.accepted_24h > 0) - Number(b.intake.accepted_24h > 0) ||
+      b.intake.rejected_24h - a.intake.rejected_24h ||
+      a.name.localeCompare(b.name)
+    )
+  );
+
   // Dot color per health state: rose (surging) / amber (erroring) / grey
   // (no pulse) / emerald (alive and clean).
   function dotColor(s: string): string {
@@ -69,21 +87,25 @@
   // pulse is the answer to "is it up?"), error counts for anything erroring.
   function subline(p: OverviewProject): string {
     if (p.status === 'silent') {
-      return p.last_seen_unix ? `no pulse · last seen ${relativeUnix(p.last_seen_unix)}` : 'never reported';
+      return p.last_seen_unix ? `no event pulse · last seen ${relativeUnix(p.last_seen_unix)}` : 'no event pulse observed';
     }
     if (p.status === 'healthy') {
-      return p.last_seen_unix ? `healthy · seen ${relativeUnix(p.last_seen_unix)}` : 'healthy';
+      return p.last_seen_unix ? `event pulse ${relativeUnix(p.last_seen_unix)} · no recent errors` : 'no recent errors';
     }
     return `${nf.format(p.events_24h)} error${p.events_24h === 1 ? '' : 's'} · ${nf.format(p.unresolved)} open`;
   }
 </script>
 
-<div class="mb-8 flex items-end justify-between">
+<div class="mb-8 flex flex-wrap items-end justify-between gap-4">
   <div>
-    <h1 class="text-xl font-semibold tracking-tight">Overview</h1>
-    <p class="mt-1 text-sm text-zinc-500">Error activity across every project.</p>
+    <p class="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-amber-500">Flare operations</p>
+    <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
+    <p class="mt-1 text-sm text-zinc-500">Incoming telemetry, gaps, and errors across your projects.</p>
   </div>
-  <span class="rounded-full border border-zinc-800 px-2.5 py-1 text-xs text-zinc-500">Last 24 hours</span>
+  <div class="flex items-center gap-3">
+    {#if lastRefreshed}<span class="text-xs text-zinc-600">Updated {relativeUnix(lastRefreshed)}</span>{/if}
+    <button type="button" onclick={load} class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800">Refresh</button>
+  </div>
 </div>
 
 {#if error}
@@ -106,6 +128,9 @@
     </div>
   </div>
 {:else}
+  {#if error}
+    <div class="mb-6 rounded-lg border border-rose-900/50 bg-rose-950/20 p-4 text-sm text-rose-300">Refresh failed: {error}. Showing the last loaded snapshot.</div>
+  {/if}
   {#if data.alerting_blind}
     <div class="mb-6 flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
       <span class="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400"></span>
@@ -119,23 +144,83 @@
       </div>
     </div>
   {/if}
-  <!-- Headline stats: one divided panel, not three floating cards -->
-  <div class="mb-6 grid grid-cols-3 overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40">
+  <!-- Acceptance is the first question: how many projects actually reported? -->
+  <div class="mb-6 grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 md:grid-cols-5">
+    <div class="border-b border-r border-zinc-800/80 p-5 md:border-b-0">
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Reporting (24h)</div>
+      <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{data.reporting_projects_24h}<span class="text-lg text-zinc-600"> / {data.projects.length}</span></div>
+      <div class="mt-1 text-xs text-zinc-600">Projects with accepted runtime intake</div>
+    </div>
+    <div class="border-b border-zinc-800/80 p-5 md:border-b-0 md:border-r">
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Rejected intake</div>
+      <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.rejected_24h > 0 ? 'text-rose-400' : 'text-zinc-100'}">{nf.format(data.rejected_24h)}</div>
+      <div class="mt-1 text-xs text-zinc-600">Items in completed receipts</div>
+    </div>
     <div class="border-r border-zinc-800/80 p-5">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Events (24h)</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Error events (24h)</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{nf.format(data.events_24h)}</div>
     </div>
     <div class="border-r border-zinc-800/80 p-5">
       <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Unresolved</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{nf.format(data.unresolved)}</div>
     </div>
-    <div class="p-5">
+    <div class="border-r border-zinc-800/80 p-5">
       <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">New today</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.new_today > 0 ? 'text-amber-400' : 'text-zinc-100'}">
         {nf.format(data.new_today)}
       </div>
     </div>
+    <div class="col-span-2 p-5 md:col-span-1">
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Dropped intake</div>
+      <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.dropped_24h > 0 ? 'text-amber-400' : 'text-zinc-100'}">{nf.format(data.dropped_24h)}</div>
+      <div class="mt-1 text-xs text-zinc-600">Items excluded by intake</div>
+    </div>
   </div>
+
+  <section class="mb-6 overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40">
+    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-800/80 px-5 py-4">
+      <div>
+        <h2 class="text-sm font-semibold text-zinc-100">Intake coverage</h2>
+        <p class="mt-1 text-xs text-zinc-500">Accepted runtime signals in the last 24 hours. A dash means no accepted intake observed; it does not prove the integration was expected or failed.</p>
+      </div>
+      <span class="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400">Completed receipts · 24h</span>
+    </div>
+    {#if coverageRows.length === 0}
+      <div class="px-5 py-8 text-sm text-zinc-500">No projects configured yet.</div>
+    {:else}
+      <div class="max-h-[560px] overflow-auto">
+        <table class="w-full min-w-[850px] text-left text-xs">
+          <thead class="sticky top-0 bg-zinc-900 text-zinc-500">
+            <tr class="border-b border-zinc-800">
+              <th class="px-5 py-3 font-medium">Project</th>
+              <th class="px-2 py-3 text-center font-medium">Sentry</th>
+              <th class="px-2 py-3 text-center font-medium">OTLP traces</th>
+              <th class="px-2 py-3 text-center font-medium">Logs</th>
+              <th class="px-2 py-3 text-center font-medium">Metrics</th>
+              <th class="px-2 py-3 text-center font-medium">Business</th>
+              <th class="px-4 py-3 text-right font-medium">Rejected</th>
+              <th class="px-5 py-3 text-right font-medium">Last accepted</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-zinc-800/60">
+            {#each coverageRows as p (p.id)}
+              <tr class="transition-colors hover:bg-zinc-800/30">
+                <td class="px-5 py-3">
+                  <a href={`/projects/${p.id}`} class="font-medium text-zinc-200 hover:text-amber-300">{p.name}</a>
+                  <div class="mt-0.5 text-[11px] text-zinc-600">{nf.format(p.intake.accepted_24h)} accepted</div>
+                </td>
+                {#each [p.intake.sentry, p.intake.traces, p.intake.logs, p.intake.metrics, p.intake.business] as seen, i (i)}
+                  <td class="px-2 py-3 text-center"><span class={seen ? 'font-semibold text-emerald-400' : 'text-zinc-700'} aria-label={seen ? 'accepted intake observed' : 'no accepted intake observed'}>{seen ? '●' : '-'}</span></td>
+                {/each}
+                <td class="px-4 py-3 text-right font-mono {p.intake.rejected_24h > 0 ? 'text-rose-400' : 'text-zinc-600'}">{nf.format(p.intake.rejected_24h)}</td>
+                <td class="px-5 py-3 text-right text-zinc-500">{p.intake.last_accepted_unix ? relativeUnix(p.intake.last_accepted_unix) : 'Not observed'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </section>
 
   <!-- Volume chart: gallery-style label outside the surface -->
   <div class="mb-6 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-5">
@@ -150,7 +235,7 @@
         Top issues
       </div>
       {#if data.top_issues.length === 0}
-        <div class="px-5 py-10 text-center text-sm text-zinc-600">No unresolved issues. All clear.</div>
+        <div class="px-5 py-10 text-center text-sm text-zinc-600">No unresolved issues in this view.</div>
       {:else}
         <ul class="divide-y divide-zinc-800/60">
           {#each data.top_issues as issue (issue.id)}
@@ -177,9 +262,9 @@
       <div class="flex items-center justify-between gap-3 border-b border-zinc-800/80 px-5 py-3">
         <span class="text-xs font-medium uppercase tracking-wide text-zinc-500">Projects</span>
         <span class="hidden text-[11px] text-zinc-600 sm:flex sm:items-center sm:gap-3">
-          <span class="flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>live</span>
+          <span class="flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>event pulse</span>
           <span class="flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>errors</span>
-          <span class="flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-full bg-zinc-600"></span>no pulse</span>
+          <span class="flex items-center gap-1"><span class="h-1.5 w-1.5 rounded-full bg-zinc-600"></span>no event pulse</span>
         </span>
       </div>
       {#if data.projects.length === 0}
@@ -250,9 +335,9 @@
           </div>
         {/if}
 
-        <!-- Healthy: alive and clean. Collapsed to a count by default. -->
+        <!-- Recent event pulse and no recent errors. -->
         {#if groups.healthy.length}
-          {@render groupHeader('Healthy', groups.healthy.length, 'bg-emerald-400', showHealthy, () => (showHealthy = !showHealthy), false)}
+          {@render groupHeader('No recent errors', groups.healthy.length, 'bg-emerald-400', showHealthy, () => (showHealthy = !showHealthy), false)}
           {#if showHealthy}
             <ul class="divide-y divide-zinc-800/60 border-t border-zinc-800/40">
               {#each groups.healthy as p (p.id)}{@render projectRow(p)}{/each}
@@ -260,9 +345,9 @@
           {/if}
         {/if}
 
-        <!-- No pulse: silent or never reported. Collapsed to a count by default. -->
+        <!-- No event pulse: may still have accepted logs, traces, or metrics. -->
         {#if groups.silent.length}
-          {@render groupHeader('No pulse', groups.silent.length, 'bg-zinc-600', showSilent, () => (showSilent = !showSilent), false)}
+          {@render groupHeader('No event pulse', groups.silent.length, 'bg-zinc-600', showSilent, () => (showSilent = !showSilent), false)}
           {#if showSilent}
             <ul class="divide-y divide-zinc-800/60 border-t border-zinc-800/40">
               {#each groups.silent as p (p.id)}{@render projectRow(p)}{/each}

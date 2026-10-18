@@ -654,6 +654,40 @@ type SourceMapArtifact struct {
 	ParseStatus string             `json:"parse_status"`
 }
 
+type SourceMapBundle struct {
+	ID            string             `json:"id"`
+	ProjectID     string             `json:"project_id"`
+	OrgID         string             `json:"org_id"`
+	Release       string             `json:"release"`
+	Digest        string             `json:"digest"`
+	ArtifactCount int32              `json:"artifact_count"`
+	TotalBytes    int64              `json:"total_bytes"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type SourceMapBundleItem struct {
+	BundleID      string `json:"bundle_id"`
+	ArtifactID    string `json:"artifact_id"`
+	ContentSha256 string `json:"content_sha256"`
+}
+
+type SourceMapBundleRetirement struct {
+	ID                   string             `json:"id"`
+	OrgID                string             `json:"org_id"`
+	ProjectID            string             `json:"project_id"`
+	BundleID             string             `json:"bundle_id"`
+	Release              string             `json:"release"`
+	Digest               string             `json:"digest"`
+	ArtifactCount        int32              `json:"artifact_count"`
+	TotalBytes           int64              `json:"total_bytes"`
+	ActorUserID          string             `json:"actor_user_id"`
+	ProtectionRef        string             `json:"protection_ref"`
+	ProtectionGeneration string             `json:"protection_generation"`
+	EventPolicyRef       string             `json:"event_policy_ref"`
+	LastValidEventAt     pgtype.Timestamptz `json:"last_valid_event_at"`
+	RetiredAt            pgtype.Timestamptz `json:"retired_at"`
+}
+
 type Span struct {
 	TraceID      string             `json:"trace_id"`
 	SpanID       string             `json:"span_id"`

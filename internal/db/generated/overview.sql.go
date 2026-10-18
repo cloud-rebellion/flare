@@ -72,6 +72,56 @@ func (q *Queries) OverviewEventVolumeByHour(ctx context.Context, orgID string) (
 	return items, nil
 }
 
+const overviewIngestCoverage24h = `-- name: OverviewIngestCoverage24h :many
+SELECT project_id, pillar,
+       sum(accepted_count)::bigint AS accepted_count,
+       sum(rejected_count)::bigint AS rejected_count,
+       sum(dropped_count)::bigint AS dropped_count,
+       max(received_at) FILTER (WHERE accepted_count > 0)::timestamptz AS last_accepted_at
+FROM ingest_receipts
+WHERE org_id = $1 AND received_at >= now() - interval '24 hours'
+  AND completed_at IS NOT NULL
+GROUP BY project_id, pillar
+`
+
+type OverviewIngestCoverage24hRow struct {
+	ProjectID      string             `json:"project_id"`
+	Pillar         string             `json:"pillar"`
+	AcceptedCount  int64              `json:"accepted_count"`
+	RejectedCount  int64              `json:"rejected_count"`
+	DroppedCount   int64              `json:"dropped_count"`
+	LastAcceptedAt pgtype.Timestamptz `json:"last_accepted_at"`
+}
+
+// ciguard:allow-no-project org-wide dashboard aggregate (scoped by org_id)
+// Completed receipts are the acceptance evidence. Pending requests are not.
+func (q *Queries) OverviewIngestCoverage24h(ctx context.Context, orgID string) ([]*OverviewIngestCoverage24hRow, error) {
+	rows, err := q.db.Query(ctx, overviewIngestCoverage24h, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*OverviewIngestCoverage24hRow{}
+	for rows.Next() {
+		var i OverviewIngestCoverage24hRow
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.Pillar,
+			&i.AcceptedCount,
+			&i.RejectedCount,
+			&i.DroppedCount,
+			&i.LastAcceptedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, &i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const overviewNewIssuesToday = `-- name: OverviewNewIssuesToday :one
 SELECT count(*) FROM issues
 WHERE org_id = $1 AND first_seen >= date_trunc('day', now())
