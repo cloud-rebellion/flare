@@ -3984,7 +3984,89 @@
         ],
         "responses": {
           "200": {
-            "description": "Bounded payload-free AI operation outcomes. Match the id to a fresh triage response's ai_receipt_id and require succeeded status, the same issue, and evidence_digest; cached reads have no evidence_digest"
+            "description": "Bounded newest-first payload-free AI operation outcomes. Use the exact receipt endpoint to confirm a fresh run outside this list's window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 500,
+                  "items": {
+                    "$ref": "#/components/schemas/AIActionReceipt"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/ai-receipts/{receiptID}": {
+      "get": {
+        "tags": [
+          "Projects"
+        ],
+        "summary": "Read one exact AI action receipt",
+        "description": "Organization and project scoped. Available independently of the newest 500 receipts. Require the exact fresh ai_receipt_id, matching issue and evidence_digest, succeeded status, and completed_at before treating the receipt as fresh completed triage evidence. Started, cached, failed, or unavailable receipts are not that proof.",
+        "security": [
+          {
+            "apiKey": [
+
+            ]
+          },
+          {
+            "session": [
+
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "receiptID",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact payload-free AI operation outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AIActionReceipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project or receipt absent or inaccessible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -6964,6 +7046,69 @@
             "type": "string",
             "format": "date-time",
             "nullable": true
+          }
+        }
+      },
+      "AIActionReceipt": {
+        "type": "object",
+        "description": "Payload-free metadata for one AI operation; no prompts, completions, credentials, or provider error text.",
+        "required": [
+          "id",
+          "issue_id",
+          "operation",
+          "status",
+          "provider",
+          "retryable"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Exact run ID returned as ai_receipt_id by fresh completed triage"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "started",
+              "succeeded",
+              "cached",
+              "failed"
+            ]
+          },
+          "provider": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Fingerprint of bounded scrubbed evidence for a fresh provider call; omitted when empty"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Omitted while the receipt remains started"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "error_code": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

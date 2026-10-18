@@ -66,6 +66,39 @@ func (q *Queries) CompleteAIActionReceipt(ctx context.Context, arg CompleteAIAct
 	return &i, err
 }
 
+const getAIActionReceiptByProject = `-- name: GetAIActionReceiptByProject :one
+SELECT id, org_id, project_id, issue_id, operation, status, provider, started_at, completed_at, retryable, error_code, created_at, evidence_digest
+FROM ai_action_receipts
+WHERE org_id = $1 AND project_id = $2 AND id = $3
+`
+
+type GetAIActionReceiptByProjectParams struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+}
+
+func (q *Queries) GetAIActionReceiptByProject(ctx context.Context, arg GetAIActionReceiptByProjectParams) (*AiActionReceipt, error) {
+	row := q.db.QueryRow(ctx, getAIActionReceiptByProject, arg.OrgID, arg.ProjectID, arg.ID)
+	var i AiActionReceipt
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.ProjectID,
+		&i.IssueID,
+		&i.Operation,
+		&i.Status,
+		&i.Provider,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Retryable,
+		&i.ErrorCode,
+		&i.CreatedAt,
+		&i.EvidenceDigest,
+	)
+	return &i, err
+}
+
 const insertAIActionReceipt = `-- name: InsertAIActionReceipt :one
 
 INSERT INTO ai_action_receipts (

@@ -1159,10 +1159,16 @@ leave it empty. Prompts, responses, credentials, and upstream error text are
 never stored or returned. The REST triage response and the `triage_issue` MCP
 result include `evidence_digest` and `ai_receipt_id` for a fresh completed call.
 The digest identifies the evidence snapshot, while the ID identifies this
-particular run even if another run used the same evidence. A worker must find
-that exact ID in the project AI receipts, verify its issue, digest, and
-`succeeded` status, then submit the digest as a passed patch receipt's
-`evidence_ref`. Cached results omit both fields.
+particular run even if another run used the same evidence. A worker reads
+`GET /api/projects/{id}/ai-receipts/{receiptID}` with that exact `ai_receipt_id`;
+this returns one receipt using the same fields as the list, even after the run
+has left the newest 500 rows. Both organization and project are checked. An
+absent or inaccessible project or receipt returns `404`, with no fallback to
+another run sharing its digest. Verify the returned ID, issue, digest,
+`succeeded` status, and completion time before submitting the digest as a
+passed patch receipt's `evidence_ref`. A `started` receipt omits `completed_at`
+and is not completion proof; `cached` and `failed` receipts are not successful
+fresh-call evidence. Cached triage results omit both provenance fields.
 The receipt start is part of triage acceptance: if Flare cannot write the
 `started` row, triage returns a typed retryable `503` and does not call the
 provider. Completion writes use a short detached deadline and remain

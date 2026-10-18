@@ -1,12 +1,14 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/flare/internal/db/generated"
 )
@@ -54,6 +56,38 @@ func (s *Server) handleListAIActionReceipts(w http.ResponseWriter, r *http.Reque
 		out = append(out, toAIActionReceiptResponse(row))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetAIActionReceipt reads one exact run without relying on the newest
+// receipts list. Both the project and receipt are bound to the authenticated
+// organization; an unavailable receipt never falls back to a matching digest.
+func (s *Server) handleGetAIActionReceipt(w http.ResponseWriter, r *http.Request) {
+	orgID, projectID := orgIDFrom(r.Context()), chi.URLParam(r, "id")
+	if orgID == "" {
+		writeErr(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	_, err := s.q.GetProjectByID(r.Context(), generated.GetProjectByIDParams{ID: projectID, OrgScope: orgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		slogError(w, "get ai action receipt project", err)
+		return
+	}
+	row, err := s.q.GetAIActionReceiptByProject(r.Context(), generated.GetAIActionReceiptByProjectParams{
+		OrgID: orgID, ProjectID: projectID, ID: chi.URLParam(r, "receiptID"),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "ai action receipt not found")
+		return
+	}
+	if err != nil {
+		slogError(w, "get ai action receipt", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toAIActionReceiptResponse(row))
 }
 
 func aiActionReceiptLimit(r *http.Request) int32 {

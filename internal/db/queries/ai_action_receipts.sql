@@ -26,6 +26,11 @@ SET status = $4,
 WHERE id = $1 AND org_id = $2 AND project_id = $3
 RETURNING *;
 
+-- name: GetAIActionReceiptByProject :one
+SELECT *
+FROM ai_action_receipts
+WHERE org_id = $1 AND project_id = $2 AND id = $3;
+
 -- name: ListAIActionReceiptsByProject :many
 SELECT *
 FROM ai_action_receipts

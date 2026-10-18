@@ -89,4 +89,7 @@ func TestAIActionReceiptRouteIsAuthenticatedViewerRead(t *testing.T) {
 	if !strings.Contains(readBlock, `r.Get("/projects/{id}/ai-receipts", s.handleListAIActionReceipts)`) {
 		t.Fatal("AI action receipt route is not in the authenticated viewer read group")
 	}
+	if !strings.Contains(readBlock, `r.Get("/projects/{id}/ai-receipts/{receiptID}", s.handleGetAIActionReceipt)`) {
+		t.Fatal("exact AI action receipt route is not in the authenticated viewer read group")
+	}
 }
