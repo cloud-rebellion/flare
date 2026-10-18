@@ -475,6 +475,26 @@ export interface OverviewHourBucket {
   count: number;
 }
 
+export interface SdkDiscardBreakdown {
+  reason: string;
+  category: string;
+  kind: string;
+  quantity: string;
+  reports: number;
+  first_received_at: string;
+  last_received_at: string;
+}
+
+export interface SdkDiscards {
+  source_kind: 'client_reported';
+  protocol: 'sentry';
+  window_hours: number;
+  window_basis: 'received_at';
+  since: string;
+  breakdown: SdkDiscardBreakdown[];
+  interpretation: string;
+}
+
 export interface OverviewIssue {
   id: string;
   title: string;
@@ -496,6 +516,7 @@ export interface OverviewIntake {
   logs: boolean;
   metrics: boolean;
   business: boolean;
+  connectors: boolean;
 }
 
 export interface OverviewProject {

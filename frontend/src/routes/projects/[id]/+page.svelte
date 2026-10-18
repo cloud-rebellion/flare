@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import ProjectTabs from '$lib/components/ProjectTabs.svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, ApiError } from '$lib/api';
@@ -636,14 +637,7 @@
     </button>
   </div>
 
-  <div class="mb-5 flex items-center gap-1 border-b border-zinc-800/80">
-    <a href="/projects/{id}" class="-mb-px border-b-2 border-amber-400 px-3 py-2 text-sm text-zinc-100">Issues</a>
-    <a href="/projects/{id}/logs" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Logs</a>
-    <a href="/projects/{id}/traces" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Traces</a>
-    <a href="/projects/{id}/metrics" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Metrics</a>
-    <a href="/projects/{id}/business-health" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Business</a>
-    <a href="/projects/{id}/releases" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Releases</a>
-  </div>
+  <ProjectTabs projectId={id} active="issues" />
 
   {#if setupOpen}
     <div class="mb-8 grid gap-6 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-5 md:grid-cols-2">

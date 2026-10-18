@@ -37,7 +37,10 @@ func validSentryItemID(value string) bool {
 // claimSentryItem reserves a project-bound identity in the caller's telemetry
 // transaction. Unique indexes serialize concurrent replays; a rolled-back
 // telemetry transaction rolls back the identity too. Exact payload duplicates
-// are already accepted and need no second issue/spans write.
+// are already accepted and need no second issue/spans/client-report write.
+// Client reports have no item ID: matching bytes (including their timestamp)
+// are replay-deduplicated per project. Identical reports from independent SDKs
+// can therefore collide; SDK discard counts remain client assertions.
 func claimSentryItem(ctx context.Context, tx pgx.Tx, orgID, projectID, itemType, itemID, payloadHash string) (duplicate bool, err error) {
 	var identity any
 	if itemID != "" {

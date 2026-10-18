@@ -19,6 +19,13 @@ export function relativeUnix(sec: number): string {
   return relativeTime(new Date(sec * 1000).toISOString());
 }
 
+// Decimal counter strings may exceed JavaScript's safe integer range. Keep
+// them as integers through formatting so a reported unit is never rounded away.
+export function formatExactQuantity(value: string, locale?: string): string {
+  if (!/^[0-9]+$/.test(value)) return 'Unavailable';
+  return new Intl.NumberFormat(locale).format(BigInt(value));
+}
+
 // levelColor returns Tailwind text classes for an event/issue level.
 export function levelColor(level: string): string {
   switch (level) {

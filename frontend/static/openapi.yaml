@@ -1399,6 +1399,52 @@ paths:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
       responses:
         "200": { description: Bounded payload-free request accounting }
+  /api/projects/{id}/sdk-discards:
+    get:
+      tags: [Projects]
+      summary: Query client-asserted SDK discard counters
+      description: >
+        Bounded Sentry client_report counters, grouped by reason and category
+        using receiver time. Sampling and filtering can be intentional.
+        Category units differ and must not be summed into one lost-event total.
+        Exact report bytes are replay-deduplicated per project; identical
+        independent reports can collide. A foreign project returns 404.
+      security: [{ apiKey: [] }, { session: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: hours, in: query, schema: { type: integer, minimum: 1, maximum: 168, default: 24 } }
+      responses:
+        "200":
+          description: SDK assertions, including an empty breakdown when no counters were observed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [source_kind, protocol, window_hours, window_basis, since, breakdown, interpretation]
+                properties:
+                  source_kind: { type: string, const: client_reported }
+                  protocol: { type: string, const: sentry }
+                  window_hours: { type: integer, minimum: 1, maximum: 168 }
+                  window_basis: { type: string, const: received_at }
+                  since: { type: string, format: date-time }
+                  interpretation: { type: string }
+                  breakdown:
+                    type: array
+                    maxItems: 500
+                    items:
+                      type: object
+                      required: [reason, category, kind, quantity, reports, first_received_at, last_received_at]
+                      properties:
+                        reason: { type: string, maxLength: 64 }
+                        category: { type: string, maxLength: 64 }
+                        kind: { type: string, enum: [sampling, filtering, buffer, rate_limited, delivery, sdk_error, unknown] }
+                        quantity: { type: string, pattern: '^[0-9]+$', description: Exact decimal sum in the category's units }
+                        reports: { type: integer, format: int64, minimum: 1, description: Distinct report payloads in this bucket; buckets can overlap }
+                        first_received_at: { type: [string, 'null'], format: date-time }
+                        last_received_at: { type: [string, 'null'], format: date-time }
+        "400": { description: Invalid hours window, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { description: Authentication required, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { description: Project absent or inaccessible, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/projects/{id}/ai-receipts:
     get:
       tags: [Projects]

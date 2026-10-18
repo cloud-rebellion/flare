@@ -46,6 +46,36 @@ type overviewIntake struct {
 	Logs             bool  `json:"logs"`
 	Metrics          bool  `json:"metrics"`
 	Business         bool  `json:"business"`
+	Connectors       bool  `json:"connectors"`
+}
+
+func (v *overviewIntake) add(pillar string, accepted, rejected, dropped, lastAcceptedUnix int64) {
+	v.Rejected24h += rejected
+	v.Dropped24h += dropped
+	if accepted == 0 {
+		return
+	}
+	switch pillar {
+	case "event", "envelope":
+		v.Sentry = true
+	case "spans":
+		v.Traces = true
+	case "logs":
+		v.Logs = true
+	case "metrics":
+		v.Metrics = true
+	case "business":
+		v.Business = true
+	case "connectors":
+		v.Connectors = true
+	default:
+		// Symbol uploads and other artifacts do not prove runtime reporting.
+		return
+	}
+	v.Accepted24h += accepted
+	if lastAcceptedUnix > v.LastAcceptedUnix {
+		v.LastAcceptedUnix = lastAcceptedUnix
+	}
 }
 
 type overviewResponse struct {
@@ -185,35 +215,11 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, row := range intakeRows {
 		v := intakeByProject[row.ProjectID]
-		v.Rejected24h += row.RejectedCount
-		v.Dropped24h += row.DroppedCount
-		// Symbol uploads and connector setup are useful receipts, but they do
-		// not prove that an application is reporting runtime telemetry.
-		runtime := false
-		switch row.Pillar {
-		case "event", "envelope", "spans", "logs", "metrics", "business":
-			runtime = true
+		var lastAcceptedUnix int64
+		if row.LastAcceptedAt.Valid {
+			lastAcceptedUnix = row.LastAcceptedAt.Time.Unix()
 		}
-		if runtime {
-			v.Accepted24h += row.AcceptedCount
-		}
-		if runtime && row.AcceptedCount > 0 {
-			if row.LastAcceptedAt.Valid && row.LastAcceptedAt.Time.Unix() > v.LastAcceptedUnix {
-				v.LastAcceptedUnix = row.LastAcceptedAt.Time.Unix()
-			}
-			switch row.Pillar {
-			case "event", "envelope":
-				v.Sentry = true
-			case "spans":
-				v.Traces = true
-			case "logs":
-				v.Logs = true
-			case "metrics":
-				v.Metrics = true
-			case "business":
-				v.Business = true
-			}
-		}
+		v.add(row.Pillar, row.AcceptedCount, row.RejectedCount, row.DroppedCount, lastAcceptedUnix)
 		intakeByProject[row.ProjectID] = v
 	}
 

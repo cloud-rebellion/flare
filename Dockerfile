@@ -37,7 +37,7 @@ RUN if [ -n "${FLARE_COMMIT}" ]; then \
 # bytes and member credentials never enter that image.
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
-FROM golang:1.26.9-bookworm AS backend
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS backend
 WORKDIR /app
 ARG FLARE_RELEASE=v0.5.0
 ARG FLARE_COMMIT=""

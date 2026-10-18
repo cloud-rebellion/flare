@@ -100,15 +100,15 @@
   <div>
     <p class="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-amber-500">Flare operations</p>
     <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
-    <p class="mt-1 text-sm text-zinc-500">Incoming telemetry, gaps, and errors across your projects.</p>
+    <p class="mt-1 text-sm text-zinc-400">Incoming telemetry, gaps, and errors across your projects.</p>
   </div>
   <div class="flex items-center gap-3">
-    {#if lastRefreshed}<span class="text-xs text-zinc-600">Updated {relativeUnix(lastRefreshed)}</span>{/if}
+    {#if lastRefreshed}<span class="text-xs text-zinc-400">Updated at {new Date(lastRefreshed * 1000).toLocaleTimeString()}</span>{/if}
     <button type="button" onclick={load} class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800">Refresh</button>
   </div>
 </div>
 
-{#if error}
+{#if error && !data}
   <div class="rounded-lg border border-rose-900/50 bg-rose-950/20 p-5 text-sm text-rose-300">{error}</div>
 {:else if !data}
   <!-- Loading: skeleton matching the real layout -->
@@ -145,35 +145,35 @@
     </div>
   {/if}
   <!-- Acceptance is the first question: how many projects actually reported? -->
-  <div class="mb-6 grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 md:grid-cols-5">
+  <div class="mb-6 grid grid-cols-2 overflow-hidden rounded-lg border border-zinc-800/80 bg-zinc-900/40 md:grid-cols-3 xl:grid-cols-6">
     <div class="border-b border-r border-zinc-800/80 p-5 md:border-b-0">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Reporting (24h)</div>
-      <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{data.reporting_projects_24h}<span class="text-lg text-zinc-600"> / {data.projects.length}</span></div>
-      <div class="mt-1 text-xs text-zinc-600">Projects with accepted runtime intake</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">Reporting (24h)</div>
+      <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{data.reporting_projects_24h}<span class="text-lg text-zinc-400"> / {data.projects.length}</span></div>
+      <div class="mt-1 text-xs text-zinc-400">Projects with accepted runtime intake</div>
     </div>
     <div class="border-b border-zinc-800/80 p-5 md:border-b-0 md:border-r">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Rejected intake</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">Rejected intake</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.rejected_24h > 0 ? 'text-rose-400' : 'text-zinc-100'}">{nf.format(data.rejected_24h)}</div>
-      <div class="mt-1 text-xs text-zinc-600">Items in completed receipts</div>
+      <div class="mt-1 text-xs text-zinc-400">Items in completed receipts</div>
     </div>
     <div class="border-r border-zinc-800/80 p-5">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Error events (24h)</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">Error events (24h)</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{nf.format(data.events_24h)}</div>
     </div>
     <div class="border-r border-zinc-800/80 p-5">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Unresolved</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">Unresolved</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight text-zinc-100">{nf.format(data.unresolved)}</div>
     </div>
     <div class="border-r border-zinc-800/80 p-5">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">New today</div>
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">New today</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.new_today > 0 ? 'text-amber-400' : 'text-zinc-100'}">
         {nf.format(data.new_today)}
       </div>
     </div>
-    <div class="col-span-2 p-5 md:col-span-1">
-      <div class="text-xs font-medium uppercase tracking-wide text-zinc-500">Dropped intake</div>
+    <div class="p-5">
+      <div class="text-xs font-medium uppercase tracking-wide text-zinc-400">Dropped intake</div>
       <div class="mt-2 font-mono text-3xl font-semibold tracking-tight {data.dropped_24h > 0 ? 'text-amber-400' : 'text-zinc-100'}">{nf.format(data.dropped_24h)}</div>
-      <div class="mt-1 text-xs text-zinc-600">Items excluded by intake</div>
+      <div class="mt-1 text-xs text-zinc-400">Items excluded by intake</div>
     </div>
   </div>
 
@@ -181,16 +181,16 @@
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-800/80 px-5 py-4">
       <div>
         <h2 class="text-sm font-semibold text-zinc-100">Intake coverage</h2>
-        <p class="mt-1 text-xs text-zinc-500">Accepted runtime signals in the last 24 hours. A dash means no accepted intake observed; it does not prove the integration was expected or failed.</p>
+        <p class="mt-1 text-xs text-zinc-400">Accepted runtime signals in the last 24 hours. A dash means no accepted intake observed; it does not prove the integration was expected or failed.</p>
       </div>
       <span class="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400">Completed receipts · 24h</span>
     </div>
     {#if coverageRows.length === 0}
-      <div class="px-5 py-8 text-sm text-zinc-500">No projects configured yet.</div>
+      <div class="px-5 py-8 text-sm text-zinc-400">No projects configured yet.</div>
     {:else}
       <div class="max-h-[560px] overflow-auto">
         <table class="w-full min-w-[850px] text-left text-xs">
-          <thead class="sticky top-0 bg-zinc-900 text-zinc-500">
+          <thead class="sticky top-0 bg-zinc-900 text-zinc-400">
             <tr class="border-b border-zinc-800">
               <th class="px-5 py-3 font-medium">Project</th>
               <th class="px-2 py-3 text-center font-medium">Sentry</th>
@@ -198,6 +198,7 @@
               <th class="px-2 py-3 text-center font-medium">Logs</th>
               <th class="px-2 py-3 text-center font-medium">Metrics</th>
               <th class="px-2 py-3 text-center font-medium">Business</th>
+              <th class="px-2 py-3 text-center font-medium">Connectors</th>
               <th class="px-4 py-3 text-right font-medium">Rejected</th>
               <th class="px-5 py-3 text-right font-medium">Last accepted</th>
             </tr>
@@ -207,13 +208,13 @@
               <tr class="transition-colors hover:bg-zinc-800/30">
                 <td class="px-5 py-3">
                   <a href={`/projects/${p.id}`} class="font-medium text-zinc-200 hover:text-amber-300">{p.name}</a>
-                  <div class="mt-0.5 text-[11px] text-zinc-600">{nf.format(p.intake.accepted_24h)} accepted</div>
+                  <div class="mt-0.5 text-[11px] text-zinc-400">{nf.format(p.intake.accepted_24h)} accepted</div>
                 </td>
-                {#each [p.intake.sentry, p.intake.traces, p.intake.logs, p.intake.metrics, p.intake.business] as seen, i (i)}
-                  <td class="px-2 py-3 text-center"><span class={seen ? 'font-semibold text-emerald-400' : 'text-zinc-700'} aria-label={seen ? 'accepted intake observed' : 'no accepted intake observed'}>{seen ? '●' : '-'}</span></td>
+                {#each [p.intake.sentry, p.intake.traces, p.intake.logs, p.intake.metrics, p.intake.business, p.intake.connectors] as seen, i (i)}
+                  <td class="px-2 py-3 text-center"><span class={seen ? 'font-semibold text-emerald-400' : 'text-zinc-500'} aria-label={seen ? 'accepted intake observed' : 'no accepted intake observed'}>{seen ? '●' : '-'}</span></td>
                 {/each}
-                <td class="px-4 py-3 text-right font-mono {p.intake.rejected_24h > 0 ? 'text-rose-400' : 'text-zinc-600'}">{nf.format(p.intake.rejected_24h)}</td>
-                <td class="px-5 py-3 text-right text-zinc-500">{p.intake.last_accepted_unix ? relativeUnix(p.intake.last_accepted_unix) : 'Not observed'}</td>
+                <td class="px-4 py-3 text-right font-mono {p.intake.rejected_24h > 0 ? 'text-rose-400' : 'text-zinc-400'}">{nf.format(p.intake.rejected_24h)}</td>
+                <td class="px-5 py-3 text-right text-zinc-400">{p.intake.last_accepted_unix ? relativeUnix(p.intake.last_accepted_unix) : 'Not observed'}</td>
               </tr>
             {/each}
           </tbody>

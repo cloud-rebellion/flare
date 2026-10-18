@@ -47,12 +47,12 @@
 <div class="min-h-[100dvh] text-zinc-100">
   {#if session.user}
     <header class="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur">
-      <div class="mx-auto flex h-14 max-w-6xl items-center gap-6 px-5">
+      <div class="mx-auto flex min-h-14 max-w-6xl flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3 sm:h-14 sm:flex-nowrap sm:gap-6 sm:py-0">
         <a href="/projects" class="flex items-center gap-2">
           <span class="inline-block h-2.5 w-2.5 rounded-full bg-amber-400 shadow-[0_0_10px_2px_rgba(251,191,36,0.4)]"></span>
           <span class="text-sm font-semibold tracking-tight">Flare</span>
         </a>
-        <nav class="flex items-center gap-1 text-sm">
+        <nav class="order-3 flex w-full items-center gap-1 overflow-x-auto text-sm sm:order-none sm:w-auto">
           {#each navItems as item (item.href)}
             <a
               href={item.href}
@@ -64,7 +64,7 @@
             </a>
           {/each}
         </nav>
-        <div class="ml-auto flex items-center gap-3 text-sm">
+        <div class="ml-auto flex shrink-0 items-center gap-3 text-sm">
           <span class="hidden text-zinc-500 sm:inline">{session.user.email}</span>
           <button
             type="button"
@@ -86,7 +86,7 @@
           </button>
           <button
             onclick={logout}
-            class="rounded-md border border-zinc-800 px-2.5 py-1.5 text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200 active:translate-y-px"
+            class="whitespace-nowrap rounded-md border border-zinc-800 px-2.5 py-1.5 text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200 active:translate-y-px"
           >
             Sign out
           </button>

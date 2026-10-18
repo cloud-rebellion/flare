@@ -48,27 +48,40 @@ const (
 
 // handleEnvelope ingests a Sentry envelope (the modern @sentry/* SDK path).
 func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
-	var eventOutcome, transactionOutcome, spanOutcome, otherOutcome ingestOutcome
+	var eventOutcome, transactionOutcome, spanOutcome, clientReportOutcome, otherOutcome ingestOutcome
 	var budget *ingestBudget
-	var droppedEvents, droppedTransactions, droppedOther uint64
+	var droppedEvents, droppedTransactions, droppedClientReports, droppedOther uint64
 	var receipt *ingestReceipt
 	var receiptCommitAttempted bool
 	receiptStatus := http.StatusOK
 	requestOutcome := "rejected"
+	// Build wire counts from copies, including items truncated before parsing.
+	// Deferred metrics and terminal receipts account for the same cap drops.
+	writeResult := func(status int, eventID, message string) {
+		events, transactions, reports, other := eventOutcome, transactionOutcome, clientReportOutcome, otherOutcome
+		events.dropped += droppedEvents
+		transactions.dropped += droppedTransactions
+		reports.dropped += droppedClientReports
+		other.dropped += droppedOther
+		writeEnvelopeResult(w, status, eventID, receipt.received, events, transactions, spanOutcome, reports, other, message)
+	}
 	defer func() {
 		if budget != nil {
 			spanOutcome.dropped = uint64(budget.dropped)
 		}
 		eventOutcome.dropped += droppedEvents
 		transactionOutcome.dropped += droppedTransactions
+		clientReportOutcome.dropped += droppedClientReports
 		otherOutcome.dropped += droppedOther
 		eventOutcome.record("event")
 		transactionOutcome.record("transaction")
 		spanOutcome.record("span")
+		clientReportOutcome.record("client_report")
 		otherOutcome.record("other")
 		total := eventOutcome
 		total.add(transactionOutcome)
 		total.add(spanOutcome)
+		total.add(clientReportOutcome)
 		total.add(otherOutcome)
 		recordIngestRequest("sentry", total, requestOutcome)
 		if !receiptCommitAttempted {
@@ -106,6 +119,8 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 				droppedEvents++
 			case "transaction":
 				droppedTransactions++
+			case "client_report":
+				droppedClientReports++
 			default:
 				droppedOther++
 			}
@@ -113,7 +128,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 		items = items[:maxEnvelopeItems]
 		slog.Warn("envelope truncated: too many items",
 			"project_id", project.ID, "kept", maxEnvelopeItems,
-			"dropped", droppedEvents+droppedTransactions+droppedOther)
+			"dropped", droppedEvents+droppedTransactions+droppedClientReports+droppedOther)
 	}
 
 	// One budget for the whole request. maxEnvelopeItems bounds the ITEMS, and on
@@ -126,13 +141,14 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	// deliberate rejection, but a later store failure rolls back all writes so
 	// a whole-envelope retry cannot repeat already committed earlier items.
 	type preparedItem struct {
-		item        ingest.EnvelopeItem
-		spans       []ingest.SpanRecord
-		itemID      string
-		payloadHash string
+		item         ingest.EnvelopeItem
+		spans        []ingest.SpanRecord
+		clientReport ingest.ClientReport
+		itemID       string
+		payloadHash  string
 	}
 	prepared := make([]preparedItem, 0, len(items))
-	var validEvents, validTransactions int
+	var validEvents, validTransactions, validClientReports int
 	for _, item := range items {
 		switch item.Type {
 		case "event":
@@ -158,15 +174,23 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			}
 			validTransactions++
 			prepared = append(prepared, preparedItem{item: item, spans: spans, itemID: strings.ToLower(identity.EventID), payloadHash: sentryPayloadHash(item.Payload)})
+		case "client_report":
+			report, err := ingest.ParseSentryClientReport(item.Payload)
+			if err != nil {
+				clientReportOutcome.invalid++
+				continue
+			}
+			validClientReports++
+			prepared = append(prepared, preparedItem{item: item, clientReport: report, payloadHash: sentryPayloadHash(item.Payload)})
 		default:
-			// Sessions, attachments and client reports are not supported.
+			// Sessions, attachments and other item types are not supported.
 			otherOutcome.invalid++
 		}
 	}
 	if len(prepared) == 0 {
-		if eventOutcome.invalid+transactionOutcome.invalid+otherOutcome.invalid > 0 {
+		if eventOutcome.invalid+transactionOutcome.invalid+clientReportOutcome.invalid+otherOutcome.invalid > 0 {
 			receiptStatus = http.StatusBadRequest
-			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "no valid event or transaction")
+			writeResult(receiptStatus, "", "no valid event, transaction or client report")
 			return
 		}
 		// An empty but valid envelope has no payload transaction. Still close its
@@ -176,10 +200,10 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			requestOutcome = "failed"
 			receiptStatus = http.StatusServiceUnavailable
 			w.Header().Set("Retry-After", "1")
-			writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "telemetry acceptance is temporarily unavailable")
+			writeResult(receiptStatus, "", "telemetry acceptance is temporarily unavailable")
 			return
 		}
-		writeEnvelopeResult(w, http.StatusOK, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
+		writeResult(http.StatusOK, "", "")
 		return
 	}
 
@@ -188,7 +212,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	var tx pgx.Tx
 	var qtx *generated.Queries
 	var lastID string
-	var receiptOutcome, receiptTransactions, receiptSpans, receiptOther ingestOutcome
+	var receiptOutcome, receiptTransactions, receiptSpans, receiptReports, receiptOther ingestOutcome
 	committedEvents := make([]ingestedEvent, 0, validEvents)
 	if s.pool != nil {
 		tx, err = s.pool.Begin(r.Context())
@@ -213,8 +237,10 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			if item.item.Type == "event" {
 				eventOutcome.deduplicated++
 				lastID = item.itemID
-			} else {
+			} else if item.item.Type == "transaction" {
 				transactionOutcome.deduplicated++
+			} else {
+				clientReportOutcome.deduplicated++
 			}
 			continue
 		}
@@ -250,6 +276,26 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 			} else {
 				transactionOutcome.accepted++
 			}
+		case "client_report":
+			// A report's normalized counters are indivisible. Reserve their
+			// complete row cost from the same request budget used by spans.
+			// A dropped report releases its replay claim so a later retry can
+			// be accepted rather than falsely counted as already persisted.
+			if len(item.clientReport.Discards) > budget.left {
+				_, err = tx.Exec(r.Context(), `DELETE FROM sentry_item_acceptances
+					WHERE org_id=$1 AND project_id=$2 AND item_type='client_report' AND payload_sha256=$3`,
+					project.OrgID, project.ID, item.payloadHash)
+				if err != nil {
+					goto storeFailed
+				}
+				clientReportOutcome.dropped++
+				continue
+			}
+			budget.left -= len(item.clientReport.Discards)
+			if err = persistSentryClientReport(r.Context(), qtx, project, item.payloadHash, item.clientReport); err != nil {
+				goto storeFailed
+			}
+			clientReportOutcome.accepted++
 		}
 	}
 	// The 200 boundary includes the terminal receipt and every accepted item,
@@ -260,10 +306,13 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	receiptTransactions.dropped += droppedTransactions
 	receiptSpans = spanOutcome
 	receiptSpans.dropped = uint64(budget.dropped)
+	receiptReports = clientReportOutcome
+	receiptReports.dropped += droppedClientReports
 	receiptOther = otherOutcome
 	receiptOther.dropped += droppedOther
 	receiptOutcome.add(receiptTransactions)
 	receiptOutcome.add(receiptSpans)
+	receiptOutcome.add(receiptReports)
 	receiptOutcome.add(receiptOther)
 	if err = completeIngestReceipt(r.Context(), qtx, receipt, receiptOutcome, "", http.StatusOK); err != nil {
 		goto storeFailed
@@ -279,7 +328,7 @@ func (s *Server) handleEnvelope(w http.ResponseWriter, r *http.Request) {
 	}
 	budget.report(project.ID, "spans")
 	spanOutcome.dropped = uint64(budget.dropped)
-	writeEnvelopeResult(w, http.StatusOK, lastID, receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "")
+	writeResult(http.StatusOK, lastID, "")
 	return
 
 identityConflict:
@@ -287,15 +336,19 @@ identityConflict:
 	// Roll back the entire request, including earlier item reservations/writes.
 	eventOutcome.accepted = 0
 	transactionOutcome.accepted = 0
+	clientReportOutcome.accepted = 0
 	eventOutcome.deduplicated = 0
 	transactionOutcome.deduplicated = 0
+	clientReportOutcome.deduplicated = 0
 	eventOutcome.invalid += uint64(validEvents)
 	transactionOutcome.invalid += uint64(validTransactions)
+	clientReportOutcome.invalid += uint64(validClientReports)
 	transactionOutcome.dropped = 0
+	clientReportOutcome.dropped = 0
 	budget = nil
 	requestOutcome = "rejected"
 	receiptStatus = http.StatusConflict
-	writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "sentry item identity reused with different payload")
+	writeResult(receiptStatus, "", "sentry item identity reused with different payload")
 	return
 
 storeFailed:
@@ -304,22 +357,27 @@ storeFailed:
 	slog.Warn("envelope transaction failed", "project_id", project.ID, "error", err)
 	eventOutcome.accepted = 0
 	transactionOutcome.accepted = 0
+	clientReportOutcome.accepted = 0
 	transactionOutcome.dropped = 0
+	clientReportOutcome.dropped = 0
 	eventOutcome.deduplicated = 0
 	transactionOutcome.deduplicated = 0
+	clientReportOutcome.deduplicated = 0
 	eventOutcome.failed = uint64(validEvents)
 	transactionOutcome.failed = uint64(validTransactions)
+	clientReportOutcome.failed = uint64(validClientReports)
 	budget = nil // no spans from the failed transaction were durably accepted
 	requestOutcome = "failed"
 	receiptStatus = http.StatusServiceUnavailable
 	w.Header().Set("Retry-After", "1")
-	writeEnvelopeResult(w, receiptStatus, "", receipt.received, eventOutcome, transactionOutcome, spanOutcome, otherOutcome, "telemetry storage is temporarily unavailable")
+	writeResult(receiptStatus, "", "telemetry storage is temporarily unavailable")
 }
 
-func writeEnvelopeResult(w http.ResponseWriter, status int, eventID string, received int64, events, transactions, spans, other ingestOutcome, message string) {
+func writeEnvelopeResult(w http.ResponseWriter, status int, eventID string, received int64, events, transactions, spans, reports, other ingestOutcome, message string) {
 	total := events
 	total.add(transactions)
 	total.add(spans)
+	total.add(reports)
 	total.add(other)
 	response := map[string]any{
 		"id": eventID, "received": received,

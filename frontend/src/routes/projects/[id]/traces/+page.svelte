@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import ProjectTabs from '$lib/components/ProjectTabs.svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, ApiError } from '$lib/api';
@@ -41,13 +42,7 @@
     <span class="text-zinc-300">{project.name}</span>
   </div>
 
-  <div class="mb-5 flex items-center gap-1 border-b border-zinc-800/80">
-    <a href="/projects/{id}" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Issues</a>
-    <a href="/projects/{id}/logs" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Logs</a>
-    <a href="/projects/{id}/traces" class="-mb-px border-b-2 border-amber-400 px-3 py-2 text-sm text-zinc-100">Traces</a>
-    <a href="/projects/{id}/metrics" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Metrics</a>
-    <a href="/projects/{id}/releases" class="-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-zinc-500 hover:text-zinc-300">Releases</a>
-  </div>
+  <ProjectTabs projectId={id} active="traces" />
 
   {#if traces === null}
     <div class="divide-y divide-zinc-800/60">

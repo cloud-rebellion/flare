@@ -628,6 +628,18 @@ type Release struct {
 	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
 }
 
+type SentryClientReportDiscard struct {
+	OrgID         string             `json:"org_id"`
+	ProjectID     string             `json:"project_id"`
+	ItemType      string             `json:"item_type"`
+	PayloadSha256 string             `json:"payload_sha256"`
+	ReportedAt    pgtype.Timestamptz `json:"reported_at"`
+	ReceivedAt    pgtype.Timestamptz `json:"received_at"`
+	Reason        string             `json:"reason"`
+	Category      string             `json:"category"`
+	Quantity      int64              `json:"quantity"`
+}
+
 type SentryItemAcceptance struct {
 	OrgID         string             `json:"org_id"`
 	ProjectID     string             `json:"project_id"`

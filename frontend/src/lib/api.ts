@@ -36,6 +36,7 @@ import type {
   MetricPoint,
   Monitor,
   Overview,
+  SdkDiscards,
   Project,
   Span,
   TraceSummary,
@@ -174,6 +175,8 @@ export const api = {
   createProject: (name: string, platform: string) =>
     req<Project>('POST', '/projects', { name, platform }),
   project: (id: string) => req<Project>('GET', `/projects/${id}`),
+  sdkDiscards: (id: string, hours = 24) =>
+    req<SdkDiscards>('GET', `/projects/${id}/sdk-discards?hours=${hours}`),
   // Resolves a provisioner deep-link's numeric DSN id behind the session, so
   // /go/<dsnID> is no longer an unauthenticated existence oracle.
   projectByDsnID: (dsnID: string) => req<Project>('GET', `/projects/by-dsn/${dsnID}`),

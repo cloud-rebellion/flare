@@ -410,6 +410,7 @@ step "sqlc generated code is current"         sqlc_check
 step "Release identity"                       release_identity_check
 step "frontend deps (frozen lockfile)"        bun_step bun install --frozen-lockfile
 step "frontend typecheck (svelte-check)"      bun_step bun run check
+step "frontend runtime regressions"          bun_step bun test tests/
 step "frontend build (what the binary embeds)" bun_step bun run build
 step "browser RUM bridge tests and transpile" browser_rum_check
 step "first-party browser bridge wiring" first_party_browser_wiring_check

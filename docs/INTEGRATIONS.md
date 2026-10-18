@@ -58,11 +58,18 @@ means a count reached the 1,001-row query ceiling. The generic `queue` field
 still describes other detached work; it does not describe this durable issue
 alert path. A single-event store returns `503` if its event/job transaction
 fails. Supported Sentry envelope items share one database transaction: if any
-event or transaction write fails, Flare rolls back all supported items and
+event, transaction, or SDK client-report write fails, Flare rolls back all supported items and
 returns `503` with `Retry-After: 1`, `retryable: true`, and explicit failure
 counts. A `200` can still report invalid unsupported items or span-cap drops;
 inspect its counts and ingest receipt before counting each item as accepted.
 Malformed envelope framing returns `400` before any item is stored.
+An explicit retry after `503` is safe with the same supported item identities;
+SDKs may discard HTTP-error responses instead of retrying automatically.
+Sentry `client_report` items are accepted as bounded, client-asserted discard
+counters, separately from events and server-observed errors. The project SDK
+loss view breaks them down by reason and category without combining unlike
+units. See [SDK discard reports](SDK-DISCARD-REPORTS.md) for limits and replay
+semantics.
 An accepted Sentry item's project-scoped ID and payload hash are reserved in
 the same transaction. Exact replays are acknowledged as `deduplicated` without
 incrementing issue counts or writing spans again. Reusing an item ID with

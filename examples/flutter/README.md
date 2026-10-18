@@ -27,10 +27,12 @@ known event and confirm that the issue appears in the same Flare project.
 Flutter may remove some layout errors in release builds before an error hook is
 called, so a staging test cannot prove that every debug-only layout warning
 will appear in production.
-Flare currently accepts Sentry event and transaction envelope items. SDK
-session, attachment, and client-report items are not monitoring coverage here;
-check the project's ingest receipts for rejected or dropped items after a
-version upgrade.
+Flare accepts Sentry event, transaction, and `client_report` envelope items.
+Client reports record what the SDK says it discarded, including intentional
+sampling and filtering; they do not prove a server-observed failure. See the
+project's **SDK loss** view and [discard-report contract](../../docs/SDK-DISCARD-REPORTS.md).
+Session and attachment items remain unsupported. Check ingest receipts for
+rejected or dropped items after an SDK upgrade.
 
 ## Add the dependency
 

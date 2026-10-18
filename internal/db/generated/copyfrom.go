@@ -88,6 +88,44 @@ func (q *Queries) InsertMetrics(ctx context.Context, arg []InsertMetricsParams) 
 	return q.db.CopyFrom(ctx, []string{"metrics"}, []string{"id", "project_id", "org_id", "name", "kind", "value", "labels", "observed_at"}, &iteratorForInsertMetrics{rows: arg})
 }
 
+// iteratorForInsertSentryClientReportDiscards implements pgx.CopyFromSource.
+type iteratorForInsertSentryClientReportDiscards struct {
+	rows                 []InsertSentryClientReportDiscardsParams
+	skippedFirstNextCall bool
+}
+
+func (r *iteratorForInsertSentryClientReportDiscards) Next() bool {
+	if len(r.rows) == 0 {
+		return false
+	}
+	if !r.skippedFirstNextCall {
+		r.skippedFirstNextCall = true
+		return true
+	}
+	r.rows = r.rows[1:]
+	return len(r.rows) > 0
+}
+
+func (r iteratorForInsertSentryClientReportDiscards) Values() ([]interface{}, error) {
+	return []interface{}{
+		r.rows[0].OrgID,
+		r.rows[0].ProjectID,
+		r.rows[0].PayloadSha256,
+		r.rows[0].ReportedAt,
+		r.rows[0].Reason,
+		r.rows[0].Category,
+		r.rows[0].Quantity,
+	}, nil
+}
+
+func (r iteratorForInsertSentryClientReportDiscards) Err() error {
+	return nil
+}
+
+func (q *Queries) InsertSentryClientReportDiscards(ctx context.Context, arg []InsertSentryClientReportDiscardsParams) (int64, error) {
+	return q.db.CopyFrom(ctx, []string{"sentry_client_report_discards"}, []string{"org_id", "project_id", "payload_sha256", "reported_at", "reason", "category", "quantity"}, &iteratorForInsertSentryClientReportDiscards{rows: arg})
+}
+
 // iteratorForInsertSpans implements pgx.CopyFromSource.
 type iteratorForInsertSpans struct {
 	rows                 []InsertSpansParams

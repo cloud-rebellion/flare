@@ -66,7 +66,7 @@ func classifyIngestRequest(o ingestOutcome) string {
 
 func canonicalIngestSignal(signal string) string {
 	switch signal {
-	case "event", "transaction", "log", "span", "metric", "connector", "business", "symbol":
+	case "event", "transaction", "client_report", "log", "span", "metric", "connector", "business", "symbol":
 		return signal
 	default:
 		return "other"
