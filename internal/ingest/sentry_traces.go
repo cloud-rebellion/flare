@@ -81,9 +81,10 @@ type sentryChildSpan struct {
 }
 
 type sentryTransaction struct {
-	Transaction string     `json:"transaction"`
-	StartTS     sentryTime `json:"start_timestamp"`
-	Timestamp   sentryTime `json:"timestamp"`
+	Tags        json.RawMessage `json:"tags"`
+	Transaction string          `json:"transaction"`
+	StartTS     sentryTime      `json:"start_timestamp"`
+	Timestamp   sentryTime      `json:"timestamp"`
 	Contexts    struct {
 		Trace sentrySpanCommon `json:"trace"`
 	} `json:"contexts"`
@@ -112,6 +113,31 @@ func ParseSentryTransaction(payload []byte) ([]SpanRecord, error) {
 	// pair below, so a clamp never distorts the reported latency.
 	now := time.Now().UTC()
 
+	// Sentry SDK transaction tags live at the event's top level. Keep legacy
+	// trace-context tags, with canonical event tags winning any duplicate key.
+	// Malformed optional tags were previously ignored, so do not newly reject
+	// an otherwise usable transaction or admit a partially decoded tag map.
+	// Pointer values distinguish JSON null from a valid empty string.
+	var eventTagValues map[string]*string
+	var eventTags map[string]string
+	if json.Unmarshal(tx.Tags, &eventTagValues) == nil {
+		eventTags = make(map[string]string, len(eventTagValues))
+		for key, value := range eventTagValues {
+			if value == nil {
+				eventTags = nil
+				break
+			}
+			eventTags[key] = *value
+		}
+	}
+	// Only the root receives these tags; each child retains its own local tags.
+	rootTags := make(map[string]string, len(tr.Tags)+len(eventTags))
+	for key, value := range tr.Tags {
+		rootTags[key] = value
+	}
+	for key, value := range eventTags {
+		rootTags[key] = value
+	}
 	rootName := firstNonEmpty(tx.Transaction, tr.Description, tr.Op)
 	out = append(out, SpanRecord{
 		TraceID:      tr.TraceID,
@@ -123,7 +149,7 @@ func ParseSentryTransaction(payload []byte) ([]SpanRecord, error) {
 		Start:        ClampTime(tx.StartTS.Time, now),
 		End:          ClampTime(tx.Timestamp.Time, now),
 		DurationMs:   durationMs(tx.StartTS.Time, tx.Timestamp.Time),
-		Attributes:   spanAttrs(tr.Op, tr.Description, tr.Tags, tr.Data, tx.Environment, tx.Release),
+		Attributes:   spanAttrs(tr.Op, tr.Description, rootTags, tr.Data, tx.Environment, tx.Release),
 	})
 
 	for _, sp := range tx.Spans {
