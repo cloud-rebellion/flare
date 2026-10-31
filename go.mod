@@ -6,7 +6,7 @@ go 1.26.0
 // go.mod permits an older Go and govulncheck reports the standard-library
 // vulnerabilities fixed through 1.26.9 as reachable. The pin makes the
 // version that keeps this safe a guarantee rather than a property of the base image.
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/alexedwards/scs/pgxstore v0.0.0-20251002162104-209de6e426de
