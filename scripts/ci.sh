@@ -205,7 +205,31 @@ release_identity_check() {
     echo "Dockerfile does not stamp the source commit into the binary" >&2
     return 1
   }
-  for compose in docker-compose.yml deploy/docker-compose.yml; do
+  # The public payload deliberately strips the estate Compose. Require the
+  # self-host Compose everywhere, and the estate file in a native checkout.
+  # A missing tracked estate file must not turn a native checkout into a mirror.
+  local git_prefix git_estate_path
+  local -a compose_paths=(deploy/docker-compose.yml)
+  if [ "$IN_MIRROR" = "0" ]; then
+    compose_paths+=(docker-compose.yml)
+  else
+    git_prefix="$(git rev-parse --show-prefix 2>/dev/null)" || {
+      echo "Release identity cannot classify the Git worktree" >&2
+      return 1
+    }
+    git_estate_path="$(git ls-files --stage -- docker-compose.yml 2>/dev/null)" || {
+      echo "Release identity cannot read the Git index" >&2
+      return 1
+    }
+    if [ -n "$git_prefix" ] || [ -n "$git_estate_path" ]; then
+      compose_paths+=(docker-compose.yml)
+    fi
+  fi
+  for compose in "${compose_paths[@]}"; do
+    [ -f "$compose" ] || {
+      echo "Required release identity file is missing: $compose" >&2
+      return 1
+    }
     [ "$(grep -cF -- "FLARE_RELEASE: \"\${FLARE_RELEASE:-$release}\"" "$compose")" -eq 2 ] || {
       echo "$compose build and runtime release defaults do not both match VERSION ($release)" >&2
       return 1

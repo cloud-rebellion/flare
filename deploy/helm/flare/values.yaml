@@ -2,7 +2,7 @@ image:
   repository: flare
   # Version label. Tags can be moved by a registry; set digest for an exact
   # image and a reliable rollback target. Keep tag aligned with flare/VERSION.
-  tag: v0.6.5
+  tag: v0.6.6
   # Optional digest of the image built from sourceCommit (sha256:<64 hex>).
   # When present the Deployment selects repository@digest instead of the tag.
   digest: ""
