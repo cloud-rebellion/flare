@@ -162,9 +162,10 @@ test('Flare dashboard canary sends one fixed handled error per Window and ignore
 test('opaque canary frame names bind separately to both Flare UI origins', async () => {
 	const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
 	const path = '/_app/immutable/chunks/flare-client.AbCdEf12.js';
+	// Synthetic origins keep fixed hashes stable through public privacy filtering.
 	const expected = new Map([
-		['https://flare.example.com', 'd2a5b95789d6daa85affc0397db3fc493cf05f03d69691f5a6c459d6ec252f98'],
-		['https://flare.cloudrebellion.tech', 'ba315c703edd5100009d30a1212134c38936e7fafa795386dc8c5013e8d54caa']
+		['https://primary.synthetic.invalid', 'c56b888982c9dcc55edb1a5518e052f22adeabeaeb925ad5a16e89adc143ac89'],
+		['https://secondary.synthetic.invalid', 'c3e1183e304841dcedf5b6707a7e010b7608fe819629bdd1efa2e2cbef285b2b']
 	]);
 	try {
 		for (const [origin, hash] of expected) {

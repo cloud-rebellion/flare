@@ -66,12 +66,12 @@ type Server struct {
 	// exact browser release labels, an old-client lifetime bound, and a fence
 	// across every deployment target.
 	sourceMapRetirementFencer sourceMapRetirementFencer
-	hubspotProbe       connectorProbe
-	hubspotOAuth       hubspot.OAuthClient
-	hubspotTokens      hubspot.TokenStore
-	connectorProbes    connectorcheck.Registry
-	hubspotSync        *connectorsync.HubSpotWorker
-	connectorScheduler *connectorsync.Scheduler
+	hubspotProbe              connectorProbe
+	hubspotOAuth              hubspot.OAuthClient
+	hubspotTokens             hubspot.TokenStore
+	connectorProbes           connectorcheck.Registry
+	hubspotSync               *connectorsync.HubSpotWorker
+	connectorScheduler        *connectorsync.Scheduler
 
 	// connectorReceiptMu guards the process-wide durability projection exposed
 	// by /readyz. It contains only write counts and timestamps, never tenant or
