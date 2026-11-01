@@ -1,10 +1,16 @@
 package ratelimit
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,13 +88,23 @@ import (
 // and the reference's would be the same number, and the separation collapses to
 // ~1.0. The smallest separation observed on healthy code, across both machines,
 // both build modes, idle and under an 8-way CPU load, was 2.40x.
+//
+// Wall time still includes descheduling. In the 2026-11-01 filtered publication,
+// the healthy sort-based implementation measured 9.84x against a 16.67x
+// reference and failed the unchanged 2x separation. Each sample now runs in a
+// separate copy of this test binary and uses its completed process user+system
+// CPU time. Startup, map/slice construction, GC and teardown are INCLUDED; no
+// baseline is subtracted. Four repetitions amortize fixed process startup.
+// This changes the clock, not the algorithm, sizes, functional checks or bars.
+// The quadratic reference must still resolve at least 8x growth, and a quadratic
+// candidate must still fail the same 2x-separation decision.
 func TestEvictOldestIsNotQuadratic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("fills a 200k-entry map")
 	}
 
-	realRatio, small, large := quietestEvictRatio(maxKeys/4, maxKeys)
-	t.Logf("evict at n=%d: %s; at n=%d: %s (growth %.2fx)",
+	realRatio, small, large := quietestEvictRatio(t, maxKeys/4, maxKeys)
+	t.Logf("eviction process CPU including setup at n=%d: %s; at n=%d: %s (growth %.2fx)",
 		maxKeys/4, small, maxKeys, large, realRatio)
 
 	// A measurement too small to resolve makes the ratio meaningless: at
@@ -107,8 +123,8 @@ func TestEvictOldestIsNotQuadratic(t *testing.T) {
 	// check cannot tolerate: it failed a healthy tree at 1.79x. The reference has
 	// to be the steady half of the comparison.
 	const refSmallN, refLargeN = 12500, 50000
-	reference, refSmall, refLarge := quietestRatio(quadraticEvict, refSmallN, refLargeN)
-	t.Logf("quadratic reference at n=%d: %s; at n=%d: %s (growth %.2fx)",
+	reference, refSmall, refLarge := quietestRatio(t, "quadratic", refSmallN, refLargeN)
+	t.Logf("quadratic process CPU including setup at n=%d: %s; at n=%d: %s (growth %.2fx)",
 		refSmallN, refSmall, refLargeN, refLarge, reference)
 
 	// If the reference does not itself look quadratic, nothing on this machine is
@@ -161,28 +177,10 @@ func filledLimiter(n int) *Limiter {
 	return l
 }
 
-// measureEvict times ONE eviction of n/10 entries from a map of n, with the
-// garbage collector quiesced around the clock. quietestRatio does the sampling;
-// this function's whole job is to make a single sample as honest as possible.
-//
-// Quiescing matters because the sampling cannot compensate for it. A minimum can
-// only filter interference that varies BETWEEN samples. On 2026-08-08 CI measured
-// a ratio of 3.03 against a 3.0 threshold while publish-mesh-mirror built on the
-// same runner, and an IDLE laptop still produced minimums ranging 12.8ms to
-// 19.1ms at n=100000: a 1.5x spread in a statistic meant to be the quiet floor.
-//
-// Every sample builds an n-entry map and then sorts inside the timed region, so
-// every sample carries the same garbage-collection risk, and the collection it
-// provokes lands inside the clock in all of them. That is a floor no minimum can
-// see under. It also biases the RATIO rather than just adding noise, because the
-// larger case allocates proportionally more and so trips the collector
-// disproportionately: the numerator inflates while the denominator does not.
-//
-// So quiesce the collector around the measurement instead of averaging over it.
-// runtime.GC() clears the garbage from building the map before the clock starts,
-// and SetGCPercent(-1) guarantees no collection can begin inside the timed
-// region. Both calls stop the world OUTSIDE the measured window, which is the
-// point. The extra live heap is one sorted slice of n keys, briefly.
+// measureEvict performs the unchanged eviction workload. The parent accounts
+// for the WHOLE child process, including filledLimiter and runtime.GC, rather
+// than trusting its returned wall interval. The unchanged workload returns a
+// duration for historical callers; the CPU sampler deliberately ignores it.
 func measureEvict(n int) time.Duration {
 	l := filledLimiter(n)
 	now := time.Now()
@@ -202,13 +200,17 @@ func measureEvict(n int) time.Duration {
 // proof that it still refuses a genuinely quadratic implementation is the
 // reference measurement inside TestEvictOldestIsNotQuadratic, which runs the
 // same estimator over a workload that IS quadratic.
-func quietestEvictRatio(nSmall, nLarge int) (ratio float64, small, large time.Duration) {
-	return quietestRatio(measureEvict, nSmall, nLarge)
+func quietestEvictRatio(t *testing.T, nSmall, nLarge int) (ratio float64, small, large time.Duration) {
+	return quietestRatio(t, "evict", nSmall, nLarge)
 }
 
-// quietestRatio is the estimator itself, taking the measurement function so the
-// guard below can point it at a workload with known complexity.
-func quietestRatio(measure func(int) time.Duration, nSmall, nLarge int) (ratio float64, small, large time.Duration) {
+// quietestRatio retains the five interleaved independent minima. Each duration
+// is process CPU including setup; unrelated processes and time descheduled are
+// not charged to this child. A helper error or unavailable CPU accounting fails
+// closed instead of becoming a skipped or zero-duration sample.
+func quietestRatio(t *testing.T, kind string, nSmall, nLarge int) (ratio float64, small, large time.Duration) {
+	t.Helper()
+	measure := func(n int) time.Duration { return evictionProcessCPU(t, kind, n) }
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
 		// INTERLEAVED, so both sizes are sampled across the same stretch of wall
@@ -265,4 +267,69 @@ func quadraticEvict(n int) time.Duration {
 	debug.SetGCPercent(prevGC)
 
 	return d
+}
+
+// A fixed batch reduces startup's contribution without dropping it from the
+// numerator or denominator. Samples are sequential, with the inherited CI
+// environment and resource limits; no subprocess creates another subprocess.
+const evictionCPURepetitions = 4
+
+func evictionProcessCPU(t *testing.T, kind string, n int) time.Duration {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate eviction CPU test binary: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestEvictionCPUHelper$", "-test.count=1")
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = append(os.Environ(), "FLARE_EVICTION_CPU_WORK="+kind+":"+strconv.Itoa(n))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("eviction CPU helper %s/%d failed: %v (stdout=%d bytes, stderr=%d bytes)", kind, n, err, stdout.Len(), stderr.Len())
+	}
+	want := fmt.Sprintf("FLARE_EVICTION_CPU_DONE %s %d %d", kind, n, evictionCPURepetitions)
+	ack := 0
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line == want {
+			ack++
+		} else if line != "PASS" {
+			t.Fatalf("unexpected eviction CPU helper output (%d bytes)", stdout.Len())
+		}
+	}
+	if ack != 1 || stderr.Len() != 0 || cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		t.Fatal("eviction CPU helper did not acknowledge exactly one complete workload")
+	}
+	cpu := cmd.ProcessState.UserTime() + cmd.ProcessState.SystemTime()
+	if cpu <= 0 {
+		t.Fatal("eviction CPU accounting is unavailable")
+	}
+	return cpu / evictionCPURepetitions
+}
+
+// Only the exact self-executable run above supplies this private workload
+// marker. The normal package suite runs the parent assertion instead.
+func TestEvictionCPUHelper(t *testing.T) {
+	work := os.Getenv("FLARE_EVICTION_CPU_WORK")
+	if work == "" {
+		return
+	}
+	kind, size, ok := strings.Cut(work, ":")
+	n, err := strconv.Atoi(size)
+	if !ok || err != nil || (n != 12500 && n != maxKeys/4 && n != maxKeys) {
+		t.Fatal("invalid eviction CPU workload size")
+	}
+	for i := 0; i < evictionCPURepetitions; i++ {
+		switch kind {
+		case "evict":
+			measureEvict(n)
+		case "quadratic":
+			quadraticEvict(n)
+		default:
+			t.Fatal("invalid eviction CPU workload kind")
+		}
+	}
+	fmt.Printf("FLARE_EVICTION_CPU_DONE %s %d %d\n", kind, n, evictionCPURepetitions)
 }
