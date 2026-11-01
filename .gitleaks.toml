@@ -54,3 +54,13 @@ regexes = [
   '''4111111111111111''',
   '''0123456789abcdef''',
 ]
+
+# This fixed Idempotency-Key is used only by the in-process connector expiry/
+# prune test. It is not an authentication credential. History contains the same
+# literal, so scope this exemption to its complete value rather than a test path.
+[[allowlists]]
+description = "Exact connector expiry/prune test Idempotency-Key"
+regexTarget = "secret"
+regexes = [
+  '''^hubspot-expiry-attempt-0001$''',
+]
