@@ -575,6 +575,14 @@ type OidcConfig struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type OidcLoginTransaction struct {
+	StateHash  []byte             `json:"state_hash"`
+	OrgID      string             `json:"org_id"`
+	ConfigHash []byte             `json:"config_hash"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Org struct {
 	ID         string             `json:"id"`
 	Name       string             `json:"name"`
