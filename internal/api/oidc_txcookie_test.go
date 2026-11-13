@@ -3,7 +3,9 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bright-interaction/flare/internal/config"
 )
@@ -23,14 +25,38 @@ func carry(t *testing.T, rec *httptest.ResponseRecorder) *http.Request {
 	return r
 }
 
+func txProof() oidcTransaction {
+	return oidcTransaction{State: strings.Repeat("s", 43), Org: "org-123", Issuer: "https://issuer.example", ClientID: "client", RedirectURI: "https://flare.example/api/auth/oidc/callback", Nonce: strings.Repeat("n", 43), Verifier: strings.Repeat("v", 43), Expires: time.Now().Add(oidcTxTTL).Unix()}
+}
+
 func TestOIDCTxRoundTrip(t *testing.T) {
 	s := txServer()
 	rec := httptest.NewRecorder()
-	s.setOIDCTx(rec, "state-abc", "org-123")
+	proof := txProof()
+	s.setOIDCTx(rec, proof)
 
-	gotState, gotOrg := s.readOIDCTx(carry(t, rec))
-	if gotState != "state-abc" || gotOrg != "org-123" {
-		t.Fatalf("round trip = (%q, %q), want (state-abc, org-123)", gotState, gotOrg)
+	got, ok := s.readOIDCTx(carry(t, rec))
+	if !ok || got != proof {
+		t.Fatal("signed transaction fields did not round trip")
+	}
+}
+
+func TestOIDCTxSelectedAssuranceContextRoundTripsAndRejectsMalformedBinding(t *testing.T) {
+	s := txServer()
+	proof := txProof()
+	proof.Assurance = strings.Repeat("a", 64)
+	w := httptest.NewRecorder()
+	s.setOIDCTx(w, proof)
+	if got, ok := s.readOIDCTx(carry(t, w)); !ok || got != proof {
+		t.Fatal("selected assurance binding did not survive the signed one-use proof")
+	}
+	for _, invalid := range []string{"short", strings.Repeat("A", 64), strings.Repeat("a", 65)} {
+		proof.Assurance = invalid
+		w = httptest.NewRecorder()
+		s.setOIDCTx(w, proof)
+		if _, ok := s.readOIDCTx(carry(t, w)); ok {
+			t.Fatal("malformed assurance binding accepted")
+		}
 	}
 }
 
@@ -40,7 +66,7 @@ func TestOIDCTxRoundTrip(t *testing.T) {
 func TestOIDCTxCookieAttributes(t *testing.T) {
 	s := txServer()
 	rec := httptest.NewRecorder()
-	s.setOIDCTx(rec, "state-abc", "org-123")
+	s.setOIDCTx(rec, txProof())
 
 	cookies := rec.Result().Cookies()
 	if len(cookies) != 1 {
@@ -64,7 +90,7 @@ func TestOIDCTxCookieAttributes(t *testing.T) {
 func TestOIDCTxRejectsTampering(t *testing.T) {
 	s := txServer()
 	rec := httptest.NewRecorder()
-	s.setOIDCTx(rec, "state-abc", "org-123")
+	s.setOIDCTx(rec, txProof())
 	original := rec.Result().Cookies()[0].Value
 
 	tests := []struct {
@@ -82,8 +108,8 @@ func TestOIDCTxRejectsTampering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/callback", nil)
 			r.AddCookie(&http.Cookie{Name: oidcTxCookie, Value: tt.value})
-			if st, org := s.readOIDCTx(r); st != "" || org != "" {
-				t.Fatalf("tampered cookie accepted: (%q, %q)", st, org)
+			if _, ok := s.readOIDCTx(r); ok {
+				t.Fatal("tampered cookie accepted")
 			}
 		})
 	}
@@ -92,11 +118,11 @@ func TestOIDCTxRejectsTampering(t *testing.T) {
 // A cookie signed with a different key must never validate.
 func TestOIDCTxRejectsForeignKey(t *testing.T) {
 	rec := httptest.NewRecorder()
-	txServer().setOIDCTx(rec, "state-abc", "org-123")
+	txServer().setOIDCTx(rec, txProof())
 
 	other := &Server{cfg: config.Config{SecretKey: "a-completely-different-secret-key"}}
-	if st, org := other.readOIDCTx(carry(t, rec)); st != "" || org != "" {
-		t.Fatalf("cookie from another key accepted: (%q, %q)", st, org)
+	if _, ok := other.readOIDCTx(carry(t, rec)); ok {
+		t.Fatal("cookie from another key accepted")
 	}
 }
 
@@ -110,5 +136,29 @@ func TestOIDCTxClearExpiresTheCookie(t *testing.T) {
 	}
 	if c.Value != "" {
 		t.Fatalf("Value = %q, want empty", c.Value)
+	}
+}
+
+func TestOIDCTxRejectsExpiredOrIncompleteProof(t *testing.T) {
+	for _, tc := range []string{"expired", "missing nonce", "missing verifier", "future"} {
+		t.Run(tc, func(t *testing.T) {
+			s := txServer()
+			proof := txProof()
+			switch tc {
+			case "expired":
+				proof.Expires = time.Now().Add(-time.Second).Unix()
+			case "missing nonce":
+				proof.Nonce = ""
+			case "missing verifier":
+				proof.Verifier = ""
+			case "future":
+				proof.Expires = time.Now().Add(2 * oidcTxTTL).Unix()
+			}
+			response := httptest.NewRecorder()
+			s.setOIDCTx(response, proof)
+			if _, ok := s.readOIDCTx(carry(t, response)); ok {
+				t.Fatal("invalid signed transaction accepted")
+			}
+		})
 	}
 }

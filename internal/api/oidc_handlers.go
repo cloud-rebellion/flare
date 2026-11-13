@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/oauth2"
 
 	"github.com/bright-interaction/flare/internal/auth"
 	"github.com/bright-interaction/flare/internal/db/generated"
@@ -17,6 +19,7 @@ import (
 	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/netguard"
 	"github.com/bright-interaction/flare/internal/oidc"
+	"github.com/bright-interaction/flare/internal/oidcprofile"
 )
 
 type oidcConfigResponse struct {
@@ -196,17 +199,33 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		ssoError(w, r, "sso_disabled")
 		return
 	}
+	profile, err := s.oidcAssurance(org.ID)
+	if err != nil {
+		ssoError(w, r, "sso_disabled")
+		return
+	}
 	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: org.ID})
-	provider, err := oidc.Discover(connectorCtx, cfg.Issuer)
+	provider, err := oidc.DiscoverWithPolicy(connectorCtx, cfg.Issuer, s.cfg.OIDCPrivateIssuer, s.cfg.OIDCPeerIP)
 	if err != nil {
 		ssoError(w, r, "sso_discovery")
 		return
 	}
-	state := oidc.RandomState()
+	s.beginOIDC(w, r, org.ID, cfg, provider, profile)
+}
+
+func (s *Server) beginOIDC(w http.ResponseWriter, r *http.Request, org string, cfg *generated.OidcConfig, provider *oidc.Provider, profile oidcprofile.Policy) {
+	proof := oidcTransaction{State: oidc.RandomState(), Org: org,
+		Issuer: cfg.Issuer, ClientID: cfg.ClientID, RedirectURI: s.oidcRedirectURI(),
+		Nonce: oidc.RandomState(), Verifier: oauth2.GenerateVerifier(), Expires: time.Now().Add(oidcTxTTL).Unix()}
+	proof.Assurance = s.oidcAssuranceBinding(org, cfg, profile)
+	if err := s.storeOIDCTransaction(r.Context(), proof); err != nil {
+		ssoError(w, r, "sso_state")
+		return
+	}
 	// Dedicated SameSite=Lax transaction cookie, NOT the Strict session cookie:
 	// the browser withholds a Strict cookie on the IdP's redirect back.
-	s.setOIDCTx(w, state, org.ID)
-	http.Redirect(w, r, provider.AuthCodeURL(cfg.ClientID, s.oidcRedirectURI(), state), http.StatusFound)
+	s.setOIDCTx(w, proof)
+	http.Redirect(w, r, provider.AuthorizationURLWithAssurance(cfg.ClientID, proof.RedirectURI, proof.State, proof.Verifier, proof.Nonce, profile), http.StatusFound)
 }
 
 // handleOIDCCallback completes the SSO flow: validate state, exchange the code,
@@ -215,49 +234,56 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	qstate := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
-	sessState, sessOrg := s.readOIDCTx(r)
+	proof, validProof := s.readOIDCTx(r)
 	// One-time use: drop the transaction regardless of outcome.
 	s.clearOIDCTx(w)
 
-	if code == "" || qstate == "" || sessState == "" || sessOrg == "" ||
-		subtle.ConstantTimeCompare([]byte(qstate), []byte(sessState)) != 1 {
+	if code == "" || qstate == "" || !validProof ||
+		subtle.ConstantTimeCompare([]byte(qstate), []byte(proof.State)) != 1 || !s.consumeOIDCTransaction(ctx, proof) {
 		ssoError(w, r, "sso_state")
 		return
 	}
+	sessOrg := proof.Org
 	cfg, err := s.q.GetOIDCConfig(ctx, sessOrg)
-	if err != nil || !cfg.Enabled {
+	if err != nil || !cfg.Enabled || cfg.Issuer != proof.Issuer || cfg.ClientID != proof.ClientID || s.oidcRedirectURI() != proof.RedirectURI {
 		ssoError(w, r, "sso_disabled")
 		return
 	}
+	profile, err := s.oidcAssurance(sessOrg)
+	if err != nil || proof.Assurance != s.oidcAssuranceBinding(sessOrg, cfg, profile) {
+		ssoError(w, r, "sso_state")
+		return
+	}
 	connectorCtx := integration.WithScope(ctx, integration.Scope{OrgID: sessOrg})
-	provider, err := oidc.Discover(connectorCtx, cfg.Issuer)
+	provider, err := oidc.DiscoverWithPolicy(connectorCtx, cfg.Issuer, s.cfg.OIDCPrivateIssuer, s.cfg.OIDCPeerIP)
 	if err != nil {
 		ssoError(w, r, "sso_discovery")
 		return
 	}
 	clientSecret, err := s.secrets.Decrypt(cfg.ClientSecret)
 	if err != nil {
-		slog.Error("sso: stored client secret cannot be decrypted; check FLARE_SECRET_KEY", "error", err)
+		slog.Error("sso: stored client secret cannot be decrypted; check FLARE_SECRET_KEY")
 		ssoError(w, r, "sso_exchange")
 		return
 	}
-	accessToken, err := provider.Exchange(connectorCtx, cfg.ClientID, clientSecret, code, s.oidcRedirectURI())
-	if err != nil {
-		ssoError(w, r, "sso_exchange")
-		return
-	}
-	info, err := provider.FetchUserInfo(connectorCtx, accessToken)
-	if err != nil || info.Email == "" || info.Subject == "" {
+	info, err := provider.AuthenticateWithAssurance(connectorCtx, cfg.ClientID, clientSecret, code, proof.RedirectURI, proof.Verifier, proof.Nonce, profile)
+	if err != nil || info == nil || info.Subject == "" {
 		ssoError(w, r, "sso_userinfo")
 		return
 	}
-	// Never trust an unverified email to match or create an account.
-	if !info.EmailVerified {
-		ssoError(w, r, "sso_unverified")
+	user, failure := s.resolveOIDCUser(ctx, sessOrg, cfg, info)
+	if failure != "" {
+		ssoError(w, r, failure)
 		return
 	}
-	email := strings.ToLower(strings.TrimSpace(info.Email))
 
+	s.establishSession(ctx, user.ID, user.OrgID)
+	http.Redirect(w, r, "/projects", http.StatusFound)
+}
+
+// resolveOIDCUser is called only after ID-token and userinfo subject verification.
+func (s *Server) resolveOIDCUser(ctx context.Context, sessOrg string, cfg *generated.OidcConfig, info *oidc.UserInfo) (*generated.User, string) {
+	email := strings.ToLower(strings.TrimSpace(info.Email))
 	// Resolve by the IdP's STABLE identifier first. `sub` is immutable; the
 	// email is not, and it is asserted by whoever controls this org's SSO
 	// config. Looking up by email first meant an IdP-side rename missed the
@@ -269,26 +295,35 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		if user.OrgID != sessOrg {
-			ssoError(w, r, "sso_other_org")
-			return
+			return nil, "sso_other_org"
 		}
 		// Keep the local email in step with the IdP after a rename. Best-effort:
 		// a clash with another local account must not block a valid sign-in.
-		if !strings.EqualFold(user.Email, email) {
+		if info.EmailVerified && email != "" && !strings.EqualFold(user.Email, email) {
 			if uerr := s.q.UpdateUserEmail(ctx, generated.UpdateUserEmailParams{ID: user.ID, Email: email}); uerr != nil {
-				slog.Warn("sso: could not sync renamed email", "user", user.ID, "error", uerr)
+				slog.Warn("sso: could not sync verified renamed email")
 			}
 		}
 
 	case errors.Is(err, pgx.ErrNoRows):
+		// This operator-selected pilot mode never links by email or creates users.
+		// It applies only to the explicitly pinned CloudRebellion issuer.
+		if s.cfg.OIDCPrelinkedOnly && cfg.Issuer == s.cfg.OIDCPrivateIssuer {
+			return nil, "sso_prelinked_required"
+		}
+		if email == "" {
+			return nil, "sso_userinfo"
+		}
+		if !info.EmailVerified {
+			return nil, "sso_unverified"
+		}
 		// No account bound to this identity yet. Fall back to email.
 		user, err = s.q.GetUserByEmail(ctx, email)
 		switch {
 		case err == nil:
 			// Email is globally unique; it must belong to the org that started SSO.
 			if user.OrgID != sessOrg {
-				ssoError(w, r, "sso_other_org")
-				return
+				return nil, "sso_other_org"
 			}
 			if user.SsoSubject != "" {
 				// Already bound to a DIFFERENT identity (we missed on the
@@ -296,8 +331,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 				// not take over an existing, possibly higher-privileged account.
 				s.recordSecurityEvent(user.OrgID, "sso-identity-mismatch",
 					"SSO sign-in rejected: account is bound to a different IdP identity", "")
-				ssoError(w, r, "sso_identity_mismatch")
-				return
+				return nil, "sso_identity_mismatch"
 			}
 			// First SSO sign-in for this account: bind it now. The row count
 			// matters - 0 rows means someone bound it concurrently, so the
@@ -306,9 +340,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 				ID: user.ID, SsoIssuer: cfg.Issuer, SsoSubject: info.Subject,
 			})
 			if lerr != nil || n == 0 {
-				slog.Warn("sso: identity bind did not apply", "user", user.ID, "rows", n, "error", lerr)
-				ssoError(w, r, "sso_link")
-				return
+				slog.Warn("sso: identity bind did not apply")
+				return nil, "sso_link"
 			}
 			s.audit(ctx, "sso.link", email)
 
@@ -319,22 +352,18 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			// every later attempt on the email lookup.
 			user, err = s.provisionSSOUser(ctx, sessOrg, email, cfg.Issuer, info.Subject, cfg.DefaultRole)
 			if err != nil {
-				slog.Warn("sso: provisioning failed", "email", email, "error", err)
-				ssoError(w, r, "sso_provision")
-				return
+				slog.Warn("sso: provisioning failed")
+				return nil, "sso_provision"
 			}
 			s.audit(ctx, "sso.provision", email)
 
 		default:
-			ssoError(w, r, "sso_lookup")
-			return
+			return nil, "sso_lookup"
 		}
 
 	default:
-		ssoError(w, r, "sso_lookup")
-		return
+		return nil, "sso_lookup"
 	}
 
-	s.establishSession(ctx, user.ID, user.OrgID)
-	http.Redirect(w, r, "/projects", http.StatusFound)
+	return user, ""
 }

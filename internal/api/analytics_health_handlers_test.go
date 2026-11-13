@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/bright-interaction/flare/internal/analytics"
 	"github.com/bright-interaction/flare/internal/config"
 	"github.com/bright-interaction/flare/internal/db/generated"
+	"github.com/bright-interaction/flare/internal/retention"
 )
 
 func TestExportConnectionStatusIsBounded(t *testing.T) {
@@ -45,7 +47,7 @@ func TestAnalyticsExportHealthResponseHidesProviderDetails(t *testing.T) {
 		LatestStatus:      "succeeded",
 		LatestErrorCode:   "cold_write",
 	}
-	got := toAnalyticsExportHealthResponse(srv, row)
+	got := toAnalyticsExportHealthResponse(srv, srv.retentionPosture(context.Background()), row)
 	if got.ColdTier != "local" || got.ConnectionStatus != "observed_success" || !got.Configured {
 		t.Fatalf("response state = %#v, want configured local observed_success", got)
 	}
@@ -75,7 +77,7 @@ func TestAnalyticsExportHealthS3BytesRemainUnknown(t *testing.T) {
 		BytesObservations: 0,
 		LatestStatus:      "succeeded",
 	}
-	got := toAnalyticsExportHealthResponse(srv, row)
+	got := toAnalyticsExportHealthResponse(srv, srv.retentionPosture(context.Background()), row)
 	if got.BytesKnown {
 		t.Fatal("S3 export health claimed byte size despite httpfs not exposing remote object length")
 	}
@@ -84,6 +86,24 @@ func TestAnalyticsExportHealthS3BytesRemainUnknown(t *testing.T) {
 	}
 	if got.RetentionStatus != "observed_success" || got.QuotaStatus != "provider_unknown" {
 		t.Fatalf("retention/quota state = %q/%q, want observed_success/provider_unknown", got.RetentionStatus, got.QuotaStatus)
+	}
+}
+
+// The stored policy, not the env flag, decides what analytics health reports:
+// a stored "no archive" drops on every pass even with DuckDB up.
+func TestRetentionExportStatusFollowsTheStoredPolicy(t *testing.T) {
+	srv := &Server{analytics: &analytics.Manager{}}
+	off := retentionPosture{Policy: retention.Policy{HotDays: 7, ColdMode: retention.ColdOff}, Known: true}
+	if got := retentionExportStatus(srv, off, "succeeded"); got != "drop_without_export" {
+		t.Fatalf("stored off = %q, want drop_without_export", got)
+	}
+	unknown := retentionPosture{Policy: retention.Policy{HotDays: 30, ColdMode: retention.ColdForever}}
+	if got := retentionExportStatus(srv, unknown, "succeeded"); got != "paused" {
+		t.Fatalf("unreadable policy = %q, want paused", got)
+	}
+	allowUp := retentionPosture{Policy: retention.Policy{HotDays: 30, ColdMode: retention.ColdForever}, Known: true, AllowDropWithoutExport: true}
+	if got := retentionExportStatus(srv, allowUp, "succeeded"); got != "observed_success" {
+		t.Fatalf("allow-drop with the cold tier up = %q, want observed_success (exports still run)", got)
 	}
 }
 
@@ -101,7 +121,7 @@ func TestRetentionAndQuotaStatusesStayExplicit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := retentionExportStatus(tc.srv, tc.latest); got != tc.retention {
+			if got := retentionExportStatus(tc.srv, tc.srv.retentionPosture(context.Background()), tc.latest); got != tc.retention {
 				t.Fatalf("retentionExportStatus = %q, want %q", got, tc.retention)
 			}
 			if got := objectStoreQuotaStatus(tc.srv); got != tc.quota {

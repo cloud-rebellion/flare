@@ -57,6 +57,10 @@ var delegatedTransactionalAuditActions = map[string]struct {
 }{
 	"handleVerifyAutomationReceipt": {"promoteStageReceipt", `"automation.receipt.verify"`, "b.OrgID", "actor,", "fmt.Sprintf", "tx.Commit(ctx)"},
 	"handleRetireSourceMapBundle":   {"retireSourceMapBundle", `'sourcemap.bundle.retire'`, "orgID", "actor", "bundleID", "tx.Commit(ctx)"},
+	// Both retention writes go through one helper that locks the row, checks
+	// the confirm, writes and audits in a single transaction.
+	"handleSetRetention":   {"changeRetention", `"retention.update"`, "OrgID: orgIDFrom(ctx)", "ActorUserID: actor", "Target: auditTarget", "tx.Commit(ctx)"},
+	"handleResetRetention": {"changeRetention", `"retention.reset"`, "OrgID: orgIDFrom(ctx)", "ActorUserID: actor", "Target: auditTarget", "tx.Commit(ctx)"},
 }
 
 var (
@@ -120,8 +124,26 @@ func TestMutatingRoleGatedRoutesAreAudited(t *testing.T) {
 				t.Errorf("%s does not call transactional audit helper %s", name, delegated.helper)
 				continue
 			}
+			if !strings.Contains(helperBody, "INSERT INTO audit_log") && !strings.Contains(helperBody, "qtx.InsertAuditLog(") {
+				t.Errorf("%s helper %s must insert its audit row inside the transaction", name, delegated.helper)
+			}
+			// A sqlc audit insert: the literal must be what reaches the
+			// Action field, not merely appear somewhere in the function
+			// (an `Action: "noop"` next to the literal used to pass).
+			if strings.Contains(helperBody, "qtx.InsertAuditLog(") {
+				fn, err := serverMethodDecl("../api", delegated.helper)
+				if err != nil {
+					t.Errorf("%s: %v", delegated.helper, err)
+					continue
+				}
+				values, ok := auditActionValues(fn)
+				if !ok || !containsString(values, strings.Trim(delegated.action, `"`)) {
+					t.Errorf("%s helper %s: the InsertAuditLog Action is %v (all literals: %v), want it to carry %s",
+						name, delegated.helper, values, ok, delegated.action)
+				}
+			}
 			for _, required := range []string{
-				"INSERT INTO audit_log", delegated.action, delegated.scope,
+				delegated.action, delegated.scope,
 				delegated.actor, delegated.target, delegated.commit,
 			} {
 				if !strings.Contains(helperBody, required) {
@@ -205,4 +227,129 @@ func handlerBodies(dir string) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// serverMethodDecl parses the (*Server) method name from the package in dir.
+func serverMethodDecl(dir, name string) (*ast.FuncDecl, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), dir+"/"+e.Name(), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv != nil && fn.Name.Name == name && fn.Body != nil {
+				return fn, nil
+			}
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+// auditActionValues returns every value the Action field of an
+// InsertAuditLog call in fn can take. A literal is itself; an identifier is
+// every value assigned to it in fn. ok is false when any of them is not a
+// string literal (a computed action cannot be pinned by a guard).
+func auditActionValues(fn *ast.FuncDecl) (values []string, ok bool) {
+	var actionExprs []ast.Expr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		sel, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel || sel.Sel.Name != "InsertAuditLog" {
+			return true
+		}
+		for _, arg := range call.Args {
+			lit, isLit := arg.(*ast.CompositeLit)
+			if !isLit {
+				continue
+			}
+			for _, el := range lit.Elts {
+				if kv, isKV := el.(*ast.KeyValueExpr); isKV {
+					if key, isIdent := kv.Key.(*ast.Ident); isIdent && key.Name == "Action" {
+						actionExprs = append(actionExprs, kv.Value)
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(actionExprs) == 0 {
+		return nil, false
+	}
+	ok = true
+	for _, expr := range actionExprs {
+		switch v := expr.(type) {
+		case *ast.BasicLit:
+			values = append(values, strings.Trim(v.Value, `"`))
+		case *ast.Ident:
+			found := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				as, isAssign := n.(*ast.AssignStmt)
+				if !isAssign || len(as.Lhs) != len(as.Rhs) {
+					return true
+				}
+				for i, lhs := range as.Lhs {
+					if id, isIdent := lhs.(*ast.Ident); isIdent && id.Name == v.Name {
+						found = true
+						if lit, isLit := as.Rhs[i].(*ast.BasicLit); isLit {
+							values = append(values, strings.Trim(lit.Value, `"`))
+						} else {
+							ok = false
+						}
+					}
+				}
+				return true
+			})
+			if !found {
+				ok = false
+			}
+		default:
+			ok = false
+		}
+	}
+	return values, ok
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// The Action pin must refuse the ablation that used to pass: the expected
+// literal present in the function, but not in the audit row.
+func TestAuditActionPinCatchesASeededViolation(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		want      bool
+	}{
+		{"literal elsewhere, noop in the row", `package api
+func (s *Server) h() { action := "retention.update"; _ = action; _ = qtx.InsertAuditLog(ctx, generated.InsertAuditLogParams{Action: "noop"}) }`, false},
+		{"variable assigned the literal", `package api
+func (s *Server) h() { action := "retention.reset"; if x { action = "retention.update" }; _ = qtx.InsertAuditLog(ctx, generated.InsertAuditLogParams{Action: action}) }`, true},
+		{"computed action", `package api
+func (s *Server) h() { action := pick(); _ = qtx.InsertAuditLog(ctx, generated.InsertAuditLogParams{Action: action}) }`, false},
+	} {
+		f, err := parser.ParseFile(token.NewFileSet(), "seeded.go", tc.src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fn := f.Decls[0].(*ast.FuncDecl)
+		values, ok := auditActionValues(fn)
+		if got := ok && containsString(values, "retention.update"); got != tc.want {
+			t.Errorf("%s: pinned=%v (values %v ok %v), want %v", tc.name, got, values, ok, tc.want)
+		}
+	}
 }

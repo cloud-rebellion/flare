@@ -76,6 +76,10 @@ spec:
             {{- end }}
             - name: RETENTION_DAYS
               value: {{ .Values.retentionDays | quote }}
+            {{- if .Values.coldRetentionDays }}
+            - name: COLD_RETENTION_DAYS
+              value: {{ .Values.coldRetentionDays | quote }}
+            {{- end }}
             {{- if .Values.allowDropWithoutExport }}
             - name: FLARE_ALLOW_DROP_WITHOUT_EXPORT
               value: "true"

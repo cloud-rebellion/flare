@@ -5,7 +5,7 @@
 #
 # CGO note: the analytics package uses marcboeker/go-duckdb (DuckDB columnar
 # reads + Parquet cold tier), which needs CGO + glibc. The backend stage builds
-# on golang:1.26.9-bookworm (glibc) and the runtime is debian:bookworm-slim,
+# on golang:1.26.11-bookworm (glibc) and the runtime is debian:bookworm-slim,
 # matching atomicsite's analyticsdb build.
 
 # Stage 1: SvelteKit dashboard.
@@ -20,7 +20,7 @@ COPY frontend/ .
 # as build arguments because Vite/SvelteKit embeds them in the browser bundle.
 ARG FLARE_DSN=""
 ARG FLARE_ENVIRONMENT=production
-ARG FLARE_RELEASE=v0.6.6
+ARG FLARE_RELEASE=v0.6.7
 ARG FLARE_COMMIT=""
 ENV PUBLIC_FLARE_DSN=${FLARE_DSN} \
     PUBLIC_FLARE_ENVIRONMENT=${FLARE_ENVIRONMENT} \
@@ -37,9 +37,9 @@ RUN if [ -n "${FLARE_COMMIT}" ]; then \
 # bytes and member credentials never enter that image.
 
 # Stage 2: Go server (CGO for go-duckdb). The frontend build is copied in for go:embed.
-FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS backend
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS backend
 WORKDIR /app
-ARG FLARE_RELEASE=v0.6.6
+ARG FLARE_RELEASE=v0.6.7
 ARG FLARE_COMMIT=""
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential gcc g++ \
@@ -56,7 +56,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Stage 3: runtime (debian-slim for glibc + libstdc++, which the duckdb static
 # lib needs at runtime).
 FROM debian:bookworm-slim
-ARG FLARE_RELEASE=v0.6.6
+ARG FLARE_RELEASE=v0.6.7
 ARG FLARE_COMMIT=""
 LABEL org.opencontainers.image.version="${FLARE_RELEASE}" \
       org.opencontainers.image.revision="${FLARE_COMMIT}"

@@ -17,6 +17,7 @@ import (
 	"github.com/bright-interaction/flare/internal/db/generated"
 	"github.com/bright-interaction/flare/internal/id"
 	"github.com/bright-interaction/flare/internal/ingest"
+	"github.com/bright-interaction/flare/internal/retention"
 	"github.com/bright-interaction/flare/internal/telemetry"
 )
 
@@ -229,10 +230,11 @@ type logResponse struct {
 }
 
 const (
-	// maxLogWindowHours clamps `hours`. 90 days is past any retention setting
-	// this ships with, so a larger value only asks the database to prove the
-	// rows are absent.
-	maxLogWindowHours = 24 * 90
+	// maxLogWindowHours clamps `hours` (log search and MCP search_logs). It is
+	// the longest hot window an admin can choose (retention.MaxHotDays), so no
+	// stored policy keeps logs that search cannot reach; anything larger only
+	// asks the database to prove the rows are absent.
+	maxLogWindowHours = 24 * retention.MaxHotDays
 	// maxLogLimit caps a page. 100 is the default; 500 is enough for an export
 	// loop without letting one request pull an unbounded slice into memory.
 	maxLogLimit = 500

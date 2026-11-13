@@ -1114,18 +1114,109 @@ authenticated create/reconcile check when validating GitHub in production.
 
 ### OIDC single sign-on
 
+This private-repository implementation extends the current operator-workspace
+and retention schema. Migration `094_oidc_login_transactions.sql` adds one-use
+login proofs without changing existing `092` retention or `093` operator data.
+The prelinked-login PostgreSQL regression checks the operator flag and complete
+stored retention row as well as the local user role, password and session rotation.
+The internal CI profile requires its real PostgreSQL service for these tests;
+a missing database fixture is a failure rather than a passing skipped check.
+
+The callback is `BASE_URL/api/auth/oidc/callback`. Authorization uses PKCE S256
+and a nonce in a signed, HttpOnly, ten-minute Lax transaction cookie; ordinary
+sessions remain Strict. A server-side hash record is consumed atomically before
+token exchange, so replaying a captured cookie does not reuse a transaction.
+Changing issuer, client ID or callback origin in flight rejects that callback.
+Only transaction/configuration hashes, org scope and expiry are stored. Pending
+transactions are capped per org and expired rows are collected in bounded batches
+on new login attempts; no new scheduler is installed.
+
+The ID token must pass signature, exact issuer, audience, expiry, nonce and
+authorized-party checks. Userinfo's subject must equal that verified subject.
+An already administrator-prelinked issuer/subject can sign in without a verified
+email; its existing local email is not changed unless a nonempty verified email
+is returned. Unknown identities retain the existing verified-email requirement
+for generic email linking and JIT. Email equality alone is not the pilot's binding
+proof, and a subject cannot rebind an account already linked to another identity.
+
+For the optional operator-managed private transport, configure
+`FLARE_OIDC_PRIVATE_ISSUER` for the adapter's supported canonical issuer, one measured
+canonical `FLARE_OIDC_PEER_IP`, and opt into `FLARE_OIDC_PRELINKED_ONLY=true`. Keep
+deployment values and account bindings in private operational configuration. Defaults are
+empty/false. This exception pins only that exact issuer's four backend protocol
+paths to that one peer; it retains CA/hostname verification and has no DNS fallback,
+proxy or redirects. Tenant settings cannot create a private-network exception.
+Prelinked-only mode refuses unknown identities before email lookup or user
+creation and applies only to the selected operator issuer. Other issuer behavior
+is unchanged. Local passwords, sessions, recovery and existing MFA are retained.
+
+Register a confidential client with the exact callback above and PKCE S256.
+Before activation, separately qualify a coherent backup/isolated restore and an
+administrator-approved binding to the proved existing account, preserving its
+role, password and session-revocation state. Source preparation does not register
+clients, bind users, grant application access or deploy configuration.
+
 An owner configures the issuer, client ID, secret, and default role in **Single
 sign-on** or through the admin OIDC settings. Flare performs bounded discovery,
 validates the returned issuer and endpoints, rejects unsafe redirects, caches
 metadata, and binds the callback to the stored configuration. Start and callback
-requests have IP, workspace, global, and in-process capacity limits.
+retain bounded outbound transport and per-workspace one-use transaction storage.
+Deployment ingress rate and capacity protections require separate verification.
+
+#### Optional assurance and direct portal launch
+
+`FLARE_OIDC_REQUIRED_ACR`, `FLARE_OIDC_REQUIRED_AMR` and
+`FLARE_OIDC_LAUNCH_ORG_ID` default to empty. The selector is the exact existing
+organization primary key, never its slug or display name. Only that selected
+organization uses the complete assurance profile and direct launcher. Invalid
+or incomplete selection makes its SSO unready while native sign-in and every
+unrelated organization retain their existing behavior, including an unchanged
+empty-profile transaction hash. No runtime organization is selected by source.
+
+Supply one exact case-sensitive ACR and a comma-separated nonempty set of
+distinct required AMR values. ACR is bounded to 256 bytes, each AMR to 64 bytes,
+and at most 16 methods; whitespace/control characters and malformed Unicode are
+refused. All required methods must occur in the verified ID token; additional
+distinct methods grant no authority. Duplicate critical claims, malformed or
+weak evidence deny this SSO attempt before account, email or session effects.
+The required `auth_time` is a positive JSON integer, no later than signed `iat`
+or the current Unix second, and strictly earlier than signed `exp`. Signed
+`iat` and `exp` must be positive sane NumericDates with `iat <= now` and
+`iat < exp`; exact fractional/exponent date comparisons add no clock skew.
+Only configured `acr_values` is added to authorization. There is no forced
+prompt, `max_age`, essential claims request, weaker retry or background refresh.
+
+The effective selected profile, organization and provider configuration are
+bound to the existing one-use transaction. A changed or missing enabled context
+requires an explicit new login. No schema/configuration column or persisted MFA
+label is introduced; local `auth_epoch` continues to mean session revocation,
+not provider authentication time. Existing native password/recovery, roles,
+operator-workspace restrictions, session rotation and lifetime remain native.
+
+An explicit portal tile may target `/login?sso=1`. That marker is consumed before
+asynchronous work and never repeats after callback errors, Back or reload. A
+typed native `/api/auth/me` success opens projects without OIDC. Only a true401
+and typed ready response from `/api/auth/oidc/launch-status` start the one fixed
+`/api/auth/oidc/launch` endpoint. Readiness requires the configured provider to
+advertise the exact class in discovery. Unknown network/403/503/malformed/abort
+outcomes stop without clearing an existing session. The server launch rechecks
+the canonical native session so a valid session created in another tab wins.
+The legacy explicit `/api/auth/oidc/start?org=<slug>` entry remains available.
+
+Before configuring any private installation profile, independently qualify the
+provider's signed claim semantics and the actual existing organization, client,
+callback and prelinks. Source preparation registers no client, links no account,
+changes no origin and enables no installation. Built-UI launcher contract tests
+with synthetic status responses are separate from signed-token/backend tests
+and real provider-to-application acceptance.
 
 `GET /api/integrations/oidc` reports configuration and the generated login and
 redirect URLs. It does not persist provider probe results or expose login
 success/failure counts, latency, or provider rate-limit headers. The private
-`/metrics` endpoint records bounded discovery, JWKS key-fetch, token-exchange,
-and userinfo invocation counts and latency by operation and outcome. Discovery
-includes cache hits and waiters; JWKS is a network fetch. Exercise the full
+`/metrics` endpoint records bounded discovery, token-exchange/ID-token-verification,
+and userinfo counts and latency by operation and outcome. Cache-hit discovery
+returns without another outbound-attempt receipt. JWKS fetches use the same
+bounded guarded transport but do not have a separate counter in this adapter. Exercise the full
 start -> callback journey for an acceptance check; discovery at startup or
 configuration time is not a continuous availability probe.
 

@@ -1,0 +1,20 @@
+[
+  {"name": "lower hot", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 7, "cold_mode": "forever"}, "want": true},
+  {"name": "same", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 30, "cold_mode": "forever"}, "want": false},
+  {"name": "raise hot", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 60, "cold_mode": "forever"}, "want": false},
+  {"name": "forever to days", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 30, "cold_mode": "days", "cold_retention_days": 365}, "want": true},
+  {"name": "forever to off", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 30, "cold_mode": "off"}, "want": true},
+  {"name": "days to fewer days", "cur": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 90}, "next": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "want": true},
+  {"name": "days to more days", "cur": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "next": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 90}, "want": false},
+  {"name": "days to same days", "cur": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "next": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "want": false},
+  {"name": "days to forever", "cur": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "next": {"hot_retention_days": 7, "cold_mode": "forever"}, "want": false},
+  {"name": "days to off", "cur": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 3650}, "next": {"hot_retention_days": 7, "cold_mode": "off"}, "want": true},
+  {"name": "off to forever", "cur": {"hot_retention_days": 7, "cold_mode": "off"}, "next": {"hot_retention_days": 7, "cold_mode": "forever"}, "want": false},
+  {"name": "off to off", "cur": {"hot_retention_days": 7, "cold_mode": "off"}, "next": {"hot_retention_days": 7, "cold_mode": "off"}, "want": false},
+  {"name": "off to off, raise hot", "cur": {"hot_retention_days": 7, "cold_mode": "off"}, "next": {"hot_retention_days": 30, "cold_mode": "off"}, "want": false},
+  {"name": "off to days (archive left on disk gets pruned)", "cur": {"hot_retention_days": 7, "cold_mode": "off"}, "next": {"hot_retention_days": 7, "cold_mode": "days", "cold_retention_days": 30}, "want": true},
+  {"name": "off to max days is still a reduction", "cur": {"hot_retention_days": 7, "cold_mode": "off"}, "next": {"hot_retention_days": 30, "cold_mode": "days", "cold_retention_days": 3650}, "want": true},
+  {"name": "reset from stored off to env days", "cur": {"hot_retention_days": 30, "cold_mode": "off"}, "next": {"hot_retention_days": 30, "cold_mode": "days", "cold_retention_days": 30}, "want": true},
+  {"name": "reset from stored off to env forever", "cur": {"hot_retention_days": 30, "cold_mode": "off"}, "next": {"hot_retention_days": 30, "cold_mode": "forever"}, "want": false},
+  {"name": "raise hot but turn archive off", "cur": {"hot_retention_days": 30, "cold_mode": "forever"}, "next": {"hot_retention_days": 90, "cold_mode": "off"}, "want": true}
+]

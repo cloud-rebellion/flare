@@ -102,8 +102,11 @@ func workerSnapshot(ch chan struct{}) healthWorkerSnapshot {
 	return healthWorkerSnapshot{Capacity: capacity, Busy: busy, Available: capacity - busy}
 }
 
-func retentionHealth(cfgAllowDrop bool, analyticsConfigured bool) (policy string, exportRequired bool) {
-	if cfgAllowDrop {
+func retentionHealth(p retentionPosture, analyticsConfigured bool) (policy string, exportRequired bool) {
+	if !p.Known {
+		return "paused", true // the partition manager drops nothing without a policy
+	}
+	if p.dropsUnarchived(analyticsConfigured) {
 		return "drop_without_export", false
 	}
 	if analyticsConfigured {
@@ -121,13 +124,6 @@ func readinessStatus(dbOK, analyticsConfigured, analyticsOK bool, policy string)
 		status = "degraded"
 	}
 	return status, code
-}
-
-func effectiveRetentionDays(days int) int {
-	if days <= 0 {
-		return 30
-	}
-	return days
 }
 
 // handleLive is intentionally independent of the database and providers. It
@@ -164,10 +160,11 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if analyticsConfigured {
 		analyticsOK = s.analytics.Healthy(ctx)
 	}
+	posture := s.retentionPosture(ctx)
 	var exportHealth *analyticsExportHealthResponse
 	if s.q != nil {
 		if row, err := s.q.GetExportHealthStats(ctx); err == nil {
-			v := toAnalyticsExportHealthResponse(s, row)
+			v := toAnalyticsExportHealthResponse(s, posture, row)
 			exportHealth = &v
 		} else if analyticsConfigured {
 			// A configured analytics layer whose durable export ledger cannot be
@@ -177,7 +174,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			analyticsOK = false
 		}
 	}
-	policy, exportRequired := retentionHealth(s.cfg.AllowDropWithoutExport, analyticsConfigured)
+	policy, exportRequired := retentionHealth(posture, analyticsConfigured)
 	coldTier := "local"
 	if s.cfg.S3Endpoint != "" {
 		coldTier = "s3"
@@ -268,7 +265,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			Export:     exportHealth,
 		},
 		Retention: healthRetention{
-			Days:               effectiveRetentionDays(s.cfg.RetentionDays),
+			Days:               posture.Policy.HotDays,
 			Policy:             policy,
 			ExportRequired:     exportRequired,
 			ColdTier:           coldTier,

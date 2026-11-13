@@ -286,6 +286,7 @@ export interface IssueEvent {
   stacktrace: { frames: Frame[] } | null;
   trace_id: string;
   span_id: string;
+  tags?: { key: string; value: string }[];
   received_at: string;
 }
 
@@ -604,4 +605,52 @@ export interface PartialErasure {
 export interface LogPage {
   logs: LogRow[];
   next_before?: string;
+}
+
+export type RetentionColdMode = 'forever' | 'days' | 'off';
+
+export interface RetentionPolicy {
+  hot_retention_days: number;
+  cold_mode: RetentionColdMode;
+  cold_retention_days?: number;
+}
+
+export interface RetentionDay {
+  day: string; // YYYY-MM-DD (UTC)
+  approx_rows: number;
+  bytes: number;
+  files?: number;
+}
+
+/** The state a save was decided against; the server answers 409 if it moved. */
+export interface RetentionExpected {
+  effective: RetentionPolicy;
+  updated_at: string | null;
+}
+
+export interface RetentionSettings {
+  effective: RetentionPolicy;
+  source: 'stored' | 'env';
+  env_default: RetentionPolicy;
+  stored: RetentionPolicy | null;
+  updated_at: string | null;
+  updated_by?: string;
+  bounds: { hot_min: number; hot_max: number; cold_max: number };
+  today: string;
+  cold_tier: { kind: 'local' | 's3' | 'unavailable'; prune_supported: boolean; note?: string };
+  /** FLARE_ALLOW_DROP_WITHOUT_EXPORT: with the cold tier down, aged days are deleted instead of kept. */
+  allow_drop_without_export: boolean;
+  hot_paused_reason?: string;
+  hot: RetentionDay[];
+  cold: RetentionDay[];
+  last_pass: {
+    last_pass_at: string;
+    policy?: string;
+    policy_error: boolean;
+    hot_partitions_dropped: number;
+    hot_prune_paused: boolean;
+    cold_pruned: { days: number; files: number; bytes: number };
+    cold_prune_error: boolean;
+    cold_prune_skipped?: string;
+  } | null;
 }

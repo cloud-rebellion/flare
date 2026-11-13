@@ -192,6 +192,35 @@ func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 	qtx := s.q.WithTx(tx)
 
+	// The operator workspace owns instance-wide settings (data retention) and
+	// receives Flare's own security events. Deleting it while tenants remain
+	// would leave the instance with no operator, or, before migration 093,
+	// hand those controls to whichever tenant was next-oldest. Refuse; it can
+	// go once it is the last workspace on the instance. The lock is shared with
+	// createOrgWithOwner, so no registration can commit between this check and
+	// the delete.
+	if err := qtx.LockOperatorOrg(ctx); err != nil {
+		slogError(w, "delete org: lock", err)
+		return
+	}
+	self, err := qtx.GetOrgByID(ctx, org)
+	if err != nil {
+		slogError(w, "delete org: read org", err)
+		return
+	}
+	if self.IsOperator {
+		n, err := qtx.CountOrgs(ctx)
+		if err != nil {
+			slogError(w, "delete org: count orgs", err)
+			return
+		}
+		if n > 1 {
+			slog.Warn("workspace erasure refused: operator workspace with other workspaces on the instance", "org_id", org, "orgs", n)
+			writeErr(w, http.StatusConflict, "this is the operator workspace of the instance: it manages instance-wide settings such as data retention, so it cannot be deleted while other workspaces exist")
+			return
+		}
+	}
+
 	// Collect the member ids BEFORE the cascade removes the user rows: the
 	// sessions table has no org column and no foreign key, so it is the one
 	// store an org delete leaves fully intact unless it is cleared explicitly.

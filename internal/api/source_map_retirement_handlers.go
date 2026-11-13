@@ -221,7 +221,12 @@ func (s *Server) handleRetireSourceMapBundle(w http.ResponseWriter, r *http.Requ
 // with the map deletion or all changes roll back. The caller holds the external
 // deployment fence through this function's return.
 func (s *Server) retireSourceMapBundle(parent context.Context, orgID, projectID, bundleID, digest, actor string, proof sourceMapReleaseProtection) (*sourceMapRetirementReceipt, error) {
-	if !proof.valid(orgID, projectID, proof.CandidateRelease) || actor == "" || effectiveRetentionDays(s.cfg.RetentionDays) < sourceMapRetirementQuietDays {
+	if !proof.valid(orgID, projectID, proof.CandidateRelease) || actor == "" {
+		return nil, errSourceMapRetirementProofUnavailable
+	}
+	// The quiet-period proof needs the hot window that is actually in force,
+	// which the dashboard may have lowered below the env value.
+	if posture := s.retentionPosture(parent); !posture.Known || posture.Policy.HotDays < sourceMapRetirementQuietDays {
 		return nil, errSourceMapRetirementProofUnavailable
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)

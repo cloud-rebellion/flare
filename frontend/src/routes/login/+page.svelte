@@ -4,6 +4,7 @@
   import { page } from '$app/state';
   import { api, ApiError } from '$lib/api';
   import { session } from '$lib/session.svelte';
+  import { checkPortalSession, consumePortalIntent } from '$lib/ssoLaunch';
 
   let mode = $state<'login' | 'register'>('login');
   let email = $state('');
@@ -31,6 +32,27 @@
   onMount(() => {
     const code = page.url.searchParams.get('error');
     if (code) error = ssoErrors[code] ?? 'Single sign-on failed. Please try again.';
+    const intent = consumePortalIntent(new URL(window.location.href), (path) => {
+      // Initial onMount runs while SvelteKit constructs its root. Its shallow
+      // replaceState calls root.$set before that root exists. Consume only this
+      // URL marker synchronously and preserve all router-owned history state.
+      window.history.replaceState(window.history.state, '', path);
+    });
+    if (!intent) return;
+    const controller = new AbortController();
+    busy = true;
+    void checkPortalSession(controller.signal).then((result) => {
+      if (controller.signal.aborted) return;
+      if (result.kind === 'session') {
+        session.user = result.user;
+        void goto('/projects', { replaceState: true });
+      } else if (result.kind === 'launch') {
+        window.location.assign('/api/auth/oidc/launch');
+      } else {
+        error = 'Single sign-on could not be checked. You can sign in below.';
+      }
+    }).finally(() => { busy = false; });
+    return () => controller.abort();
   });
 
   function startSso(e: SubmitEvent) {

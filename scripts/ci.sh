@@ -357,6 +357,22 @@ first_party_browser_wiring_check() {
   echo "${#specs[@]} first-party browser bridges are present and installed"
 }
 
+# The split private repo has no sibling app roots either, but there the check is
+# owned by automations rather than absent. Its workflow opts in by setting
+# FLARE_CI_WIRING_RUNS_IN_AUTOMATIONS=1. This bypasses step() on purpose, so it can
+# never print "ok:" for a check that did not run, and it only applies with BOTH roots
+# gone: a monorepo checkout runs the real check whatever the variable says.
+WIRING_NOT_HERE=0
+first_party_browser_wiring_step() {
+  local name="first-party browser bridge wiring"
+  if [ "${FLARE_CI_WIRING_RUNS_IN_AUTOMATIONS:-0}" = "1" ] && [ ! -d ../atomicsite ] && [ ! -d ../brightcrm ]; then
+    printf '\n=== %s ===\nruns in automations, not here\n' "$name"
+    WIRING_NOT_HERE=1
+    return 0
+  fi
+  step "$name" first_party_browser_wiring_check
+}
+
 # The scanners below read CONTENT, never a pipeline's exit status. `producer | grep -q X`
 # under pipefail returns 141 when grep short-circuits and the producer takes SIGPIPE, so
 # that shape reports "clean" exactly when there is the most to find.
@@ -437,7 +453,7 @@ step "frontend typecheck (svelte-check)"      bun_step bun run check
 step "frontend runtime regressions"          bun_step bun test tests/
 step "frontend build (what the binary embeds)" bun_step bun run build
 step "browser RUM bridge tests and transpile" browser_rum_check
-step "first-party browser bridge wiring" first_party_browser_wiring_check
+first_party_browser_wiring_step
 if [ "$IN_MIRROR" = "1" ]; then
   step "secret scan (full history)" secret_scan
 else
@@ -457,6 +473,10 @@ if [ ${#FAILED[@]} -ne 0 ]; then
 fi
 if [ ${#SKIPPED[@]} -ne 0 ]; then
   echo "ci: every check that RAN passed, but some did not run (see above)"
+  exit 0
+fi
+if [ "$WIRING_NOT_HERE" = "1" ]; then
+  echo "ci: all checks that run here passed; first-party browser bridge wiring runs in automations, not here"
   exit 0
 fi
 echo "ci: all checks passed"

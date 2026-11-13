@@ -244,6 +244,16 @@
         {selectedEvent.exception_value || selectedEvent.message}
       </p>
     {/if}
+    {#if selectedEvent.tags?.length}
+      <dl class="mb-4 flex flex-wrap gap-2 text-xs">
+        {#each selectedEvent.tags as tag}
+          <div class="flex min-w-0 gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/40 px-2 py-1">
+            <dt class="min-w-0 break-all text-zinc-500">{tag.key}</dt>
+            <dd class="min-w-0 break-all font-mono text-zinc-300">{tag.value}</dd>
+          </div>
+        {/each}
+      </dl>
+    {/if}
 
     {#if selectedEvent.stacktrace && selectedEvent.stacktrace.frames.length}
       <div class="overflow-hidden rounded-lg border border-zinc-800/80">

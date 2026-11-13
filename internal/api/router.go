@@ -90,6 +90,8 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 			// SSO browser redirects (GET, so CSRF middleware passes them through).
 			r.Get("/auth/oidc/start", s.handleOIDCStart)
 			r.Get("/auth/oidc/callback", s.handleOIDCCallback)
+			r.Get("/auth/oidc/launch-status", s.handleOIDCLaunchStatus)
+			r.Get("/auth/oidc/launch", s.handleOIDCLaunch)
 
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireAuth)
@@ -230,6 +232,12 @@ func (s *Server) Routes(build fs.FS, csrfMW func(http.Handler) http.Handler) htt
 					// tier not yet purged). An admin can see what still has to be
 					// erased from the object store and mark one done once they have,
 					// instead of hand-writing SQL against pending_erasures.
+					// Instance-wide data retention. Admin, and additionally only
+					// from the operator workspace (requireOperatorWorkspace in the
+					// handlers): the partitions and archive are shared by every org.
+					r.Get("/settings/retention", s.handleGetRetention)
+					r.Put("/settings/retention", s.handleSetRetention)
+					r.Delete("/settings/retention", s.handleResetRetention)
 					r.Get("/erasures", s.handleListOpenErasures)
 					r.Post("/erasures/{id}/complete", s.handleCompleteErasure)
 					r.Get("/integrations/oidc", s.handleGetOIDCConfig)

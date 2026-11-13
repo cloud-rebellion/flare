@@ -1,7 +1,22 @@
 -- name: CreateOrg :one
-INSERT INTO orgs (id, name, slug)
-VALUES ($1, $2, $3)
+-- The first org on an instance becomes the operator workspace (migration
+-- 093); every later one is a tenant. Only an EMPTY instance hands out the
+-- flag: orgs with no operator is a broken state a human repairs, never a
+-- prize for the next registrant. Callers hold LockOperatorOrg.
+INSERT INTO orgs (id, name, slug, is_operator)
+VALUES ($1, $2, $3, NOT EXISTS (SELECT 1 FROM orgs))
 RETURNING *;
+
+-- name: LockOperatorOrg :exec
+-- Serialises everything that decides who the operator workspace is: org
+-- creation and org deletion. Without it a registration committing inside an
+-- operator delete saw the operator still present and became a tenant, and the
+-- instance was left with orgs but no operator.
+SELECT pg_advisory_xact_lock(hashtext('flare.operator_org'));
+
+-- name: OperatorOrgMissing :one
+-- True when workspaces exist but none is the operator (checked at boot).
+SELECT EXISTS (SELECT 1 FROM orgs) AND NOT EXISTS (SELECT 1 FROM orgs WHERE is_operator);
 
 -- name: GetOrgBySlug :one
 SELECT * FROM orgs WHERE slug = $1;
@@ -30,6 +45,13 @@ WHERE EXISTS (
 );
 
 -- name: GetFirstOrg :one
--- The oldest org, used as the system/owner scope for Flare's own security
--- events (e.g. an ingest-auth rejection that matches no project has no org).
-SELECT * FROM orgs ORDER BY created_at ASC LIMIT 1;
+-- The system/owner scope for Flare's own security events (e.g. an ingest-auth
+-- rejection that matches no project has no org): the operator workspace, or
+-- the oldest org if none is flagged. id breaks a created_at tie so the answer
+-- never depends on the plan.
+SELECT * FROM orgs ORDER BY is_operator DESC, created_at ASC, id ASC LIMIT 1;
+
+-- name: GetOperatorOrg :one
+-- The operator workspace, which alone may manage instance-wide settings.
+-- No row means no operator, and callers refuse (never fall back to "oldest").
+SELECT * FROM orgs WHERE is_operator;

@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -208,46 +207,72 @@ func (m *Manager) PurgeColdScope(ctx context.Context, column, value string) erro
 		return fmt.Errorf("analytics: cold-tier purge not supported on S3 (erase %s=%s in the bucket manually)", column, value)
 	}
 	esc := escapeSQL(value)
-	for _, table := range coldTables {
-		matches, _ := filepath.Glob(filepath.Join(m.cfg.ParquetDir, table, "dt=*", "part.parquet"))
-		for _, file := range matches {
-			if err := m.purgeFile(ctx, file, column, esc); err != nil {
-				return fmt.Errorf("analytics: purge %s: %w", file, err)
+	// Through the shared archive walker, like pruning: the day is opened and
+	// verified fd-relative, and every delete and rename is relative to it, so
+	// a dt= symlink cannot redirect the erasure outside the archive. A day
+	// that cannot be opened safely makes the purge fail, never skip quietly.
+	var unsafe []error
+	err := walkArchiveDays(m.cfg.ParquetDir, coldTables, nil, func(d *archiveDay) error {
+		// Crash residue first. Under the exclusive lock no export or purge is
+		// in flight, so a .tmp or .purge here is left over from one that died,
+		// and it holds rows too: an erasure that answered 204 with them on
+		// disk was incomplete. Nothing reads them, so they are deleted, not
+		// rewritten.
+		for _, name := range []string{"part.parquet.tmp", "part.parquet.purge"} {
+			if d.has(name) {
+				if err := d.remove(name); err != nil {
+					return fmt.Errorf("analytics: purge %s/%s/%s: %w", d.Table, d.Name, name, err)
+				}
 			}
 		}
-	}
-	return nil
-}
-
-// purgeFile rewrites one Parquet file without rows where column='escVal'. Assumes
-// the caller holds the write lock.
-func (m *Manager) purgeFile(ctx context.Context, file, column, escVal string) error {
-	slashed := escapeSQL(filepath.ToSlash(file))
-	var total, remaining int64
-	if err := m.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", slashed)).Scan(&total); err != nil {
+		if d.has("part.parquet") {
+			if err := m.purgeFile(ctx, d, column, esc); err != nil {
+				return fmt.Errorf("analytics: purge %s/%s: %w", d.Table, d.Name, err)
+			}
+		}
+		_ = d.removeSelf() // only succeeds once the day is empty
+		return nil
+	}, func(table, name string, err error) {
+		unsafe = append(unsafe, fmt.Errorf("analytics: purge %s/%s: %w", table, name, err))
+	})
+	if err != nil {
 		return err
 	}
-	if err := m.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet('%s') WHERE %s <> '%s'", slashed, column, escVal)).Scan(&remaining); err != nil {
+	return errors.Join(unsafe...)
+}
+
+// purgeFile rewrites one day's part.parquet without rows where
+// column='escVal'. DuckDB reads and writes by path (d.Path, verified when the
+// day was opened); the remove and the replace are relative to the day.
+// Assumes the caller holds the write lock.
+func (m *Manager) purgeFile(ctx context.Context, d *archiveDay, column, escVal string) error {
+	file := filepath.ToSlash(filepath.Join(d.Path, "part.parquet"))
+	// archivedDay reads the file without the dt column (hive or physical), so
+	// the rewrite never adds it and drops it from files an older purge wrote.
+	src, err := m.archivedDay(ctx, file)
+	if err != nil {
+		return err
+	}
+	var total, remaining int64
+	if err := m.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s", src)).Scan(&total); err != nil {
+		return err
+	}
+	if err := m.db.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s WHERE %s <> '%s'", src, column, escVal)).Scan(&remaining); err != nil {
 		return err
 	}
 	if remaining == total {
 		return nil // scope not present in this file
 	}
 	if remaining == 0 {
-		if err := os.Remove(file); err != nil {
-			return err
-		}
-		_ = os.Remove(filepath.Dir(file)) // drop the now-empty dt=... dir (ignore if not empty)
-		return nil
+		return d.remove("part.parquet")
 	}
-	tmp := file + ".purge"
-	copySQL := fmt.Sprintf("COPY (SELECT * FROM read_parquet('%s') WHERE %s <> '%s') TO '%s' (FORMAT parquet, COMPRESSION zstd)",
-		slashed, column, escVal, escapeSQL(filepath.ToSlash(tmp)))
+	copySQL := fmt.Sprintf("COPY (SELECT * FROM %s WHERE %s <> '%s') TO '%s' (FORMAT parquet, COMPRESSION zstd)",
+		src, column, escVal, escapeSQL(file+".purge"))
 	if _, err := m.db.ExecContext(ctx, copySQL); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, file); err != nil { // atomic replace
-		_ = os.Remove(tmp)
+	if err := d.rename("part.parquet.purge", "part.parquet"); err != nil { // atomic replace
+		_ = d.remove("part.parquet.purge")
 		return err
 	}
 	return nil

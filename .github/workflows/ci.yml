@@ -1,20 +1,4 @@
-# CI for the public fair-code repo.
-#
-# THIS FILE IS DELIBERATELY THIN. Every actual check lives in scripts/ci.sh, which you
-# can run yourself:
-#
-#   bash scripts/ci.sh
-#
-# Two reasons for the split. A contributor can reproduce CI locally instead of
-# discovering a failure after pushing. And this repository is a filtered mirror
-# published by a job that authenticates with a repository deploy key, which GitHub does
-# not permit to create or update anything under .github/workflows/. Keeping the steps
-# out of this file means a change to a check no longer breaks the publish at its final
-# push, after every gate has already passed.
-#
-# So: edit scripts/ci.sh freely. Editing THIS file is a rare, deliberate act (an action
-# version bump, a trigger change) and needs a push from a credential holding the
-# `workflow` scope.
+# Public product CI holds no deployment, provider or mirror credentials.
 name: ci
 
 on:
@@ -29,23 +13,59 @@ permissions:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: docker.io/library/postgres:17.11-bookworm@sha256:665dc7b37ac52a17e298511414c21d23ffa4e6a6ef6225b3e5d59c7afb35e994
+        env:
+          POSTGRES_USER: flare
+          POSTGRES_PASSWORD: flare # synthetic disposable fixture
+          POSTGRES_DB: flare
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U flare -d flare"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CI: 'true'
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 1536MiB
+      GOFLAGS: -mod=readonly
+      FLARE_TEST_DATABASE_URL: postgres://flare:flare@127.0.0.1:5432/flare?sslmode=disable
+      TEST_DATABASE_URL: postgres://flare:flare@127.0.0.1:5432/flare?sslmode=disable
+      PUBLIC_FLARE_DSN: ''
+      VITE_FLARE_DSN: ''
+      PUBLIC_FLARE_ENVIRONMENT: test
+      PUBLIC_FLARE_RELEASE: public-route-contract
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/flare-playwright-browsers
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the exact public revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0 # the secret scan reads full history, not just the tip
-
-      - uses: actions/setup-go@v5
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.26.10"
+          go-version: '1.26.11'
           cache: true
-
-      # scripts/ci.sh runs the frontend deps, typecheck and build. Without bun on
-      # the runner all three report SKIPPED, which is honest but means the UI the
-      # binary embeds is never checked on a pull request.
-      - uses: oven-sh/setup-bun@v2
+          cache-dependency-path: go.sum
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: latest
-
-      - name: All checks (build, vet, test, gofmt, licenses, secrets, vulnerabilities)
-        run: bash scripts/ci.sh
+          bun-version: '1.3.9'
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24.22.2'
+      - name: Run every existing product gate and require real PostgreSQL authentication coverage
+        run: python3 scripts/public-ci-qualification.py --output-dir "$RUNNER_TEMP/flare-product-qualification"
+      - name: Install frozen browser test tools
+        working-directory: browser-tests
+        run: bun install --frozen-lockfile
+      - name: Install this job's headless browser
+        run: node browser-tests/node_modules/playwright/cli.js install --with-deps chromium-headless-shell
+      - name: Require all 28 actual built-static launcher cases
+        run: python3 scripts/public-browser-qualification.py --output-dir "$RUNNER_TEMP/flare-browser-qualification"

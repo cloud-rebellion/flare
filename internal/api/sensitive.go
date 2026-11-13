@@ -40,6 +40,22 @@ func sensitiveText(ev ingest.NormalizedEvent) string {
 		b.WriteString(f.ContextLine)
 		b.WriteByte('\n')
 	}
+	// One "key=value" string per tag, so the rule that needs the key context can
+	// fire. Every decoded tag is scanned, including those too long or too late to
+	// be served: the org still has to rotate a credential that was sent.
+	budget := maxEventTagScanTextBytes
+	for _, tag := range decodeEventTags(ev.Raw) {
+		if budget <= 0 {
+			break
+		}
+		key := tag.Key[:min(len(tag.Key), maxEventTagScanFieldBytes)]
+		value := tag.Value[:min(len(tag.Value), maxEventTagScanFieldBytes)]
+		budget -= len(key) + len(value)
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(value)
+		b.WriteByte('\n')
+	}
 	return b.String()
 }
 

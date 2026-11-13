@@ -4,13 +4,14 @@ go 1.26.0
 
 // Pinned to the toolchain the container image already builds with. Without this,
 // go.mod permits an older Go and govulncheck reports the standard-library
-// vulnerabilities fixed through 1.26.9 as reachable. The pin makes the
+// vulnerabilities fixed through 1.26.11 as reachable. The pin makes the
 // version that keeps this safe a guarantee rather than a property of the base image.
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	github.com/alexedwards/scs/pgxstore v0.0.0-20251002162104-209de6e426de
 	github.com/alexedwards/scs/v2 v2.9.0
+	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/getsentry/sentry-go v0.47.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible
@@ -21,6 +22,7 @@ require (
 	github.com/pressly/goose/v3 v3.24.1
 	go.opentelemetry.io/proto/otlp v1.10.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/protobuf v1.36.11
 )
 
@@ -32,6 +34,7 @@ require (
 	github.com/duckdb/duckdb-go-bindings/linux-amd64 v0.1.21 // indirect
 	github.com/duckdb/duckdb-go-bindings/linux-arm64 v0.1.21 // indirect
 	github.com/duckdb/duckdb-go-bindings/windows-amd64 v0.1.21 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
