@@ -38,7 +38,6 @@ jobs:
       VITE_FLARE_DSN: ''
       PUBLIC_FLARE_ENVIRONMENT: test
       PUBLIC_FLARE_RELEASE: public-route-contract
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/flare-playwright-browsers
     steps:
       - name: Check out the exact public revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -66,6 +65,10 @@ jobs:
         working-directory: browser-tests
         run: bun install --frozen-lockfile
       - name: Install this job's headless browser
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/flare-playwright-browsers
         run: node browser-tests/node_modules/playwright/cli.js install --with-deps chromium-headless-shell
       - name: Require all 28 actual built-static launcher cases
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/flare-playwright-browsers
         run: python3 scripts/public-browser-qualification.py --output-dir "$RUNNER_TEMP/flare-browser-qualification"
