@@ -575,11 +575,20 @@ type OidcConfig struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type OidcLoginTransaction struct {
+	StateHash  []byte             `json:"state_hash"`
+	OrgID      string             `json:"org_id"`
+	ConfigHash []byte             `json:"config_hash"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Org struct {
-	ID        string             `json:"id"`
-	Name      string             `json:"name"`
-	Slug      string             `json:"slug"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID         string             `json:"id"`
+	Name       string             `json:"name"`
+	Slug       string             `json:"slug"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	IsOperator bool               `json:"is_operator"`
 }
 
 type OtlpAcceptance struct {
@@ -634,6 +643,15 @@ type Release struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	DeployMarkedAt  pgtype.Timestamptz `json:"deploy_marked_at"`
 	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
+}
+
+type RetentionSetting struct {
+	Singleton         bool               `json:"singleton"`
+	HotRetentionDays  int32              `json:"hot_retention_days"`
+	ColdMode          string             `json:"cold_mode"`
+	ColdRetentionDays pgtype.Int4        `json:"cold_retention_days"`
+	UpdatedBy         pgtype.Text        `json:"updated_by"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
 type SentryClientReportDiscard struct {

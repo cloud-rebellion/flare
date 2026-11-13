@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bright-interaction/flare/internal/retention"
 )
 
 // prodEnv sets the minimum env for a production Load, letting a test omit one
@@ -155,5 +157,33 @@ func TestConnectorSyncSchedulerIsOptInAndBoundedCadenceLoads(t *testing.T) {
 	}
 	if !cfg.ConnectorSyncEnabled || cfg.ConnectorSyncInterval != 45*time.Second {
 		t.Fatalf("enabled connector sync config = %#v", cfg)
+	}
+}
+
+// COLD_RETENTION_DAYS is the env default for the Parquet archive. Unset keeps
+// the archive forever (the behaviour before the setting existed); garbage and
+// "off" refuse to boot rather than silently picking a mode.
+func TestColdRetentionEnvDefault(t *testing.T) {
+	prodEnv(t, "")
+	t.Setenv("RETENTION_DAYS", "30")
+	t.Setenv("COLD_RETENTION_DAYS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ColdRetentionMode != retention.ColdForever || cfg.ColdRetentionDays != 0 || cfg.RetentionDays != 30 {
+		t.Fatalf("unset cold retention = %q/%d, want forever", cfg.ColdRetentionMode, cfg.ColdRetentionDays)
+	}
+
+	t.Setenv("COLD_RETENTION_DAYS", "365")
+	if cfg, err = Load(); err != nil || cfg.ColdRetentionMode != retention.ColdDays || cfg.ColdRetentionDays != 365 {
+		t.Fatalf("COLD_RETENTION_DAYS=365 -> %q/%d %v", cfg.ColdRetentionMode, cfg.ColdRetentionDays, err)
+	}
+
+	for _, bad := range []string{"off", "0", "ten", "29"} {
+		t.Setenv("COLD_RETENTION_DAYS", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("COLD_RETENTION_DAYS=%q with RETENTION_DAYS=30 booted", bad)
+		}
 	}
 }

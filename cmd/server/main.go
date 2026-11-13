@@ -106,19 +106,6 @@ func run() error {
 		defer mgr.Close()
 	}
 
-	// Partition manager: pre-create daily telemetry partitions, export aged ones
-	// to the Parquet cold tier, then drop (retention = export-then-DROP).
-	// FLARE_PARQUET_DIR always has a default, so a non-empty value proves
-	// nothing about intent. Treat the cold tier as required unless the operator
-	// explicitly opts out, and refuse to drop unarchived partitions otherwise.
-	requireExport := !cfg.AllowDropWithoutExport
-	go partition.New(pool, cfg.RetentionDays, exporter, requireExport).Run(ctx)
-	slog.Info("partition manager started", "retention_days", cfg.RetentionDays,
-		"cold_tier_available", exporter != nil, "require_export_before_drop", requireExport)
-	if requireExport && exporter == nil {
-		slog.Error("cold tier unavailable and FLARE_ALLOW_DROP_WITHOUT_EXPORT is not set: retention is PAUSED, telemetry partitions will accumulate. Fix analytics/DuckDB, or set FLARE_ALLOW_DROP_WITHOUT_EXPORT=true to prune without archiving")
-	}
-
 	sessions := auth.NewSessionManager(cfg.SessionLifetime, cfg.SessionIdleTimeout, cfg.IsProduction())
 	sessions.Store = pgxstore.New(pool)
 
@@ -157,6 +144,31 @@ func run() error {
 	}
 
 	srv := api.NewServer(pool, sessions, cfg, analyticsMgr)
+
+	// Warn loudly if no workspace can manage instance-wide settings.
+	_, _ = srv.CheckOperatorOrg(ctx)
+
+	// Partition manager: pre-create daily telemetry partitions, export aged ones
+	// to the Parquet cold tier, then drop (retention = export-then-DROP), and
+	// prune archive days past cold retention. The policy is read from the
+	// dashboard setting on EVERY pass (RETENTION_DAYS / COLD_RETENTION_DAYS are
+	// the fallback when nothing is stored), so a change needs no restart.
+	// FLARE_PARQUET_DIR always has a default, so a non-empty value proves
+	// nothing about intent. Treat the cold tier as required unless the operator
+	// explicitly opts out, and refuse to drop unarchived partitions otherwise.
+	requireExport := !cfg.AllowDropWithoutExport
+	partitions := partition.New(pool, cfg.RetentionDays, exporter, requireExport).WithPolicy(srv.RetentionPolicy)
+	if analyticsMgr != nil {
+		partitions.WithColdPruner(analyticsMgr)
+	}
+	srv.SetRetentionStatusSource(partitions.LastStatus)
+	go partitions.Run(ctx)
+	slog.Info("partition manager started", "env_retention_days", cfg.RetentionDays,
+		"env_cold_retention", string(cfg.ColdRetentionMode), "env_cold_retention_days", cfg.ColdRetentionDays,
+		"cold_tier_available", exporter != nil, "require_export_before_drop", requireExport)
+	if requireExport && exporter == nil {
+		slog.Error("cold tier unavailable and FLARE_ALLOW_DROP_WITHOUT_EXPORT is not set: retention is PAUSED, telemetry partitions will accumulate. Fix analytics/DuckDB, set FLARE_ALLOW_DROP_WITHOUT_EXPORT=true, or choose \"do not archive\" in Settings to prune without archiving")
+	}
 	// Each replica may drain the same durable automation queue. Short fenced
 	// leases preserve one stored notice across restarts; retries sign the same
 	// body so receivers can deduplicate its verified hash.

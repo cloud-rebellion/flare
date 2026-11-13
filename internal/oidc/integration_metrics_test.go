@@ -43,7 +43,7 @@ func TestOIDCOutboundCallsRecordBoundedIntegrationMetrics(t *testing.T) {
 	httpClient = &http.Client{Transport: oidcRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			return oidcResponse(http.StatusOK, `{"authorization_endpoint":"https://metrics-oidc-issuer.example/authorize","token_endpoint":"https://metrics-oidc-issuer.example/token","userinfo_endpoint":"https://metrics-oidc-issuer.example/userinfo"}`), nil
+			return oidcResponse(http.StatusOK, `{"issuer":"https://metrics-oidc-issuer.example","jwks_uri":"https://metrics-oidc-issuer.example/jwks","authorization_endpoint":"https://metrics-oidc-issuer.example/authorize","token_endpoint":"https://metrics-oidc-issuer.example/token","userinfo_endpoint":"https://metrics-oidc-issuer.example/userinfo"}`), nil
 		case "/token":
 			return oidcResponse(http.StatusOK, `{"access_token":"access-secret"}`), nil
 		case "/userinfo":
@@ -103,7 +103,7 @@ func TestOIDCReceiptFailureDoesNotRepeatAuthenticationCalls(t *testing.T) {
 		providerCalls[r.URL.Path]++
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
-			return oidcResponse(http.StatusOK, `{"authorization_endpoint":"https://receipt-oidc-issuer.example/authorize","token_endpoint":"https://receipt-oidc-issuer.example/token","userinfo_endpoint":"https://receipt-oidc-issuer.example/userinfo"}`), nil
+			return oidcResponse(http.StatusOK, `{"issuer":"https://receipt-oidc-issuer.example","jwks_uri":"https://receipt-oidc-issuer.example/jwks","authorization_endpoint":"https://receipt-oidc-issuer.example/authorize","token_endpoint":"https://receipt-oidc-issuer.example/token","userinfo_endpoint":"https://receipt-oidc-issuer.example/userinfo"}`), nil
 		case "/token":
 			return oidcResponse(http.StatusOK, `{"access_token":"access-secret"}`), nil
 		case "/userinfo":

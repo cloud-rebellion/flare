@@ -2,7 +2,9 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,13 +44,58 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 	dayStr := day.Format("2006-01-02")
 	child := fmt.Sprintf("%s_%s", table, day.Format("2006_01_02"))
 	started := time.Now()
+	root := e.duck.cfg.parquetRoot()
+	destDir := root + "/" + table + "/dt=" + dayStr
+	final := destDir + "/part.parquet"
+	local := e.duck.cfg.S3Endpoint == ""
 
 	var existingStatus string
-	if err := e.pool.QueryRow(ctx, `SELECT status FROM export_log WHERE tbl=$1 AND day=$2`, table, day).Scan(&existingStatus); err != nil && err != pgx.ErrNoRows {
+	var loggedRows int64
+	if err := e.pool.QueryRow(ctx, `SELECT status, row_count FROM export_log WHERE tbl=$1 AND day=$2`, table, day).Scan(&existingStatus, &loggedRows); err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("read export_log: %w", err)
 	}
+	// "succeeded" is a claim about a file and a partition, and either can change
+	// after it was written: an archive prune deletes the file, and a backward
+	// clock step can recreate a dropped day that late ingest then writes to. The
+	// caller DROPs the partition on nil, so on the local tier the claim is only
+	// trusted while the file is there and still holds every live row. S3 cannot
+	// be checked without reading the object back and keeps the old behaviour.
 	if existingStatus == "succeeded" {
-		return nil // already exported
+		if !local {
+			return nil // already exported
+		}
+		intact, fileExists, err := e.recordedExportIntact(ctx, child, final, loggedRows)
+		if err != nil {
+			return fmt.Errorf("verify recorded export of %s: %w", child, err)
+		}
+		if intact {
+			return nil // already exported, and still true
+		}
+		slog.Warn("export_log says exported but the archive no longer matches the partition; exporting again",
+			"partition", child, "logged_rows", loggedRows, "archive_file_present", fileExists)
+	}
+	// Whether to merge is decided from the FILE, never from the ledger: the
+	// ledger is rewritten to "attempted" just below, before any step that can
+	// fail, so a merge that failed or was killed would otherwise be retried as
+	// a fresh export and overwrite the archived rows with only the live ones.
+	// Any part.parquet already on disk is merged with the partition.
+	merge := false
+	if local {
+		if _, serr := os.Stat(filepath.FromSlash(final)); serr == nil {
+			merge = true
+		} else if !errors.Is(serr, os.ErrNotExist) {
+			return fmt.Errorf("stat archive of %s: %w", child, serr)
+		}
+		// A file DuckDB cannot read (zero-length after a crash before the data
+		// reached disk, truncated, corrupt) has no rows to keep and would fail
+		// every merge, blocking the day forever behind a "succeeded" ledger.
+		// Export from the partition and replace it.
+		if merge {
+			if _, err := e.archivedRows(ctx, final); err != nil {
+				slog.Warn("archived day file is unreadable; exporting the partition over it", "partition", child, "error", err)
+				merge = false
+			}
+		}
 	}
 	if err := e.beginAttempt(ctx, table, day); err != nil {
 		return fmt.Errorf("begin export attempt: %w", err)
@@ -64,10 +111,8 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 	// "missing", and the caller drops the partition when this returns nil - so a
 	// blip meant permanent, silent telemetry loss. Ask Postgres directly, over
 	// the pgx pool, and only then return nil.
-	var childExists bool
-	if err := e.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r')`, child,
-	).Scan(&childExists); err != nil {
+	childExists, err := e.partitionExists(ctx, child)
+	if err != nil {
 		return fail("partition_probe", fmt.Errorf("check partition %s exists: %w", child, err))
 	}
 	if !childExists {
@@ -77,9 +122,22 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 		return nil // child partition does not exist; nothing to archive
 	}
 
+	// source is what lands in the archive. For a merge it is the rows already in
+	// the file plus the live partition, de-duplicated, so re-exporting a day
+	// whose partition still holds every archived row writes the same set, and a
+	// recreated partition holding only late rows adds them to the archive.
+	source := "hot.public." + child
+	if merge {
+		archived, err := e.duck.archivedDay(ctx, final)
+		if err != nil {
+			return fail("source_read", fmt.Errorf("read archive of %s: %w", child, err))
+		}
+		source = fmt.Sprintf("(SELECT * FROM %s UNION BY NAME SELECT * FROM hot.public.%s)", archived, child)
+	}
+
 	d := e.duck.db
 	var srcCount int64
-	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM hot.public.%s", child)).Scan(&srcCount); err != nil {
+	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM %s AS src", source)).Scan(&srcCount); err != nil {
 		return fail("source_read", fmt.Errorf("count rows in %s: %w", child, err))
 	}
 	if srcCount == 0 {
@@ -89,11 +147,7 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 		return nil
 	}
 
-	root := e.duck.cfg.parquetRoot()
-	destDir := root + "/" + table + "/dt=" + dayStr
-	final := destDir + "/part.parquet"
 	writeTarget := final
-	local := e.duck.cfg.S3Endpoint == ""
 	if local {
 		if err := os.MkdirAll(filepath.FromSlash(destDir), 0o755); err != nil {
 			return fail("cold_write", fmt.Errorf("mkdir parquet dir: %w", err))
@@ -101,17 +155,21 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 		writeTarget = final + ".tmp"
 	}
 
-	copySQL := fmt.Sprintf("COPY (SELECT * FROM hot.public.%s) TO '%s' (FORMAT parquet, COMPRESSION zstd)", child, escapeSQL(writeTarget))
+	copySQL := fmt.Sprintf("COPY (SELECT * FROM %s AS src) TO '%s' (FORMAT parquet, COMPRESSION zstd)", source, escapeSQL(writeTarget))
 	if _, err := d.ExecContext(ctx, copySQL); err != nil {
 		return fail("cold_write", fmt.Errorf("copy %s to parquet: %w", child, err))
 	}
 
+	// Verify the file that was written, and record ITS count. The count above
+	// and the COPY are separate snapshots, so rows ingested in between make
+	// the file larger, never smaller; requiring equality failed every pass of
+	// a merge under live ingest. Fewer rows than counted is a short write.
 	var pqCount int64
-	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", escapeSQL(writeTarget))).Scan(&pqCount); err != nil {
+	if err := d.QueryRowContext(ctx, fmt.Sprintf("SELECT count(*) FROM read_parquet('%s', hive_partitioning = false)", escapeSQL(writeTarget))).Scan(&pqCount); err != nil {
 		return fail("verify", fmt.Errorf("verify parquet: %w", err))
 	}
-	if pqCount != srcCount {
-		return fail("verify", fmt.Errorf("parquet row count %d != source %d for %s (not committing)", pqCount, srcCount, child))
+	if pqCount < srcCount {
+		return fail("verify", fmt.Errorf("parquet row count %d < source %d for %s (not committing)", pqCount, srcCount, child))
 	}
 
 	if local {
@@ -130,10 +188,94 @@ func (e *Exporter) exportDay(ctx context.Context, table string, day time.Time) e
 		bytes = info.Size()
 		bytesKnown = true
 	}
-	if err := e.recordSuccess(ctx, table, day, srcCount, bytes, bytesKnown, started); err != nil {
+	if err := e.recordSuccess(ctx, table, day, pqCount, bytes, bytesKnown, started); err != nil {
 		return fmt.Errorf("write export_log: %w", err)
 	}
 	return nil
+}
+
+// archivedDay returns a relation reading one archived day file as exactly the
+// columns the hot table has. Hive partitioning is off because the path's
+// dt=YYYY-MM-DD would otherwise come back as an extra dt column, which no live
+// row has, so identical rows would never compare equal and a merge would write
+// it. Files rewritten by an older erasure purge carry that column PHYSICALLY;
+// it is excluded too, or a merge would double every row.
+func (m *Manager) archivedDay(ctx context.Context, final string) (string, error) {
+	file := fmt.Sprintf("read_parquet('%s', hive_partitioning = false)", escapeSQL(final))
+	var hasDT int
+	if err := m.db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT count(*) FROM (DESCRIBE SELECT * FROM %s) WHERE column_name = 'dt'", file,
+	)).Scan(&hasDT); err != nil {
+		return "", err
+	}
+	if hasDT > 0 {
+		return "(SELECT * EXCLUDE (dt) FROM " + file + ")", nil
+	}
+	return file, nil
+}
+
+// archivedRows counts the rows of one archived day file, or fails if DuckDB
+// cannot read it.
+func (e *Exporter) archivedRows(ctx context.Context, final string) (int64, error) {
+	file, err := e.duck.archivedDay(ctx, final)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	err = e.duck.db.QueryRowContext(ctx, "SELECT count(*) FROM "+file).Scan(&n)
+	return n, err
+}
+
+func (e *Exporter) partitionExists(ctx context.Context, child string) (bool, error) {
+	var ok bool
+	err := e.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r')`, child,
+	).Scan(&ok)
+	return ok, err
+}
+
+// recordedExportIntact reports whether a "succeeded" ledger row still holds on
+// the local tier: the partition is gone (nothing live to lose), or its row
+// count equals the recorded one AND every live row is already in the file.
+// The count alone is not enough: a day dropped and then recreated by a clock
+// step can hold the same number of different, late rows. Any error is
+// returned, and the caller keeps the partition.
+func (e *Exporter) recordedExportIntact(ctx context.Context, child, final string, loggedRows int64) (intact, fileExists bool, err error) {
+	if _, serr := os.Stat(filepath.FromSlash(final)); serr == nil {
+		fileExists = true
+	} else if !errors.Is(serr, os.ErrNotExist) {
+		return false, false, serr
+	}
+	exists, err := e.partitionExists(ctx, child)
+	if err != nil || !exists {
+		return err == nil, fileExists, err
+	}
+	var live int64
+	if err := e.pool.QueryRow(ctx, "SELECT count(*) FROM "+pgx.Identifier{child}.Sanitize()).Scan(&live); err != nil {
+		return false, fileExists, err
+	}
+	if live != loggedRows || (loggedRows > 0 && !fileExists) {
+		return false, fileExists, nil
+	}
+	if !fileExists {
+		return true, false, nil // nothing was archived and nothing is live
+	}
+	// An unreadable file is not intact; the re-export replaces it (above).
+	fileRows, err := e.archivedRows(ctx, final)
+	if err != nil {
+		return false, true, nil
+	}
+	file, err := e.duck.archivedDay(ctx, final)
+	if err != nil {
+		return false, true, nil
+	}
+	var unionRows int64
+	if err := e.duck.db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT count(*) FROM (SELECT * FROM %s UNION BY NAME SELECT * FROM hot.public.%s) AS u", file, child,
+	)).Scan(&unionRows); err != nil {
+		return false, true, err
+	}
+	return unionRows == fileRows, true, nil
 }
 
 // beginAttempt writes a single bounded state row before touching the cold tier.

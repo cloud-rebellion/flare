@@ -132,6 +132,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	slug = slug + "-" + id.New()[:6]
 
 	org, user, err := s.createOrgWithOwner(ctx, orgName, slug, req.Email, hash)
+	if isUniqueViolation(err) {
+		// A concurrent registration for the same address won between the
+		// lookup above and this insert: the same answer as the lookup gives.
+		writeErr(w, http.StatusConflict, "email already registered")
+		return
+	}
 	if err != nil {
 		slogError(w, "create org and owner", err)
 		return
@@ -152,6 +158,10 @@ func (s *Server) createOrgWithOwner(ctx context.Context, orgName, slug, email, p
 	defer tx.Rollback(ctx) //nolint:errcheck // no-op once committed
 
 	q := s.q.WithTx(tx)
+	// Same lock as handleDeleteOrg: who the operator is is decided serially.
+	if err := q.LockOperatorOrg(ctx); err != nil {
+		return nil, nil, err
+	}
 	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{ID: id.New(), Name: orgName, Slug: slug})
 	if err != nil {
 		return nil, nil, err
@@ -250,25 +260,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	uid := s.sessions.GetString(ctx, "user_id")
-	if uid == "" {
+	w.Header().Set("Cache-Control", "no-store")
+	user, err := s.nativeSessionUser(r.Context())
+	if errors.Is(err, errNativeSessionRequired) {
 		writeErr(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	user, err := s.q.GetUserByID(ctx, uid)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
-	// This route sits OUTSIDE requireAuth, so it must repeat requireAuth's
-	// revocation check itself. Without it, a session predating a password reset
-	// still resolved here, so the SPA kept rendering as signed in (name, role,
-	// org) for an attacker whose session was supposed to be dead.
-	epoch := s.sessions.GetInt64(ctx, "auth_epoch")
-	if epoch > 0 && user.SessionsValidFrom.Valid && user.SessionsValidFrom.Time.Unix() > epoch {
-		_ = s.sessions.Destroy(ctx)
-		writeErr(w, http.StatusUnauthorized, "session expired, please sign in again")
+		writeErr(w, http.StatusServiceUnavailable, "session could not be checked")
 		return
 	}
 	writeJSON(w, http.StatusOK, toUserResponse(user))

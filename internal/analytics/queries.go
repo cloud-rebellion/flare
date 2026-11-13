@@ -3,7 +3,6 @@ package analytics
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -61,8 +60,7 @@ func (m *Manager) source(table string, cols []string) string {
 // coldAvailable reports whether any exported Parquet exists for the table.
 func (m *Manager) coldAvailable(table string) bool {
 	if m.cfg.S3Endpoint == "" {
-		matches, _ := filepath.Glob(filepath.Join(m.cfg.ParquetDir, table, "dt=*", "part.parquet"))
-		return len(matches) > 0
+		return archiveHasDay(m.cfg.ParquetDir, table)
 	}
 	// S3: gate on the export_log marker (best-effort; missing table => no cold).
 	// row_count > 0 is required: an empty aged partition writes a row_count=0

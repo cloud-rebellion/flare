@@ -1,7 +1,5 @@
-// Package oidc is a minimal OpenID Connect relying-party client: discovery,
-// authorization-code exchange, and userinfo. Dependency-free (stdlib only) to
-// keep the single static binary. The access token is used once to read
-// userinfo and never stored.
+// Package oidc is a bounded OpenID Connect relying-party client. Tokens are
+// verified with coreos/go-oidc; access tokens are never persisted.
 package oidc
 
 import (
@@ -31,8 +29,20 @@ import (
 // link-local addresses (cloud metadata, internal services) even under DNS
 // rebinding. Same pattern as internal/alerts.
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &http.Transport{
+	Timeout:   10 * time.Second,
+	Transport: publicOIDCTransport(),
+	// No redirects. The token request carries client_secret in its body, and a
+	// discovery document that redirects is indistinguishable from one that
+	// moves the credential somewhere else. sameAuthority pins the discovered
+	// endpoints to the issuer host; a redirect would step outside that check
+	// after it had already passed.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("redirects disabled")
+	},
+}
+
+func publicOIDCTransport() http.RoundTripper {
+	return &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: 10 * time.Second,
 			Control: func(_, address string, _ syscall.RawConn) error {
@@ -46,15 +56,7 @@ var httpClient = &http.Client{
 				return nil
 			},
 		}).DialContext,
-	},
-	// No redirects. The token request carries client_secret in its body, and a
-	// discovery document that redirects is indistinguishable from one that
-	// moves the credential somewhere else. sameAuthority pins the discovered
-	// endpoints to the issuer host; a redirect would step outside that check
-	// after it had already passed.
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return errors.New("redirects disabled")
-	},
+	}
 }
 
 // sameAuthority reports whether endpoint is https and its host equals the
@@ -63,7 +65,7 @@ var httpClient = &http.Client{
 // cannot redirect the code + client_secret to an attacker host.
 func sameAuthority(issuerHost, endpoint string) bool {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "https" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" {
 		return false
 	}
 	h := u.Hostname()
@@ -72,9 +74,15 @@ func sameAuthority(issuerHost, endpoint string) bool {
 
 // Provider holds the endpoints resolved from an issuer's discovery document.
 type Provider struct {
+	Issuer      string `json:"issuer"`
 	AuthURL     string `json:"authorization_endpoint"`
 	TokenURL    string `json:"token_endpoint"`
 	UserinfoURL string `json:"userinfo_endpoint"`
+	JWKSURL     string `json:"jwks_uri"`
+	// Optional assurance metadata is decoded only for selected launch readiness.
+	// Its shape must not change discovery for ordinary unrelated providers.
+	ACRValues json.RawMessage `json:"acr_values_supported,omitempty"`
+	client    *http.Client
 }
 
 var (
@@ -84,9 +92,26 @@ var (
 
 // Discover fetches (and caches) the issuer's OIDC discovery document.
 func Discover(ctx context.Context, issuer string) (provider *Provider, err error) {
+	return DiscoverWithPolicy(ctx, issuer, "", "")
+}
+
+// DiscoverWithPolicy only allows a private peer for the exact operator-owned
+// canonical CloudRebellion issuer. Tenant configuration cannot enable it.
+func DiscoverWithPolicy(ctx context.Context, issuer, operatorIssuer, peer string) (provider *Provider, err error) {
 	issuer = strings.TrimRight(issuer, "/")
+	if !validIssuer(issuer) || netguard.ValidatePublicURL(issuer) != nil {
+		return nil, errors.New("OIDC issuer refused")
+	}
+	client, err := providerHTTPClient(issuer, operatorIssuer, peer)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := issuer
+	if operatorIssuer != "" {
+		cacheKey += "\x00" + operatorIssuer + "\x00" + peer
+	}
 	discMu.Lock()
-	if p, ok := discCache[issuer]; ok {
+	if p, ok := discCache[cacheKey]; ok {
 		discMu.Unlock()
 		return p, nil
 	}
@@ -116,7 +141,7 @@ func Discover(ctx context.Context, issuer string) (provider *Provider, err error
 	if err != nil {
 		return nil, err
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -125,10 +150,10 @@ func Discover(ctx context.Context, issuer string) (provider *Provider, err error
 		return nil, fmt.Errorf("oidc discovery returned %d", resp.StatusCode)
 	}
 	var p Provider
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+	if err := decodeOIDCJSON(resp.Body, &p); err != nil {
 		return nil, err
 	}
-	if p.AuthURL == "" || p.TokenURL == "" || p.UserinfoURL == "" {
+	if p.Issuer != issuer || p.AuthURL == "" || p.TokenURL == "" || p.UserinfoURL == "" || p.JWKSURL == "" {
 		return nil, fmt.Errorf("oidc discovery missing endpoints")
 	}
 	// Bind every endpoint to the issuer's authority (https + same host or a
@@ -141,11 +166,12 @@ func Discover(ctx context.Context, issuer string) (provider *Provider, err error
 	if issuerHost == "" ||
 		!sameAuthority(issuerHost, p.AuthURL) ||
 		!sameAuthority(issuerHost, p.TokenURL) ||
-		!sameAuthority(issuerHost, p.UserinfoURL) {
+		!sameAuthority(issuerHost, p.UserinfoURL) || !sameAuthority(issuerHost, p.JWKSURL) {
 		return nil, fmt.Errorf("oidc discovery endpoints are not under the issuer authority")
 	}
 	discMu.Lock()
-	discCache[issuer] = &p
+	p.client = client
+	discCache[cacheKey] = &p
 	discMu.Unlock()
 	return &p, nil
 }
@@ -196,19 +222,18 @@ func (p *Provider) Exchange(ctx context.Context, clientID, clientSecret, code, r
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	resp, err := p.http().Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("token exchange returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("token exchange returned %d", resp.StatusCode)
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil || tr.AccessToken == "" {
+	if err := decodeOIDCJSON(resp.Body, &tr); err != nil || tr.AccessToken == "" {
 		return "", fmt.Errorf("token exchange: no access_token")
 	}
 	return tr.AccessToken, nil
@@ -253,7 +278,7 @@ func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (info 
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	resp, err := httpClient.Do(req)
+	resp, err := p.http().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +288,7 @@ func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (info 
 	}
 	// email_verified may arrive as a bool or a JSON string; decode loosely.
 	var raw map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := decodeOIDCJSON(resp.Body, &raw); err != nil {
 		return nil, err
 	}
 	info = &UserInfo{}
@@ -283,6 +308,22 @@ func (p *Provider) FetchUserInfo(ctx context.Context, accessToken string) (info 
 		info.EmailVerified = v == "true"
 	}
 	return info, nil
+}
+
+func (p *Provider) http() *http.Client {
+	if p.client != nil {
+		return p.client
+	}
+	client, _ := providerHTTPClient("", "", "")
+	return client
+}
+
+func decodeOIDCJSON(r io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(r, maxOIDCResponse+1))
+	if err != nil || len(data) > maxOIDCResponse || json.Unmarshal(data, target) != nil {
+		return errors.New("OIDC response invalid")
+	}
+	return nil
 }
 
 // RandomState returns a URL-safe random state token.

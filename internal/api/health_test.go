@@ -10,6 +10,7 @@ import (
 
 	"github.com/bright-interaction/flare/internal/automationoutbox"
 	"github.com/bright-interaction/flare/internal/config"
+	"github.com/bright-interaction/flare/internal/retention"
 )
 
 func TestWorkerSnapshotReportsBoundedOccupancy(t *testing.T) {
@@ -26,19 +27,23 @@ func TestWorkerSnapshotReportsBoundedOccupancy(t *testing.T) {
 }
 
 func TestRetentionHealthPolicies(t *testing.T) {
+	forever := retention.Policy{HotDays: 30, ColdMode: retention.ColdForever}
 	for _, tc := range []struct {
 		name          string
-		allowDrop     bool
+		posture       retentionPosture
 		analytics     bool
 		wantPolicy    string
 		wantExportReq bool
 	}{
-		{name: "cold tier available", analytics: true, wantPolicy: "export_before_drop", wantExportReq: true},
-		{name: "cold tier unavailable", wantPolicy: "paused", wantExportReq: true},
-		{name: "explicit opt out", allowDrop: true, wantPolicy: "drop_without_export", wantExportReq: false},
+		{name: "cold tier available", posture: retentionPosture{Policy: forever, Known: true}, analytics: true, wantPolicy: "export_before_drop", wantExportReq: true},
+		{name: "cold tier unavailable", posture: retentionPosture{Policy: forever, Known: true}, wantPolicy: "paused", wantExportReq: true},
+		{name: "explicit opt out", posture: retentionPosture{Policy: forever, Known: true, AllowDropWithoutExport: true}, wantPolicy: "drop_without_export", wantExportReq: false},
+		// P1-4: a stored "no archive" drops unexported even with the cold tier up.
+		{name: "stored no archive", posture: retentionPosture{Policy: retention.Policy{HotDays: 7, ColdMode: retention.ColdOff}, Known: true}, analytics: true, wantPolicy: "drop_without_export", wantExportReq: false},
+		{name: "policy unreadable", posture: retentionPosture{Policy: forever}, analytics: true, wantPolicy: "paused", wantExportReq: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			policy, exportRequired := retentionHealth(tc.allowDrop, tc.analytics)
+			policy, exportRequired := retentionHealth(tc.posture, tc.analytics)
 			if policy != tc.wantPolicy || exportRequired != tc.wantExportReq {
 				t.Fatalf("retentionHealth = %q/%t, want %q/%t", policy, exportRequired, tc.wantPolicy, tc.wantExportReq)
 			}

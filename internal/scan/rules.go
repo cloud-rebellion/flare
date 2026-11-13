@@ -71,6 +71,22 @@ type rule struct {
 // needs the same shape test for a bare numeric leaf.
 var rePersonnummer = regexp.MustCompile(`\b(?:(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])[-+]?\d{4}|\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])[-+]\d{4})\b`)
 
+// assignRule is named because Pair asks it the same question about a key that
+// arrives without its value in the same string.
+var assignRule = rule{
+	// key=value / key: value / "key":"value" where the key NAMES a secret.
+	// This is the only rule that catches a credential carrying no
+	// recognisable prefix: a database password, an AWS secret access key, a
+	// 32-hex Twilio token. Context is the evidence, so the key is parsed
+	// rather than substring-matched (see keyNamesSecret): matching "token"
+	// inside "tokens_used" turned an LLM cost counter into "[secret]", on a
+	// product whose whole point is telling you what your models cost.
+	kind: "secret",
+	re:   regexp.MustCompile(`(?i)([A-Za-z0-9_.\-]*(?:passphrase|password|passwd|pwd|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|session[_-]?key|client[_-]?secret|auth[_-]?token|refresh[_-]?token|apikey|connection[_-]?string|conn[_-]?str|database[_-]?url|db[_-]?url|webhook[_-]?url|dsn|ssn|personnummer|otp|pin)[A-Za-z0-9_.\-]*)(\s*["']?\s*[:=]\s*["']?)([^\s"',;)}<>]{4,})`),
+	with: "${1}${2}[secret]",
+	keep: func(m string) bool { return keyNamesSecret(assignKey(m)) },
+}
+
 // Structured, high-confidence secrets. These run first and use capture groups
 // so the surrounding context survives the rewrite.
 var structured = []rule{
@@ -119,19 +135,7 @@ var structured = []rule{
 		re:   regexp.MustCompile(`(?i)\b(authorization\s*["']?\s*[:=]\s*["']?\s*(?:token|apikey|api-key)(?:\s+|%20))[A-Za-z0-9._+/=\-]{8,}`),
 		with: "${1}[secret]",
 	},
-	{
-		// key=value / key: value / "key":"value" where the key NAMES a secret.
-		// This is the only rule that catches a credential carrying no
-		// recognisable prefix: a database password, an AWS secret access key, a
-		// 32-hex Twilio token. Context is the evidence, so the key is parsed
-		// rather than substring-matched (see keyNamesSecret): matching "token"
-		// inside "tokens_used" turned an LLM cost counter into "[secret]", on a
-		// product whose whole point is telling you what your models cost.
-		kind: "secret",
-		re:   regexp.MustCompile(`(?i)([A-Za-z0-9_.\-]*(?:passphrase|password|passwd|pwd|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|session[_-]?key|client[_-]?secret|auth[_-]?token|refresh[_-]?token|apikey|connection[_-]?string|conn[_-]?str|database[_-]?url|db[_-]?url|webhook[_-]?url|dsn|ssn|personnummer|otp|pin)[A-Za-z0-9_.\-]*)(\s*["']?\s*[:=]\s*["']?)([^\s"',;)}<>]{4,})`),
-		with: "${1}${2}[secret]",
-		keep: func(m string) bool { return keyNamesSecret(assignKey(m)) },
-	},
+	assignRule,
 }
 
 // Payment cards sit between the structured pass and the generic pass: they must
@@ -473,7 +477,7 @@ func assignKey(m string) string {
 var secretWords = map[string]bool{
 	"passphrase": true, "password": true, "passwd": true, "pwd": true,
 	"secret": true, "token": true, "credential": true, "credentials": true,
-	"apikey": true, "authorization": true, "dsn": true,
+	"apikey": true, "authorization": true, "cookie": true, "cookies": true, "dsn": true,
 	"ssn": true, "personnummer": true, "otp": true, "pin": true,
 }
 

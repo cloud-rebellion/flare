@@ -95,10 +95,20 @@ You can also supply all secrets via a pre-created `Secret` (keys `session-key`,
 | At-rest secret | `FLARE_SECRET_KEY` | `secrets.secretKey` | required; encrypts BYOAI keys, OIDC client secrets and channel configs. Production refuses to boot without it, and rotating it makes existing encrypted values unreadable |
 | DB password | `FLARE_DB_PASSWORD` | `postgres.password` | for the bundled Postgres |
 | External DB | `DATABASE_URL` | `postgres.externalUrl` (+ `bundled=false`) | point at your own Postgres |
-| Retention (days) | `FLARE_RETENTION_DAYS` | `retentionDays` | before export-to-Parquet + drop |
+| Retention (days) | `FLARE_RETENTION_DAYS` | `retentionDays` | before export-to-Parquet + drop. Default only: Settings > Data retention overrides it (admins of the operator workspace) |
+| Archive retention (days) | `FLARE_COLD_RETENTION_DAYS` | `coldRetentionDays` | default empty = keep the Parquet archive forever; N prunes archived days older than N (N >= retention). Overridable in Settings. Local archives only; for S3 use a bucket lifecycle rule |
 | HubSpot scheduler | `FLARE_CONNECTOR_SYNC_ENABLED`, `FLARE_CONNECTOR_SYNC_INTERVAL` | n/a | optional; disabled by default, enables bounded due HubSpot account health passes (default interval `5m`) |
 | Prune without archiving | `FLARE_ALLOW_DROP_WITHOUT_EXPORT` | `allowDropWithoutExport` | default off. Retention only drops a partition after it is archived, so an unreachable cold tier pauses retention (partitions accumulate, logged as an error every cycle) instead of deleting unarchived telemetry. Set to `true` only if you run with no cold tier on purpose |
 | Email | `SMTP_*` | `smtp.*` | optional: alert emails + password reset |
+
+**Operator workspace.** Data retention is instance-wide, so only admins of the
+operator workspace can change it. That is the first workspace created on the
+instance (on an upgrade, the oldest one), recorded in `orgs.is_operator`. It
+cannot be deleted while other workspaces exist; delete those first. There is no
+environment variable for it: moving the flag is a deliberate database change.
+Registration only hands the flag to the first workspace on an EMPTY instance;
+if workspaces exist with none flagged, the server logs an error at boot and you
+repair it with `UPDATE orgs SET is_operator = TRUE WHERE id = '<org id>'`.
 
 ### Email (optional)
 

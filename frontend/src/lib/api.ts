@@ -41,6 +41,9 @@ import type {
   Overview,
   SdkDiscards,
   Project,
+  RetentionExpected,
+  RetentionPolicy,
+  RetentionSettings,
   Span,
   TraceSummary,
   User
@@ -131,6 +134,12 @@ export const api = {
   deleteGithubConfig: () => req<void>('DELETE', '/integrations/github'),
   createGithubIssue: (issueId: string) =>
     req<{ github_url: string }>('POST', `/issues/${issueId}/github`),
+
+  retention: () => req<RetentionSettings>('GET', '/settings/retention'),
+  setRetention: (policy: RetentionPolicy, confirmReduction: boolean, expected: RetentionExpected) =>
+    req<RetentionSettings>('PUT', '/settings/retention', { ...policy, confirm_reduction: confirmReduction, expected }),
+  resetRetention: (confirmReduction: boolean, expected: RetentionExpected) =>
+    req<RetentionSettings>('DELETE', '/settings/retention', { confirm_reduction: confirmReduction, expected }),
 
   aiConfig: () => req<AiConfig>('GET', '/integrations/ai'),
   setAiConfig: (cfg: {

@@ -5,6 +5,7 @@
   import { session } from '$lib/session.svelte';
   import { relativeTime } from '$lib/format';
   import MCPConnection from '$lib/components/MCPConnection.svelte';
+  import RetentionSettings from '$lib/components/RetentionSettings.svelte';
   import type {
     AiConfig,
     ApiKey,
@@ -1287,6 +1288,8 @@
   {:else}
     <p class="text-sm text-zinc-500">No audited actions yet.</p>
   {/if}
+
+  <RetentionSettings />
 
   <h2 class="mt-14 text-xl font-semibold tracking-tight">Data</h2>
   <p class="mt-1 mb-4 text-sm text-zinc-500">

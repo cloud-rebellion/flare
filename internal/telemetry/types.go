@@ -40,6 +40,7 @@ type Event struct {
 	Stacktrace     json.RawMessage
 	TraceID        string
 	SpanID         string
+	Payload        json.RawMessage
 	ReceivedAt     time.Time
 }
 

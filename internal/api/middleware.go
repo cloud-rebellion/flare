@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -214,22 +215,17 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 		// Cookie-only browser sessions retain their independent CSRF gate.
 		// Re-read the user so removal, role and password-reset changes apply.
-		if uid := s.sessions.GetString(ctx, "user_id"); uid != "" {
-			if user, err := s.q.GetUserByID(ctx, uid); err == nil {
-				epoch := s.sessions.GetInt64(ctx, "auth_epoch")
-				if epoch > 0 && user.SessionsValidFrom.Valid && user.SessionsValidFrom.Time.Unix() > epoch {
-					_ = s.sessions.Destroy(ctx)
-					s.authenticationRequired(w)
-					return
-				}
-				ctx = context.WithValue(ctx, ctxUserID, user.ID)
-				ctx = context.WithValue(ctx, ctxOrgID, user.OrgID)
-				ctx = context.WithValue(ctx, ctxRole, user.Role)
-				ctx = context.WithValue(ctx, ctxAuthSource, "session")
-				ctx = context.WithValue(ctx, ctxCredentialPurpose, "session")
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
+		if user, err := s.nativeSessionUser(ctx); err == nil {
+			ctx = context.WithValue(ctx, ctxUserID, user.ID)
+			ctx = context.WithValue(ctx, ctxOrgID, user.OrgID)
+			ctx = context.WithValue(ctx, ctxRole, user.Role)
+			ctx = context.WithValue(ctx, ctxAuthSource, "session")
+			ctx = context.WithValue(ctx, ctxCredentialPurpose, "session")
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		} else if !errors.Is(err, errNativeSessionRequired) {
+			writeErr(w, http.StatusServiceUnavailable, "session could not be checked")
+			return
 		}
 		s.authenticationRequired(w)
 	})

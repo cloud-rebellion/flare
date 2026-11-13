@@ -50,10 +50,10 @@ func (s *Server) handleAnalyticsHealth(w http.ResponseWriter, r *http.Request) {
 		slogError(w, "get analytics export health", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toAnalyticsExportHealthResponse(s, row))
+	writeJSON(w, http.StatusOK, toAnalyticsExportHealthResponse(s, s.retentionPosture(r.Context()), row))
 }
 
-func toAnalyticsExportHealthResponse(s *Server, row *generated.GetExportHealthStatsRow) analyticsExportHealthResponse {
+func toAnalyticsExportHealthResponse(s *Server, posture retentionPosture, row *generated.GetExportHealthStatsRow) analyticsExportHealthResponse {
 	bytesKnown := row.BytesObservations > 0 && s.cfg.S3Endpoint == ""
 	exportedBytes := row.ExportedBytes
 	if !bytesKnown {
@@ -63,7 +63,7 @@ func toAnalyticsExportHealthResponse(s *Server, row *generated.GetExportHealthSt
 		Configured:        s.analytics != nil,
 		ColdTier:          analyticsColdTier(s.cfg.S3Endpoint != ""),
 		ConnectionStatus:  exportConnectionStatus(row.LatestStatus),
-		RetentionStatus:   retentionExportStatus(s, row.LatestStatus),
+		RetentionStatus:   retentionExportStatus(s, posture, row.LatestStatus),
 		QuotaStatus:       objectStoreQuotaStatus(s),
 		SuccessCount:      row.SuccessCount,
 		FailureCount:      row.FailureCount,
@@ -89,11 +89,11 @@ func toAnalyticsExportHealthResponse(s *Server, row *generated.GetExportHealthSt
 // claim that every aged partition has been archived. Likewise, a failed row
 // does not infer data loss or a rollback. The partition worker remains the
 // authority for export-before-drop enforcement.
-func retentionExportStatus(s *Server, status string) string {
-	if s.cfg.AllowDropWithoutExport {
+func retentionExportStatus(s *Server, posture retentionPosture, status string) string {
+	if posture.dropsUnarchived(s.analytics != nil) {
 		return "drop_without_export"
 	}
-	if s.analytics == nil {
+	if s.analytics == nil || !posture.Known {
 		return "paused"
 	}
 	switch status {

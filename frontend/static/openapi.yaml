@@ -64,6 +64,197 @@ components:
       name: session
       description: Browser session cookie (dashboard only; requires CSRF on writes).
   schemas:
+    RetentionPolicy:
+      {
+        "type": "object",
+        "required": [
+          "hot_retention_days",
+          "cold_mode"
+        ],
+        "properties": {
+          "hot_retention_days": {
+            "type": "integer",
+            "minimum": 7,
+            "maximum": 365,
+            "description": "Days a daily Postgres partition is kept before it is archived (or dropped when cold_mode is off). Today and pre-created future partitions are never dropped."
+          },
+          "cold_mode": {
+            "type": "string",
+            "enum": [
+              "forever",
+              "days",
+              "off"
+            ],
+            "description": "forever: archive to Parquet and never prune it (the default before this setting existed). days: archive, then prune archived days older than cold_retention_days. off: drop aged partitions WITHOUT exporting them; already-archived days are left in place."
+          },
+          "cold_retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 7,
+            "maximum": 3650,
+            "description": "Only with cold_mode=days; must be >= hot_retention_days."
+          }
+        }
+      }
+    RetentionExpected:
+      {
+        "type": "object",
+        "description": "The state the client decided against: the effective policy and updated_at (null when nothing is stored) from the view it loaded. A mismatch is answered with 409.",
+        "properties": {
+          "effective": {
+            "$ref": "#/components/schemas/RetentionPolicy"
+          },
+          "updated_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        }
+      }
+    RetentionUpdate:
+      {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RetentionPolicy"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "confirm_reduction": {
+                "type": "boolean",
+                "description": "Required (true) when the change keeps less data in either tier than the current effective policy; otherwise 409."
+              },
+              "expected": {
+                "$ref": "#/components/schemas/RetentionExpected"
+              }
+            }
+          }
+        ]
+      }
+    RetentionDay:
+      {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "approx_rows": {
+            "type": "integer",
+            "description": "Planner estimate (pg_class.reltuples); 0 for the cold tier."
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "files": {
+            "type": "integer"
+          }
+        }
+      }
+    RetentionSettings:
+      {
+        "type": "object",
+        "properties": {
+          "effective": {
+            "$ref": "#/components/schemas/RetentionPolicy"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "stored",
+              "env"
+            ],
+            "description": "stored: saved in the dashboard. env: RETENTION_DAYS / COLD_RETENTION_DAYS, used while nothing is stored."
+          },
+          "env_default": {
+            "$ref": "#/components/schemas/RetentionPolicy"
+          },
+          "stored": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RetentionPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": "string"
+          },
+          "bounds": {
+            "type": "object",
+            "properties": {
+              "hot_min": {
+                "type": "integer"
+              },
+              "hot_max": {
+                "type": "integer"
+              },
+              "cold_max": {
+                "type": "integer"
+              }
+            }
+          },
+          "today": {
+            "type": "string",
+            "format": "date",
+            "description": "UTC day the server computes cutoffs from."
+          },
+          "cold_tier": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "local",
+                  "s3",
+                  "unavailable"
+                ]
+              },
+              "prune_supported": {
+                "type": "boolean",
+                "description": "false for S3 (use a bucket lifecycle rule) and when DuckDB is unavailable."
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          },
+          "hot_paused_reason": {
+            "type": "string"
+          },
+          "hot": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetentionDay"
+            },
+            "description": "Dated hot partitions, summed across events/logs/spans/metrics."
+          },
+          "cold": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetentionDay"
+            },
+            "description": "Archived days in the local Parquet tier."
+          },
+          "last_pass": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What the most recent retention pass did (runs at startup and every 6 hours)."
+          }
+        }
+      }
     Error:
       type: object
       properties:
@@ -325,6 +516,14 @@ components:
         environment: { type: string }
         release: { type: string }
         received_at: { type: string, format: date-time }
+        tags:
+          type: array
+          description: Bounded string tags from the SDK, always scrubbed with their key as context. Scrubbed keys that collide get a numeric suffix. Client-written, treat as untrusted.
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              value: { type: string }
         stacktrace:
           type: object
           properties:
@@ -2117,6 +2316,120 @@ paths:
       summary: Export the workspace's structured data (admin)
       security: [{ session: [] }]
       responses: { "200": { description: JSON bundle } }
+  /api/settings/retention:
+    get:
+      {
+        "tags": [
+          "System"
+        ],
+        "summary": "Data retention settings (admin, operator workspace)",
+        "description": "Instance-wide: the partitions and the archive are shared by every workspace, so only admins and owners of the operator workspace (orgs.is_operator: the first workspace created on the instance) may read or change it. API keys cannot reach it. Changes apply on the next retention pass with no restart, and are recorded in the audit log.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective policy, its source, and an inventory for previewing a change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionSettings"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not an admin of the operator workspace, or CSRF failed"
+          }
+        }
+      }
+    put:
+      {
+        "tags": [
+          "System"
+        ],
+        "summary": "Store the data retention policy (admin, operator workspace)",
+        "description": "Instance-wide: the partitions and the archive are shared by every workspace, so only admins and owners of the operator workspace (orgs.is_operator: the first workspace created on the instance) may read or change it. API keys cannot reach it. Changes apply on the next retention pass with no restart, and are recorded in the audit log.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; the updated view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "out of bounds or malformed"
+          },
+          "403": {
+            "description": "not an admin of the operator workspace, or CSRF failed"
+          },
+          "409": {
+            "description": "the change removes data and confirm_reduction was not set, or expected no longer matches the stored policy; the body carries error and current (the fresh RetentionSettings view)"
+          }
+        }
+      }
+    delete:
+      {
+        "tags": [
+          "System"
+        ],
+        "summary": "Clear the stored policy so the env default applies (admin, operator workspace)",
+        "description": "Instance-wide: the partitions and the archive are shared by every workspace, so only admins and owners of the operator workspace (orgs.is_operator: the first workspace created on the instance) may read or change it. API keys cannot reach it. Changes apply on the next retention pass with no restart, and are recorded in the audit log.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "confirm_reduction",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Required when the env default keeps less data than the stored policy. May instead be sent in an optional JSON body {confirm_reduction, expected (RetentionExpected)}, which is what the dashboard does."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reset; the updated view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionSettings"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not an admin of the operator workspace, or CSRF failed"
+          },
+          "409": {
+            "description": "the change removes data and confirm_reduction was not set, or expected no longer matches the stored policy; the body carries error and current (the fresh RetentionSettings view)"
+          }
+        }
+      }
   /api/mcp:
     post:
       tags: [Projects]

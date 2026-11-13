@@ -99,6 +99,7 @@ type eventResponse struct {
 	Stacktrace         json.RawMessage `json:"stacktrace"`
 	TraceID            string          `json:"trace_id"`
 	SpanID             string          `json:"span_id"`
+	Tags               []eventTag      `json:"tags,omitempty"`
 	ReceivedAt         time.Time       `json:"received_at"`
 }
 
@@ -181,8 +182,10 @@ func (s *Server) handleListIssueEvents(w http.ResponseWriter, r *http.Request) {
 // miss). When sensitive is set (the issue's detector flagged a secret/PII
 // value), the WHOLE event is scrubbed, stack trace included: the detector reads
 // frame context lines, so leaving the stack raw served the flagged value from
-// the endpoint the flag exists to protect. Shared by the REST events endpoint
-// and the MCP get_issue tool.
+// the endpoint the flag exists to protect. Tags are scrubbed whether or not the
+// issue is flagged: they were not scanned on ingest until v0.6.7, so the flag says
+// nothing about the tags of an event stored before then. Shared by the REST events
+// endpoint and the MCP get_issue tool.
 func (s *Server) toEventResponses(ctx context.Context, issueID, org string, events []telemetry.Event, sensitive bool) []eventResponse {
 	releaseMaps := s.releaseSourceMaps(ctx, issueID, org, events)
 	nativeStatuses := s.releaseNativeSymbolStatuses(ctx, issueID, org, events)
@@ -197,7 +200,7 @@ func (s *Server) toEventResponses(ctx context.Context, issueID, org string, even
 			ExceptionType: e.ExceptionType, ExceptionValue: e.ExceptionValue,
 			Platform: e.Platform, Environment: e.Environment, Release: e.Release,
 			NativeSymbolStatus: nativeStatuses[e.Release],
-			Stacktrace:         stack, TraceID: e.TraceID, SpanID: e.SpanID, ReceivedAt: e.ReceivedAt,
+			Stacktrace:         stack, TraceID: e.TraceID, SpanID: e.SpanID, Tags: scan.Pairs(eventTags(e.Payload)), ReceivedAt: e.ReceivedAt,
 		})
 	}
 	if sensitive {

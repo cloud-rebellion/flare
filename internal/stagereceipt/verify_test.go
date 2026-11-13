@@ -118,12 +118,12 @@ func TestPinnedStagePeerKeepsHTTPSAuthority(t *testing.T) {
 			t.Fatalf("accepted unsafe endpoint %q", bad)
 		}
 	}
-	client := NewClient("100.118.61.16")
-	if client.invalidPin || !client.peerIP.Equal(net.ParseIP("100.118.61.16")) {
+	client := NewClient("100.64.0.10")
+	if client.invalidPin || !client.peerIP.Equal(net.ParseIP("100.64.0.10")) {
 		t.Fatal("exact peer pin missing")
 	}
 	target, err := pinnedDialTarget("stage.cloudrebellion.tech:443", client.peerIP)
-	if err != nil || target != "100.118.61.16:443" {
+	if err != nil || target != "100.64.0.10:443" {
 		t.Fatalf("pinned target = %q, %v", target, err)
 	}
 	if _, err := pinnedDialTarget("other.example:8443", client.peerIP); err == nil {
@@ -136,7 +136,7 @@ func TestPinnedStagePeerKeepsHTTPSAuthority(t *testing.T) {
 	if !NewClient("not-an-ip").invalidPin {
 		t.Fatal("invalid pin accepted")
 	}
-	if ValidatePeerIP("100.118.61.16") != nil || ValidatePeerIP("") != nil || ValidatePeerIP("not-an-ip") == nil {
+	if ValidatePeerIP("100.64.0.10") != nil || ValidatePeerIP("") != nil || ValidatePeerIP("not-an-ip") == nil {
 		t.Fatal("operator peer pin validation is not exact")
 	}
 }

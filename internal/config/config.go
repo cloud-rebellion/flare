@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bright-interaction/flare/internal/oidc"
+	"github.com/bright-interaction/flare/internal/retention"
 )
 
 type Config struct {
@@ -31,6 +34,12 @@ type Config struct {
 	DBMaxConns    int32
 	DBMinConns    int32
 	RetentionDays int
+	// ColdRetentionMode / ColdRetentionDays are the env default for the
+	// Parquet archive (COLD_RETENTION_DAYS): empty or "forever" keeps it
+	// forever, N prunes archive days older than N. Like RetentionDays they
+	// are only the fallback: a policy saved in the dashboard wins.
+	ColdRetentionMode retention.ColdMode
+	ColdRetentionDays int
 
 	// IngestRatePerMin caps events per minute per DSN key (or per IP when no
 	// key), so a captured DSN cannot flood the write path.
@@ -117,6 +126,18 @@ type Config struct {
 	// Tailscale address). Only this exact IP may bypass the private-IP dial
 	// guard; the HTTPS URL hostname still controls TLS certificate validation.
 	StageVerifyPeerIP string
+	// Operator-owned exception for one canonical CloudRebellion issuer/peer.
+	// Empty keeps every tenant issuer on the normal public-only transport.
+	OIDCPrivateIssuer string
+	OIDCPeerIP        string
+	// Default false. For that exact operator issuer only, reject unknown
+	// issuer/subject identities rather than email-linking or JIT provisioning.
+	OIDCPrelinkedOnly bool
+	// Optional assurance and portal launch apply only to this exact org ID.
+	// Empty defaults retain every organization's ordinary OIDC behavior.
+	OIDCRequiredACR string
+	OIDCRequiredAMR string
+	OIDCLaunchOrgID string
 }
 
 func (c Config) IsProduction() bool { return c.Environment == "production" }
@@ -166,6 +187,12 @@ func Load() (Config, error) {
 		SecretKey:              env("FLARE_SECRET_KEY", ""),
 		StageVerifyURL:         env("FLARE_STAGE_VERIFY_URL", ""),
 		StageVerifyPeerIP:      env("FLARE_STAGE_VERIFY_PEER_IP", ""),
+		OIDCPrivateIssuer:      env("FLARE_OIDC_PRIVATE_ISSUER", ""),
+		OIDCPeerIP:             env("FLARE_OIDC_PEER_IP", ""),
+		OIDCPrelinkedOnly:      isTrue(env("FLARE_OIDC_PRELINKED_ONLY", "")),
+		OIDCRequiredACR:        env("FLARE_OIDC_REQUIRED_ACR", ""),
+		OIDCRequiredAMR:        env("FLARE_OIDC_REQUIRED_AMR", ""),
+		OIDCLaunchOrgID:        env("FLARE_OIDC_LAUNCH_ORG_ID", ""),
 		// isTrue, not == "true". Both of these currently fail SAFE, but three
 		// booleans parsed three ways in one struct literal is how the next one
 		// lands on the wrong side.
@@ -173,6 +200,19 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if err := oidc.ValidateOperatorPolicy(c.OIDCPrivateIssuer, c.OIDCPeerIP); err != nil {
+		return c, fmt.Errorf("operator OIDC policy: %w", err)
+	}
+	if c.OIDCPrelinkedOnly && c.OIDCPrivateIssuer == "" {
+		return c, fmt.Errorf("FLARE_OIDC_PRELINKED_ONLY requires the explicit operator issuer and peer pin")
+	}
+	c.ColdRetentionMode, c.ColdRetentionDays, err = retention.ParseColdEnv(os.Getenv("COLD_RETENTION_DAYS"))
+	if err != nil {
+		return c, err
+	}
+	if c.ColdRetentionMode == retention.ColdDays && c.ColdRetentionDays < c.RetentionDays {
+		return c, fmt.Errorf("COLD_RETENTION_DAYS (%d) must be at least RETENTION_DAYS (%d): the archive would be pruned before the hot copy is dropped", c.ColdRetentionDays, c.RetentionDays)
+	}
 	c.MCPAllowedOrigins, err = parseMCPAllowedOrigins(os.Getenv("FLARE_MCP_ALLOWED_ORIGINS"), c.IsProduction())
 	if err != nil {
 		return c, fmt.Errorf("FLARE_MCP_ALLOWED_ORIGINS: %w", err)

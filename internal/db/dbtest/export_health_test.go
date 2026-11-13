@@ -25,7 +25,7 @@ func TestExportHealthStatsRecordsBoundedColdTierState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("baseline export health: %v", err)
 	}
-	base := pgtype.Timestamptz{Time: time.Now().UTC().Add(time.Hour), Valid: true}
+	base := pgtype.Timestamptz{Time: time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond), Valid: true}
 	rows := []struct {
 		status string
 		code   string

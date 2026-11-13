@@ -28,7 +28,10 @@ func Struct(v any) {
 	walk(reflect.ValueOf(v), "")
 }
 
-var rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+var (
+	rawMessageType = reflect.TypeOf(json.RawMessage(nil))
+	pairsType      = reflect.TypeOf([]KeyValue(nil))
+)
 
 func walk(v reflect.Value, field string) {
 	switch v.Kind() {
@@ -49,6 +52,10 @@ func walk(v reflect.Value, field string) {
 			if v.CanSet() && v.Len() > 0 {
 				v.SetBytes(JSON(v.Bytes()))
 			}
+			return
+		}
+		if v.Type() == pairsType {
+			Pairs(v.Interface().([]KeyValue))
 			return
 		}
 		for i := 0; i < v.Len(); i++ {

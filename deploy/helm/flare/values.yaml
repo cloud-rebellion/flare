@@ -2,7 +2,7 @@ image:
   repository: flare
   # Version label. Tags can be moved by a registry; set digest for an exact
   # image and a reliable rollback target. Keep tag aligned with flare/VERSION.
-  tag: v0.6.6
+  tag: v0.6.7
   # Optional digest of the image built from sourceCommit (sha256:<64 hex>).
   # When present the Deployment selects repository@digest instead of the tag.
   digest: ""
@@ -34,6 +34,9 @@ hubspotOAuth:
 
 # Days telemetry is kept in Postgres before export-to-Parquet + drop.
 retentionDays: 30
+# Parquet archive retention in days (>= retentionDays). Empty keeps it forever.
+# Both values are defaults; Settings > Data retention in the dashboard wins.
+coldRetentionDays: ""
 
 # Retention only drops a partition once it is archived to the cold tier. An
 # unreachable cold tier PAUSES retention (partitions accumulate, error logged

@@ -103,7 +103,7 @@ func TestMonitorFailureOutboxGenerationsAndRecovery(t *testing.T) {
 	if _, err := s.q.UpsertMonitorCheckin(ctx, monitorCheckinParams(org, projects[0], "flapping", "ok", time.Now().UTC())); err != nil {
 		t.Fatal(err)
 	}
-	secondAt := time.Now().UTC()
+	secondAt := time.Now().UTC().Truncate(time.Microsecond)
 	if err := s.recordFailedMonitorCheckin(ctx, monitorCheckinParams(org, projects[0], "flapping", "failed", secondAt), channels); err != nil {
 		t.Fatal(err)
 	}

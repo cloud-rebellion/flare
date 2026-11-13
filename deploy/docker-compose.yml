@@ -17,7 +17,7 @@ services:
         # provider credentials here: build args are embedded in the bundle.
         FLARE_DSN: "${FLARE_DSN:-}"
         FLARE_ENVIRONMENT: "${FLARE_ENVIRONMENT:-production}"
-        FLARE_RELEASE: "${FLARE_RELEASE:-v0.6.6}"
+        FLARE_RELEASE: "${FLARE_RELEASE:-v0.6.7}"
         FLARE_COMMIT: "${FLARE_COMMIT:-}"
     image: flare:latest
     container_name: flare
@@ -30,7 +30,7 @@ services:
       FLARE_MCP_ALLOWED_ORIGINS: "${FLARE_MCP_ALLOWED_ORIGINS:-}"
       # Must match the FLARE_RELEASE build arg above; the server rejects a
       # release image when its runtime identity does not match the binary.
-      FLARE_RELEASE: "${FLARE_RELEASE:-v0.6.6}"
+      FLARE_RELEASE: "${FLARE_RELEASE:-v0.6.7}"
       FLARE_COMMIT: "${FLARE_COMMIT:-}"
       FLARE_STAGE_VERIFY_URL: "${FLARE_STAGE_VERIFY_URL:-}"
       FLARE_STAGE_VERIFY_PEER_IP: "${FLARE_STAGE_VERIFY_PEER_IP:-}"
@@ -39,6 +39,7 @@ services:
       FLARE_SECRET_KEY: "${FLARE_SECRET_KEY:?set FLARE_SECRET_KEY in .env (openssl rand -base64 32)}"
       DATABASE_URL: "postgres://flare:${FLARE_DB_PASSWORD:?set FLARE_DB_PASSWORD in .env}@flare-db:5432/flare?sslmode=disable"
       RETENTION_DAYS: "${FLARE_RETENTION_DAYS:-30}"
+      COLD_RETENTION_DAYS: "${FLARE_COLD_RETENTION_DAYS:-}"
       FLARE_PARQUET_DIR: /app/data/parquet
     depends_on:
       flare-db:

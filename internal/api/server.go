@@ -30,6 +30,7 @@ import (
 	"github.com/bright-interaction/flare/internal/integration"
 	"github.com/bright-interaction/flare/internal/metrics"
 	flareopenai "github.com/bright-interaction/flare/internal/openai"
+	"github.com/bright-interaction/flare/internal/partition"
 	"github.com/bright-interaction/flare/internal/ratelimit"
 	"github.com/bright-interaction/flare/internal/secretbox"
 	"github.com/bright-interaction/flare/internal/slack"
@@ -50,7 +51,8 @@ type Server struct {
 	q                  *generated.Queries
 	pool               *pgxpool.Pool
 	store              telemetry.Store
-	analytics          *analytics.Manager // may be nil when DuckDB failed to open
+	analytics          *analytics.Manager      // may be nil when DuckDB failed to open
+	retentionStatus    func() partition.Status // last retention pass; nil in tests
 	sessions           *scs.SessionManager
 	cfg                config.Config
 	dispatcher         *alerts.Dispatcher

@@ -7,6 +7,8 @@ package generated
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countOrgs = `-- name: CountOrgs :one
@@ -21,9 +23,9 @@ func (q *Queries) CountOrgs(ctx context.Context) (int64, error) {
 }
 
 const createOrg = `-- name: CreateOrg :one
-INSERT INTO orgs (id, name, slug)
-VALUES ($1, $2, $3)
-RETURNING id, name, slug, created_at
+INSERT INTO orgs (id, name, slug, is_operator)
+VALUES ($1, $2, $3, NOT EXISTS (SELECT 1 FROM orgs))
+RETURNING id, name, slug, created_at, is_operator
 `
 
 type CreateOrgParams struct {
@@ -32,6 +34,10 @@ type CreateOrgParams struct {
 	Slug string `json:"slug"`
 }
 
+// The first org on an instance becomes the operator workspace (migration
+// 093); every later one is a tenant. Only an EMPTY instance hands out the
+// flag: orgs with no operator is a broken state a human repairs, never a
+// prize for the next registrant. Callers hold LockOperatorOrg.
 func (q *Queries) CreateOrg(ctx context.Context, arg CreateOrgParams) (*Org, error) {
 	row := q.db.QueryRow(ctx, createOrg, arg.ID, arg.Name, arg.Slug)
 	var i Org
@@ -40,6 +46,7 @@ func (q *Queries) CreateOrg(ctx context.Context, arg CreateOrgParams) (*Org, err
 		&i.Name,
 		&i.Slug,
 		&i.CreatedAt,
+		&i.IsOperator,
 	)
 	return &i, err
 }
@@ -74,11 +81,13 @@ func (q *Queries) DeleteSessionsForUsers(ctx context.Context, userIds []string) 
 }
 
 const getFirstOrg = `-- name: GetFirstOrg :one
-SELECT id, name, slug, created_at FROM orgs ORDER BY created_at ASC LIMIT 1
+SELECT id, name, slug, created_at, is_operator FROM orgs ORDER BY is_operator DESC, created_at ASC, id ASC LIMIT 1
 `
 
-// The oldest org, used as the system/owner scope for Flare's own security
-// events (e.g. an ingest-auth rejection that matches no project has no org).
+// The system/owner scope for Flare's own security events (e.g. an ingest-auth
+// rejection that matches no project has no org): the operator workspace, or
+// the oldest org if none is flagged. id breaks a created_at tie so the answer
+// never depends on the plan.
 func (q *Queries) GetFirstOrg(ctx context.Context) (*Org, error) {
 	row := q.db.QueryRow(ctx, getFirstOrg)
 	var i Org
@@ -87,12 +96,32 @@ func (q *Queries) GetFirstOrg(ctx context.Context) (*Org, error) {
 		&i.Name,
 		&i.Slug,
 		&i.CreatedAt,
+		&i.IsOperator,
+	)
+	return &i, err
+}
+
+const getOperatorOrg = `-- name: GetOperatorOrg :one
+SELECT id, name, slug, created_at, is_operator FROM orgs WHERE is_operator
+`
+
+// The operator workspace, which alone may manage instance-wide settings.
+// No row means no operator, and callers refuse (never fall back to "oldest").
+func (q *Queries) GetOperatorOrg(ctx context.Context) (*Org, error) {
+	row := q.db.QueryRow(ctx, getOperatorOrg)
+	var i Org
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.CreatedAt,
+		&i.IsOperator,
 	)
 	return &i, err
 }
 
 const getOrgByID = `-- name: GetOrgByID :one
-SELECT id, name, slug, created_at FROM orgs WHERE id = $1
+SELECT id, name, slug, created_at, is_operator FROM orgs WHERE id = $1
 `
 
 func (q *Queries) GetOrgByID(ctx context.Context, id string) (*Org, error) {
@@ -103,12 +132,13 @@ func (q *Queries) GetOrgByID(ctx context.Context, id string) (*Org, error) {
 		&i.Name,
 		&i.Slug,
 		&i.CreatedAt,
+		&i.IsOperator,
 	)
 	return &i, err
 }
 
 const getOrgBySlug = `-- name: GetOrgBySlug :one
-SELECT id, name, slug, created_at FROM orgs WHERE slug = $1
+SELECT id, name, slug, created_at, is_operator FROM orgs WHERE slug = $1
 `
 
 func (q *Queries) GetOrgBySlug(ctx context.Context, slug string) (*Org, error) {
@@ -119,6 +149,32 @@ func (q *Queries) GetOrgBySlug(ctx context.Context, slug string) (*Org, error) {
 		&i.Name,
 		&i.Slug,
 		&i.CreatedAt,
+		&i.IsOperator,
 	)
 	return &i, err
+}
+
+const lockOperatorOrg = `-- name: LockOperatorOrg :exec
+SELECT pg_advisory_xact_lock(hashtext('flare.operator_org'))
+`
+
+// Serialises everything that decides who the operator workspace is: org
+// creation and org deletion. Without it a registration committing inside an
+// operator delete saw the operator still present and became a tenant, and the
+// instance was left with orgs but no operator.
+func (q *Queries) LockOperatorOrg(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockOperatorOrg)
+	return err
+}
+
+const operatorOrgMissing = `-- name: OperatorOrgMissing :one
+SELECT EXISTS (SELECT 1 FROM orgs) AND NOT EXISTS (SELECT 1 FROM orgs WHERE is_operator)
+`
+
+// True when workspaces exist but none is the operator (checked at boot).
+func (q *Queries) OperatorOrgMissing(ctx context.Context) (pgtype.Bool, error) {
+	row := q.db.QueryRow(ctx, operatorOrgMissing)
+	var column_1 pgtype.Bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
